@@ -41,6 +41,14 @@ analysis:
 
 The server listens on `127.0.0.1:3000`.
 
+## Testing
+
+Run the unit tests to verify the logic:
+
+```bash
+cargo test
+```
+
 ## Usage
 
 ### 1. Proxy Chat Completion
