@@ -50,3 +50,27 @@ pub fn get_api_key(config_key: &str) -> String {
         config_key.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_get_api_key_raw() {
+        let key = "sk-12345";
+        assert_eq!(get_api_key(key), "sk-12345");
+    }
+
+    #[test]
+    fn test_get_api_key_env() {
+        env::set_var("TEST_API_KEY", "secret-value");
+        assert_eq!(get_api_key("env:TEST_API_KEY"), "secret-value");
+        env::remove_var("TEST_API_KEY");
+    }
+
+    #[test]
+    fn test_get_api_key_env_missing() {
+        assert_eq!(get_api_key("env:NON_EXISTENT_VAR"), "");
+    }
+}

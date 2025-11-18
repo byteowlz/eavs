@@ -1,5 +1,5 @@
 use crate::config::get_api_key;
-use crate::state::{AnalysisEvent, AppState};
+use crate::state::{AnalysisEvent, AppState, Injection};
 use axum::{
     body::Body,
     extract::{State, Request},
@@ -34,24 +34,7 @@ pub async fn proxy_handler(
 
     // Check for injections
     if let Some((_, injections)) = state.injections.remove(&conversation_id) {
-        if let Some(messages) = json_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            // Insert system messages at the beginning, others at end? 
-            // PRD says: "Insert system messages", "Append assistant messages"
-            // For simplicity MVP: Append all injections to the end, unless role is system.
-            // Actually, usually system prompt is first.
-            
-            for injection in injections {
-                let obj = serde_json::json!({
-                    "role": injection.role,
-                    "content": injection.content
-                });
-                if injection.role == "system" {
-                    messages.insert(0, obj);
-                } else {
-                    messages.push(obj);
-                }
-            }
-        }
+        apply_injections(&mut json_body, &injections);
     }
 
     // Log Request
@@ -117,4 +100,78 @@ pub async fn proxy_handler(
     *response.headers_mut() = headers;
 
     Ok(response)
+}
+
+fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
+    if let Some(messages) = json_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        // Insert system messages at the beginning, others at end
+        for injection in injections {
+            let obj = serde_json::json!({
+                "role": injection.role,
+                "content": injection.content
+            });
+            if injection.role == "system" {
+                messages.insert(0, obj);
+            } else {
+                messages.push(obj);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_apply_injections() {
+        let mut body = json!({
+            "model": "gpt-3.5",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let injections = vec![
+            Injection { role: "system".to_string(), content: "System Prompt".to_string() },
+            Injection { role: "assistant".to_string(), content: "Assistant Response".to_string() },
+        ];
+
+        apply_injections(&mut body, &injections);
+
+        let messages = body["messages"].as_array().unwrap();
+        
+        // Should have 3 messages now
+        assert_eq!(messages.len(), 3);
+        
+        // System prompt should be first
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "System Prompt");
+
+        // User message should be second (preserved)
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Hello");
+
+        // Assistant response should be last
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "Assistant Response");
+    }
+    
+    #[test]
+    fn test_apply_injections_no_messages() {
+        let mut body = json!({
+            "model": "gpt-3.5"
+        });
+        
+        let injections = vec![
+            Injection { role: "system".to_string(), content: "System Prompt".to_string() },
+        ];
+        
+        // Should not panic
+        apply_injections(&mut body, &injections);
+        
+        // Should stay same
+        assert!(body.get("messages").is_none());
+    }
 }
