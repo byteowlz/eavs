@@ -4,87 +4,176 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 
 ## Features
 
-- **Transparent Proxy**: Forwards OpenAI-compatible requests with zero latency.
-- **Live Logging**: Logs all requests and streamed responses to an internal broadcast channel.
-- **Context Injection**: Pre-request injection of system or user messages via a control API.
-- **Control API**: Manage injections and stream logs in real-time.
+- **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Azure, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
+- **Transparent Proxy**: Forwards requests with zero latency
+- **Live Logging**: Multiple backends (stdout, file, webhook, OpenTelemetry)
+- **Context Injection**: Pre-request injection of system or user messages
+- **Conversation State**: TTL-based state management with automatic cleanup
+- **Control API**: Manage injections, conversations, and stream logs in real-time
+
+## Quick Start
+
+```bash
+# Set your API key
+export OPENAI_API_KEY=your_key_here
+
+# Run the server
+cargo run
+
+# Test with curl
+curl http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer unused" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
 
 ## Configuration
 
-The application uses `config.yaml` in the root directory.
+EAVS uses TOML configuration. It looks for config files in:
+1. `$XDG_CONFIG_HOME/eavs/config.toml` (or `~/.config/eavs/config.toml`)
+2. `./config.toml` (current directory, overrides global)
 
-```yaml
-upstream:
-  default:
-    type: openai
-    api_key: "env:OPENAI_API_KEY" # Reads from environment variable
-    base_url: "https://api.openai.com/v1"
+### Providers
 
-logging:
-  sink: stdout
+Configure multiple providers and select at runtime via `X-Provider` header:
 
-analysis:
-  enabled: true
-  broadcast_channel_size: 1024
+```toml
+[providers.default]
+type = "openai"
+api_key = "env:OPENAI_API_KEY"
+
+[providers.anthropic]
+type = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+
+[providers.local]
+type = "ollama"
+base_url = "http://localhost:11434/v1"
 ```
 
-## Running
+Supported providers:
+- `openai` - OpenAI API
+- `anthropic` - Anthropic Claude
+- `google` - Google Gemini
+- `mistral` - Mistral AI
+- `groq` - Groq (fast inference)
+- `cerebras` - Cerebras
+- `xai` - xAI (Grok)
+- `openrouter` - OpenRouter
+- `azure` - Azure OpenAI
+- `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
 
-1. Set your OpenAI API key:
-   ```bash
-   export OPENAI_API_KEY=your_key_here
-   ```
-2. Run the server:
-   ```bash
-   cargo run
-   ```
+### Logging
 
-The server listens on `127.0.0.1:3000`.
+Configure multiple logging backends:
 
-## Testing
+```toml
+[logging]
+default = "stdout"
 
-Run the unit tests to verify the logic:
+[[logging.backends]]
+type = "stdout"
+format = "json"  # or "pretty"
+
+[[logging.backends]]
+type = "file"
+path = "./logs/eavs.jsonl"
+rotate = "daily"
+
+[[logging.backends]]
+type = "webhook"
+url = "https://your-service.com/logs"
+headers = { Authorization = "env:LOG_API_KEY" }
+batch_size = 100
+flush_interval_secs = 5
+```
+
+### Conversation State
+
+```toml
+[state]
+enabled = true
+ttl_secs = 3600              # 1 hour TTL
+cleanup_interval_secs = 60   # Cleanup every minute
+max_conversations = 10000    # Max concurrent conversations
+```
+
+## API Reference
+
+### Proxy Endpoints
+
+All `/v1/*` requests are forwarded to the configured upstream provider.
+
+```bash
+# Use default provider
+curl http://localhost:3000/v1/chat/completions ...
+
+# Use specific provider
+curl http://localhost:3000/v1/chat/completions \
+  -H "X-Provider: anthropic" ...
+
+# Track conversation
+curl http://localhost:3000/v1/chat/completions \
+  -H "X-Conversation-ID: my-session" ...
+```
+
+### Control API
+
+#### Health Check
+```bash
+curl http://localhost:3000/health
+```
+
+#### List Providers
+```bash
+curl http://localhost:3000/providers
+```
+
+#### Inject Context
+```bash
+curl -X POST http://localhost:3000/inject/my-conversation \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "system", "content": "You are a pirate."}]}'
+```
+
+#### Clear Injections
+```bash
+curl -X POST http://localhost:3000/clear/my-conversation
+```
+
+#### List Conversations
+```bash
+curl http://localhost:3000/conversations
+```
+
+#### Get Conversation Stats
+```bash
+curl http://localhost:3000/conversations/stats
+```
+
+#### Get Conversation Details
+```bash
+curl http://localhost:3000/conversations/my-conversation
+```
+
+#### Update Conversation Metadata
+```bash
+curl -X PATCH http://localhost:3000/conversations/my-conversation \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "anthropic", "tags": ["test"]}'
+```
+
+#### Stream Logs (SSE)
+```bash
+curl http://localhost:3000/logs/stream
+```
+
+## Running Tests
 
 ```bash
 cargo test
 ```
 
-## Usage
+## License
 
-### 1. Proxy Chat Completion
-
-Send requests to `http://localhost:3000/v1/chat/completions` just like the OpenAI API.
-
-```bash
-curl http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer unused" \
-  -H "X-Conversation-ID: my-conv-1" \
-  -d '{
-    "model": "gpt-3.5-turbo",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
-```
-
-### 2. Inject Context
-
-Inject messages into the next request for a specific conversation ID.
-
-```bash
-curl -X POST http://localhost:3000/inject/my-conv-1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      { "role": "system", "content": "You are a helpful pirate." }
-    ]
-  }'
-```
-
-### 3. Stream Logs
-
-Connect to the SSE endpoint to see live logs.
-
-```bash
-curl http://localhost:3000/logs/stream
-```
+MIT

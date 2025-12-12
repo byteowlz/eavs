@@ -1,53 +1,341 @@
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-#[allow(dead_code)]
+use crate::provider::{CompatSettings, ProviderType};
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    pub upstream: HashMap<String, UpstreamConfig>,
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+    /// Legacy support: map upstream -> providers
+    #[serde(default)]
+    pub upstream: HashMap<String, ProviderConfig>,
+    #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
     pub analysis: AnalysisConfig,
+    #[serde(default)]
+    pub state: StateConfig,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
-pub struct UpstreamConfig {
-    #[serde(rename = "type")]
+#[serde(default)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProviderConfig {
+    /// Provider type: openai, anthropic, google, azure, mistral, groq, cerebras, xai, openrouter, ollama, etc.
+    #[serde(rename = "type", default)]
     pub type_: String,
+    /// API key - supports "env:VAR_NAME" syntax or direct value
+    #[serde(default)]
     pub api_key: String,
+    /// Base URL - defaults based on provider type if not specified
+    #[serde(default)]
     pub base_url: String,
+    /// API version (primarily for Azure)
+    pub api_version: Option<String>,
+    /// Compatibility settings for OpenAI-compatible APIs
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub compat: CompatSettings,
+    /// Custom headers to add to requests
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
-#[allow(dead_code)]
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            type_: "openai".to_string(),
+            api_key: String::new(),
+            base_url: String::new(),
+            api_version: None,
+            compat: CompatSettings::default(),
+            headers: HashMap::new(),
+        }
+    }
+}
+
+impl ProviderConfig {
+    /// Get the resolved base URL (using provider defaults if not specified).
+    pub fn resolved_base_url(&self) -> String {
+        if !self.base_url.is_empty() {
+            self.base_url.clone()
+        } else {
+            let provider = ProviderType::from_str(&self.type_);
+            provider
+                .info()
+                .default_base_url
+                .unwrap_or("http://localhost:8000/v1")
+                .to_string()
+        }
+    }
+
+    /// Get the resolved API key (from env var if specified).
+    pub fn resolved_api_key(&self) -> String {
+        get_api_key(&self.api_key).unwrap_or_else(|| {
+            // Try provider-specific env var as fallback
+            let provider = ProviderType::from_str(&self.type_);
+            if let Some(env_name) = provider.info().env_key_name {
+                std::env::var(env_name).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        })
+    }
+
+    /// Get the provider type enum.
+    pub fn provider_type(&self) -> ProviderType {
+        ProviderType::from_str(&self.type_)
+    }
+
+    /// Get compat settings merged with URL-detected defaults.
+    #[allow(dead_code)]
+    pub fn resolved_compat(&self) -> CompatSettings {
+        self.compat
+            .clone()
+            .with_detected_defaults(&self.resolved_base_url())
+    }
+}
+
+/// Logging configuration with multiple backend support.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct LoggingConfig {
+    /// Default logging backend: "stdout", "file", "none"
+    pub default: String,
+    /// Additional logging backends
+    #[serde(default)]
+    pub backends: Vec<LogBackend>,
+    /// Legacy support for "sink" field
+    #[serde(default)]
     pub sink: String,
 }
 
-#[allow(dead_code)]
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            default: "stdout".to_string(),
+            backends: Vec::new(),
+            sink: String::new(),
+        }
+    }
+}
+
+impl LoggingConfig {
+    /// Get effective default backend (handles legacy "sink" field).
+    pub fn effective_default(&self) -> &str {
+        if !self.sink.is_empty() {
+            &self.sink
+        } else {
+            &self.default
+        }
+    }
+}
+
+/// Individual logging backend configuration.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum LogBackend {
+    /// Standard output logging
+    #[serde(rename = "stdout")]
+    Stdout {
+        /// Log format: "json" or "pretty"
+        #[serde(default = "default_format")]
+        format: String,
+    },
+    /// File-based logging
+    #[serde(rename = "file")]
+    File {
+        /// Path to log file
+        path: String,
+        /// Rotation strategy: "daily", "size", "none"
+        #[serde(default)]
+        rotate: String,
+        /// Max file size in bytes (for size-based rotation)
+        #[serde(default)]
+        #[allow(dead_code)]
+        max_size: Option<u64>,
+    },
+    /// Webhook/HTTP endpoint
+    #[serde(rename = "webhook")]
+    Webhook {
+        /// URL to POST logs to
+        url: String,
+        /// Custom headers (supports env: syntax for secrets)
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        /// Batch size before sending
+        #[serde(default = "default_batch_size")]
+        batch_size: usize,
+        /// Flush interval in seconds
+        #[serde(default = "default_flush_interval")]
+        flush_interval_secs: u64,
+    },
+    /// OpenTelemetry export
+    #[serde(rename = "otel", alias = "opentelemetry")]
+    OpenTelemetry {
+        /// OTLP endpoint
+        endpoint: String,
+        /// Protocol: "grpc" or "http"
+        #[serde(default = "default_otel_protocol")]
+        protocol: String,
+        /// Service name for traces
+        #[serde(default = "default_service_name")]
+        service_name: String,
+    },
+}
+
+fn default_format() -> String {
+    "json".to_string()
+}
+
+fn default_batch_size() -> usize {
+    100
+}
+
+fn default_flush_interval() -> u64 {
+    5
+}
+
+fn default_otel_protocol() -> String {
+    "grpc".to_string()
+}
+
+fn default_service_name() -> String {
+    "eavs".to_string()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct AnalysisConfig {
     pub enabled: bool,
     pub broadcast_channel_size: usize,
 }
 
-impl AppConfig {
-    pub fn load() -> Result<Self, ConfigError> {
-        let s = Config::builder()
-            .add_source(File::with_name("config"))
-            .build()?;
-
-        s.try_deserialize()
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            broadcast_channel_size: 1024,
+        }
     }
 }
 
-pub fn get_api_key(config_key: &str) -> String {
-    if config_key.starts_with("env:") {
-        let var_name = &config_key[4..];
-        std::env::var(var_name).unwrap_or_else(|_| "".to_string())
+/// Configuration for conversation state storage.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct StateConfig {
+    /// Enable conversation state storage
+    pub enabled: bool,
+    /// TTL for conversation state in seconds (0 = no expiration)
+    pub ttl_secs: u64,
+    /// How often to run cleanup in seconds
+    pub cleanup_interval_secs: u64,
+    /// Maximum number of conversations to store (0 = unlimited)
+    pub max_conversations: usize,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_secs: 3600,            // 1 hour default
+            cleanup_interval_secs: 60, // Cleanup every minute
+            max_conversations: 10000,  // Max 10k conversations
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self, ConfigError> {
+        let mut builder = Config::builder();
+
+        // 1. XDG Config (User Global)
+        let xdg_path = Self::get_xdg_config_path();
+        if let Some(path) = xdg_path {
+            if path.exists() {
+                tracing::info!("Loading config from XDG path: {:?}", path);
+                builder = builder.add_source(File::from(path).required(false));
+            }
+        }
+
+        // 2. Local Config (Current Directory) - Overrides global
+        if std::path::Path::new("config.toml").exists() {
+            tracing::info!("Loading config from local path: config.toml");
+            builder = builder.add_source(File::from(std::path::Path::new("config.toml")));
+        } else if std::path::Path::new("config.yaml").exists() {
+            tracing::info!("Loading config from local path: config.yaml");
+            builder = builder.add_source(File::from(std::path::Path::new("config.yaml")));
+        }
+
+        let mut config: AppConfig = builder.build()?.try_deserialize()?;
+
+        // Merge legacy "upstream" into "providers" for backward compatibility
+        if config.providers.is_empty() && !config.upstream.is_empty() {
+            config.providers = config.upstream.clone();
+        }
+
+        // Ensure we have at least a default provider
+        if config.providers.is_empty() {
+            config.providers.insert(
+                "default".to_string(),
+                ProviderConfig {
+                    type_: "openai".to_string(),
+                    api_key: "env:OPENAI_API_KEY".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        Ok(config)
+    }
+
+    fn get_xdg_config_path() -> Option<PathBuf> {
+        let config_home = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok()?;
+
+        Some(config_home.join("eavs").join("config.toml"))
+    }
+
+    /// Get a provider config by name, falling back to "default".
+    pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
+        self.providers
+            .get(name)
+            .or_else(|| self.providers.get("default"))
+    }
+}
+
+/// Resolve API key from config value.
+/// Supports "env:VAR_NAME" syntax to read from environment variables.
+pub fn get_api_key(config_key: &str) -> Option<String> {
+    if config_key.is_empty() {
+        return None;
+    }
+
+    if let Some(var_name) = config_key.strip_prefix("env:") {
+        std::env::var(var_name).ok()
     } else {
-        config_key.to_string()
+        Some(config_key.to_string())
     }
 }
 
@@ -59,18 +347,227 @@ mod tests {
     #[test]
     fn test_get_api_key_raw() {
         let key = "sk-12345";
-        assert_eq!(get_api_key(key), "sk-12345");
+        assert_eq!(get_api_key(key), Some("sk-12345".to_string()));
     }
 
     #[test]
     fn test_get_api_key_env() {
         env::set_var("TEST_API_KEY", "secret-value");
-        assert_eq!(get_api_key("env:TEST_API_KEY"), "secret-value");
+        assert_eq!(get_api_key("env:TEST_API_KEY"), Some("secret-value".to_string()));
         env::remove_var("TEST_API_KEY");
     }
 
     #[test]
     fn test_get_api_key_env_missing() {
-        assert_eq!(get_api_key("env:NON_EXISTENT_VAR"), "");
+        assert_eq!(get_api_key("env:NON_EXISTENT_VAR"), None);
+    }
+
+    #[test]
+    fn test_get_api_key_empty_string() {
+        assert_eq!(get_api_key(""), None);
+    }
+
+    #[test]
+    fn test_provider_config_resolved_base_url() {
+        let config = ProviderConfig {
+            type_: "openai".to_string(),
+            base_url: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_base_url(), "https://api.openai.com/v1");
+
+        let config_with_url = ProviderConfig {
+            type_: "openai".to_string(),
+            base_url: "https://custom.api.com/v1".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config_with_url.resolved_base_url(),
+            "https://custom.api.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_provider_config_resolved_api_key_fallback() {
+        env::set_var("OPENAI_API_KEY", "fallback-key");
+        let config = ProviderConfig {
+            type_: "openai".to_string(),
+            api_key: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_api_key(), "fallback-key");
+        env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn test_logging_config_effective_default() {
+        // New style
+        let config = LoggingConfig {
+            default: "file".to_string(),
+            sink: String::new(),
+            backends: Vec::new(),
+        };
+        assert_eq!(config.effective_default(), "file");
+
+        // Legacy style
+        let legacy = LoggingConfig {
+            default: "stdout".to_string(),
+            sink: "file".to_string(),
+            backends: Vec::new(),
+        };
+        assert_eq!(legacy.effective_default(), "file");
+    }
+
+    #[test]
+    fn test_provider_config_deserialization() {
+        let toml_str = r#"
+            type = "anthropic"
+            api_key = "env:ANTHROPIC_API_KEY"
+            base_url = "https://api.anthropic.com/v1"
+        "#;
+
+        let config: ProviderConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.type_, "anthropic");
+        assert_eq!(config.provider_type(), ProviderType::Anthropic);
+    }
+
+    #[test]
+    fn test_provider_config_with_compat() {
+        let toml_str = r#"
+            type = "openai-compatible"
+            api_key = "dummy"
+            base_url = "http://localhost:8000/v1"
+            
+            [compat]
+            supports_store = false
+            max_tokens_field = "max_tokens"
+        "#;
+
+        let config: ProviderConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.compat.supports_store.unwrap());
+    }
+
+    #[test]
+    fn test_logging_backend_deserialization() {
+        let toml_str = r#"
+            [[backends]]
+            type = "stdout"
+            format = "pretty"
+            
+            [[backends]]
+            type = "file"
+            path = "./logs/eavs.jsonl"
+            rotate = "daily"
+            
+            [[backends]]
+            type = "webhook"
+            url = "https://example.com/logs"
+            batch_size = 50
+            flush_interval_secs = 10
+            
+            [[backends]]
+            type = "otel"
+            endpoint = "http://localhost:4317"
+            protocol = "grpc"
+        "#;
+
+        let config: LoggingConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.backends.len(), 4);
+
+        match &config.backends[0] {
+            LogBackend::Stdout { format } => assert_eq!(format, "pretty"),
+            _ => panic!("Expected Stdout backend"),
+        }
+
+        match &config.backends[1] {
+            LogBackend::File { path, rotate, .. } => {
+                assert_eq!(path, "./logs/eavs.jsonl");
+                assert_eq!(rotate, "daily");
+            }
+            _ => panic!("Expected File backend"),
+        }
+
+        match &config.backends[2] {
+            LogBackend::Webhook {
+                url,
+                batch_size,
+                flush_interval_secs,
+                ..
+            } => {
+                assert_eq!(url, "https://example.com/logs");
+                assert_eq!(*batch_size, 50);
+                assert_eq!(*flush_interval_secs, 10);
+            }
+            _ => panic!("Expected Webhook backend"),
+        }
+
+        match &config.backends[3] {
+            LogBackend::OpenTelemetry {
+                endpoint,
+                protocol,
+                ..
+            } => {
+                assert_eq!(endpoint, "http://localhost:4317");
+                assert_eq!(protocol, "grpc");
+            }
+            _ => panic!("Expected OpenTelemetry backend"),
+        }
+    }
+
+    #[test]
+    fn test_full_app_config_deserialization() {
+        let toml_str = r#"
+            [server]
+            host = "0.0.0.0"
+            port = 8080
+
+            [providers.default]
+            type = "openai"
+            api_key = "env:OPENAI_API_KEY"
+
+            [providers.anthropic]
+            type = "anthropic"
+            api_key = "env:ANTHROPIC_API_KEY"
+
+            [providers.local]
+            type = "ollama"
+            base_url = "http://localhost:11434/v1"
+
+            [logging]
+            default = "stdout"
+
+            [analysis]
+            enabled = true
+            broadcast_channel_size = 512
+        "#;
+
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.providers.len(), 3);
+        assert!(config.providers.contains_key("default"));
+        assert!(config.providers.contains_key("anthropic"));
+        assert!(config.providers.contains_key("local"));
+        assert!(config.analysis.enabled);
+    }
+
+    #[test]
+    fn test_xdg_config_path_with_xdg_env() {
+        let original = env::var("XDG_CONFIG_HOME").ok();
+        env::set_var("XDG_CONFIG_HOME", "/tmp/test-xdg");
+
+        let path = AppConfig::get_xdg_config_path();
+        assert!(path.is_some());
+        assert_eq!(
+            path.unwrap(),
+            PathBuf::from("/tmp/test-xdg/eavs/config.toml")
+        );
+
+        if let Some(val) = original {
+            env::set_var("XDG_CONFIG_HOME", val);
+        } else {
+            env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 }
