@@ -1,10 +1,9 @@
-use crate::config::get_api_key;
 use crate::state::{AnalysisEvent, AppState, Injection};
 use axum::{
     body::Body,
-    extract::{State, Request},
-    response::Response,
+    extract::{Request, State},
     http::StatusCode,
+    response::Response,
 };
 use futures::stream::StreamExt;
 use serde_json::Value;
@@ -16,25 +15,44 @@ pub async fn proxy_handler(
 ) -> Result<Response, StatusCode> {
     // 1. Generate Correlation ID
     let correlation_id = Uuid::new_v4().to_string();
-    let conversation_id = req.headers()
+
+    // Extract conversation ID and provider selection from headers
+    let conversation_id = req
+        .headers()
         .get("X-Conversation-ID")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string());
+
+    // Allow selecting provider via header (e.g., X-Provider: anthropic)
+    let provider_name = req
+        .headers()
+        .get("X-Provider")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "default".to_string());
 
     // 2. Read and modify body if needed (Pre-request Injection)
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
     let mut json_body: Value = if !bytes.is_empty() {
-         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     } else {
         Value::Null
     };
 
-    // Check for injections
-    if let Some((_, injections)) = state.injections.remove(&conversation_id) {
+    // Check for injections (new conversation store)
+    let injections = state.conversations.take_injections(&conversation_id);
+    if !injections.is_empty() {
         apply_injections(&mut json_body, &injections);
+    }
+
+    // Legacy fallback: check old injections map
+    if let Some((_, legacy_injections)) = state.injections.remove(&conversation_id) {
+        apply_injections(&mut json_body, &legacy_injections);
     }
 
     // Log Request
@@ -47,25 +65,72 @@ pub async fn proxy_handler(
     });
 
     // Re-serialize body
-    let new_body_bytes = serde_json::to_vec(&json_body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_body_bytes =
+        serde_json::to_vec(&json_body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // 3. Prepare Upstream Request
-    // Assuming "default" upstream for MVP
-    let upstream_config = state.config.upstream.get("default").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let api_key = get_api_key(&upstream_config.api_key);
-    let url = format!("{}{}", upstream_config.base_url, parts.uri.path());
+    // 3. Get provider configuration
+    let provider_config = state
+        .config
+        .get_provider(&provider_name)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let upstream_req = state.client
-        .request(parts.method.clone(), url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .body(new_body_bytes);
+    let api_key = provider_config.resolved_api_key();
+    let provider_type = provider_config.provider_type();
 
-    // Copy headers (excluding host, auth, etc if needed, but keeping it simple)
-    // Ideally we shouldn't blindly copy all headers, but for transparency...
-    
+    // Construct URL
+    let base = provider_config.resolved_base_url();
+    let base = base.trim_end_matches('/');
+    let path = parts.uri.path();
+    let mut url = format!("{}{}", base, path);
+
+    // Handle Query Parameters (Original + API Version for Azure)
+    let mut query_string = parts
+        .uri
+        .query()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    if let Some(ref ver) = provider_config.api_version {
+        if !query_string.is_empty() {
+            query_string.push('&');
+        }
+        query_string.push_str(&format!("api-version={}", ver));
+    }
+
+    if !query_string.is_empty() {
+        url.push('?');
+        url.push_str(&query_string);
+    }
+
+    // Build request with provider-specific auth and headers
+    let mut upstream_req = state
+        .client
+        .request(parts.method.clone(), &url)
+        .header("Content-Type", "application/json");
+
+    upstream_req = provider_type.apply_auth(upstream_req, &api_key);
+    upstream_req = provider_type.apply_extra_headers(upstream_req);
+
+    // Add custom headers from provider config
+    for (key, value) in &provider_config.headers {
+        let resolved_value = if let Some(var_name) = value.strip_prefix("env:") {
+            std::env::var(var_name).unwrap_or_default()
+        } else {
+            value.clone()
+        };
+        upstream_req = upstream_req.header(key, resolved_value);
+    }
+
+    let upstream_req = upstream_req.body(new_body_bytes);
+
     // Execute Upstream Request
-    let upstream_res = upstream_req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let upstream_res = upstream_req
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("Upstream request failed: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
 
     // 4. Stream Response
     let status = upstream_res.status();
@@ -75,35 +140,31 @@ pub async fn proxy_handler(
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 
-    let stream_with_logging = stream.map(move |chunk_result| {
-        match chunk_result {
-            Ok(chunk) => {
-                // Log chunk
-                // Note: Raw bytes might not be valid UTF-8 string if split mid-character, 
-                // but for logging tokens we usually assume it works out or we handle it carefully.
-                // For MVP, lossy conversion is acceptable for the "live analysis" log.
-                let text = String::from_utf8_lossy(&chunk).to_string();
-                let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                    id: correlation_id_clone.clone(),
-                    chunk: text,
-                });
-                Ok(chunk)
-            },
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+    let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
+        Ok(chunk) => {
+            let text = String::from_utf8_lossy(&chunk).to_string();
+            let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                id: correlation_id_clone.clone(),
+                chunk: text,
+            });
+            Ok(chunk)
         }
+        Err(e) => Err(std::io::Error::other(e)),
     });
 
     let mut response = Response::new(Body::from_stream(stream_with_logging));
     *response.status_mut() = status;
-    // Copy headers from upstream to downstream
     *response.headers_mut() = headers;
 
     Ok(response)
 }
 
 fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
-    if let Some(messages) = json_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+    if let Some(messages) = json_body
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+    {
         // Insert system messages at the beginning, others at end
         for injection in injections {
             let obj = serde_json::json!({
@@ -134,17 +195,23 @@ mod tests {
         });
 
         let injections = vec![
-            Injection { role: "system".to_string(), content: "System Prompt".to_string() },
-            Injection { role: "assistant".to_string(), content: "Assistant Response".to_string() },
+            Injection {
+                role: "system".to_string(),
+                content: "System Prompt".to_string(),
+            },
+            Injection {
+                role: "assistant".to_string(),
+                content: "Assistant Response".to_string(),
+            },
         ];
 
         apply_injections(&mut body, &injections);
 
         let messages = body["messages"].as_array().unwrap();
-        
+
         // Should have 3 messages now
         assert_eq!(messages.len(), 3);
-        
+
         // System prompt should be first
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "System Prompt");
@@ -157,21 +224,195 @@ mod tests {
         assert_eq!(messages[2]["role"], "assistant");
         assert_eq!(messages[2]["content"], "Assistant Response");
     }
-    
+
     #[test]
     fn test_apply_injections_no_messages() {
         let mut body = json!({
             "model": "gpt-3.5"
         });
-        
-        let injections = vec![
-            Injection { role: "system".to_string(), content: "System Prompt".to_string() },
-        ];
-        
+
+        let injections = vec![Injection {
+            role: "system".to_string(),
+            content: "System Prompt".to_string(),
+        }];
+
         // Should not panic
         apply_injections(&mut body, &injections);
-        
+
         // Should stay same
         assert!(body.get("messages").is_none());
+    }
+
+    #[test]
+    fn test_apply_injections_multiple_system_messages() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let injections = vec![
+            Injection {
+                role: "system".to_string(),
+                content: "First system".to_string(),
+            },
+            Injection {
+                role: "system".to_string(),
+                content: "Second system".to_string(),
+            },
+        ];
+
+        apply_injections(&mut body, &injections);
+
+        let messages = body["messages"].as_array().unwrap();
+
+        // Should have 3 messages
+        assert_eq!(messages.len(), 3);
+
+        // Both system messages should be at the beginning
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_apply_injections_empty_injections() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let injections: Vec<Injection> = vec![];
+        apply_injections(&mut body, &injections);
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_apply_injections_preserves_other_fields() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let injections = vec![Injection {
+            role: "system".to_string(),
+            content: "Be concise".to_string(),
+        }];
+
+        apply_injections(&mut body, &injections);
+
+        // Other fields should be preserved
+        assert_eq!(body["model"], "gpt-4");
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 1000);
+    }
+
+    #[test]
+    fn test_apply_injections_with_existing_system_message() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "Original system"},
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let injections = vec![Injection {
+            role: "system".to_string(),
+            content: "Injected system".to_string(),
+        }];
+
+        apply_injections(&mut body, &injections);
+
+        let messages = body["messages"].as_array().unwrap();
+
+        // Should have 3 messages now
+        assert_eq!(messages.len(), 3);
+
+        // Injected system should be first
+        assert_eq!(messages[0]["content"], "Injected system");
+        // Original system second
+        assert_eq!(messages[1]["content"], "Original system");
+        // User message last
+        assert_eq!(messages[2]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_apply_injections_user_and_assistant_roles() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Original user"}
+            ]
+        });
+
+        let injections = vec![
+            Injection {
+                role: "user".to_string(),
+                content: "Injected user".to_string(),
+            },
+            Injection {
+                role: "assistant".to_string(),
+                content: "Injected assistant".to_string(),
+            },
+        ];
+
+        apply_injections(&mut body, &injections);
+
+        let messages = body["messages"].as_array().unwrap();
+
+        // Should have 3 messages
+        assert_eq!(messages.len(), 3);
+
+        // Original user first
+        assert_eq!(messages[0]["content"], "Original user");
+        // Injected user second (appended)
+        assert_eq!(messages[1]["content"], "Injected user");
+        // Injected assistant last (appended)
+        assert_eq!(messages[2]["content"], "Injected assistant");
+    }
+
+    #[test]
+    fn test_apply_injections_messages_not_array() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": "not an array"
+        });
+
+        let injections = vec![Injection {
+            role: "system".to_string(),
+            content: "System".to_string(),
+        }];
+
+        // Should not panic, just do nothing
+        apply_injections(&mut body, &injections);
+
+        // Body should remain unchanged
+        assert_eq!(body["messages"], "not an array");
+    }
+
+    #[test]
+    fn test_apply_injections_null_body() {
+        let mut body = Value::Null;
+
+        let injections = vec![Injection {
+            role: "system".to_string(),
+            content: "System".to_string(),
+        }];
+
+        // Should not panic
+        apply_injections(&mut body, &injections);
+
+        assert!(body.is_null());
     }
 }

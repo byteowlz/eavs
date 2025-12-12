@@ -23,3 +23,6 @@ clap = { version = "4", features = ["derive"] }
 once_cell = "1.19"
 dashmap = "5.5" # For concurrent state map
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+
+[dev-dependencies]
+toml = "0.8"
