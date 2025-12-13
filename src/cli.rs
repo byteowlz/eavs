@@ -164,7 +164,7 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://localhost:3000", env = "EAVS_URL")]
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
     },
 
@@ -179,7 +179,7 @@ pub enum TestCommands {
         key: String,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://localhost:3000", env = "EAVS_URL")]
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
     },
 
@@ -218,7 +218,7 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://localhost:3000", env = "EAVS_URL")]
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
 
         /// Output format
@@ -229,7 +229,7 @@ pub enum TestCommands {
     /// Check proxy health and configuration
     Health {
         /// EAVS server URL
-        #[arg(long, default_value = "http://localhost:3000", env = "EAVS_URL")]
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
 
         /// Output format
@@ -256,7 +256,7 @@ impl Default for CliConfig {
     fn default() -> Self {
         Self {
             server_url: std::env::var("EAVS_URL")
-                .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string()),
             master_key: std::env::var("EAVS_MASTER_KEY").ok(),
             timeout: Duration::from_secs(30),
         }
@@ -266,7 +266,7 @@ impl Default for CliConfig {
 /// Client for talking to EAVS server
 pub struct EavsClient {
     client: reqwest::Client,
-    config: CliConfig,
+    pub config: CliConfig,
 }
 
 impl EavsClient {
@@ -386,9 +386,8 @@ impl EavsClient {
             });
         }
 
-        Ok(())
-    }
-
+    Ok(())
+}
     /// Get usage history for a key
     pub async fn get_usage(&self, key_hash: &str, days: u32) -> Result<Vec<UsageRecord>, CliError> {
         let url = format!("{}/admin/keys/{}/usage", self.config.server_url, key_hash);
@@ -534,7 +533,19 @@ impl EavsClient {
             });
         }
 
-        resp.json().await.map_err(CliError::Request)
+        // Try to parse as JSON, but health endpoint may return empty body
+        let text = resp.text().await.unwrap_or_default();
+        if text.is_empty() {
+            Ok(HealthResponse {
+                status: "ok".to_string(),
+                version: None,
+                uptime_secs: None,
+            })
+        } else {
+            serde_json::from_str(&text).map_err(|e| {
+                CliError::Other(format!("Failed to parse health response: {}", e))
+            })
+        }
     }
 
     /// List providers
@@ -1304,4 +1315,153 @@ pub async fn run_test_bench(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Server Auto-Start Functionality
+// =============================================================================
+
+/// Result of checking/starting an EAVS server
+pub struct ServerStatus {
+    pub url: String,
+    pub port: u16,
+    pub was_started: bool,
+}
+
+/// Check if a port is available for binding
+pub fn is_port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Check if an EAVS server is running at the given URL
+pub async fn is_eavs_server_running(url: &str) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+
+    let health_url = format!("{}/health", url);
+    match client.get(&health_url).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                // Check that we don't get HTML (which would indicate a non-EAVS server)
+                if let Ok(text) = resp.text().await {
+                    // EAVS returns empty body or JSON, never HTML
+                    !text.contains("<!DOCTYPE") && !text.contains("<html")
+                } else {
+                    // Empty body is OK for EAVS health endpoint
+                    true
+                }
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Find an available port starting from the given port
+pub fn find_available_port(start_port: u16) -> u16 {
+    let mut port = start_port;
+    let max_port = start_port + 100; // Try up to 100 ports
+
+    while port < max_port {
+        if is_port_available(port) {
+            return port;
+        }
+        port += 1;
+    }
+
+    // If we couldn't find a port, return the start port and let it fail later
+    start_port
+}
+
+/// Start the EAVS server in the background
+pub fn start_server_background(
+    port: u16,
+    config_path: Option<&str>,
+) -> Result<std::process::Child, CliError> {
+    let exe_path = std::env::current_exe().map_err(|e| {
+        CliError::Other(format!("Failed to get current executable path: {}", e))
+    })?;
+
+    let mut cmd = std::process::Command::new(&exe_path);
+    cmd.arg("serve")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    if let Some(config) = config_path {
+        cmd.arg("--config").arg(config);
+    }
+
+    cmd.spawn().map_err(|e| {
+        CliError::Other(format!("Failed to start EAVS server: {}", e))
+    })
+}
+
+/// Ensure an EAVS server is running, starting one if necessary.
+/// Returns the URL of the running server.
+pub async fn ensure_server_running(
+    preferred_url: &str,
+    config_path: Option<&str>,
+) -> Result<ServerStatus, CliError> {
+    // Parse the preferred URL to get host and port
+    let url = url::Url::parse(preferred_url).map_err(|e| {
+        CliError::Other(format!("Invalid URL '{}': {}", preferred_url, e))
+    })?;
+
+    let host = url.host_str().unwrap_or("127.0.0.1");
+    let preferred_port = url.port().unwrap_or(3000);
+
+    // First, check if EAVS is already running at the preferred URL
+    if is_eavs_server_running(preferred_url).await {
+        return Ok(ServerStatus {
+            url: preferred_url.to_string(),
+            port: preferred_port,
+            was_started: false,
+        });
+    }
+
+    // Check if something else is running on that port (non-EAVS)
+    let port = if !is_port_available(preferred_port) {
+        // Port is in use but not by EAVS, find another port
+        let new_port = find_available_port(preferred_port + 1);
+        eprintln!(
+            "Port {} is in use by another application, using port {} instead",
+            preferred_port, new_port
+        );
+        new_port
+    } else {
+        preferred_port
+    };
+
+    // Start the server
+    eprintln!("Starting EAVS server on port {}...", port);
+    let _child = start_server_background(port, config_path)?;
+
+    // Build the new URL
+    let new_url = format!("{}://{}:{}", url.scheme(), host, port);
+
+    // Wait for the server to be ready (with timeout)
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(10);
+
+    while start.elapsed() < timeout {
+        if is_eavs_server_running(&new_url).await {
+            eprintln!("EAVS server started successfully");
+            return Ok(ServerStatus {
+                url: new_url,
+                port,
+                was_started: true,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    Err(CliError::Other(format!(
+        "Timed out waiting for EAVS server to start on port {}",
+        port
+    )))
 }
