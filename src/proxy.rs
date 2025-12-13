@@ -1,3 +1,4 @@
+use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::state::{AnalysisEvent, AppState, Injection};
 use crate::transform::{
     build_openai_sse_response, parse_incoming_request, ProviderTransformer,
@@ -7,20 +8,61 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
+    Json,
 };
 use bytes::Bytes;
 use futures::stream::StreamExt;
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+/// Error response for proxy errors.
+#[derive(Serialize)]
+struct ProxyError {
+    error: ProxyErrorDetail,
+}
+
+#[derive(Serialize)]
+struct ProxyErrorDetail {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+    code: Option<String>,
+}
+
+impl ProxyError {
+    fn new(message: impl Into<String>, error_type: impl Into<String>) -> Self {
+        Self {
+            error: ProxyErrorDetail {
+                message: message.into(),
+                error_type: error_type.into(),
+                code: None,
+            },
+        }
+    }
+
+    fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.error.code = Some(code.into());
+        self
+    }
+}
+
 pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     // 1. Generate Correlation ID
     let correlation_id = Uuid::new_v4().to_string();
+
+    // Extract Authorization header for key validation
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
 
     // Extract conversation ID and provider selection from headers
     let conversation_id = req
@@ -42,12 +84,71 @@ pub async fn proxy_handler(
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX)
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new("Failed to read request body", "invalid_request")),
+            )
+                .into_response()
+        })?;
 
     let mut json_body: Value = if !bytes.is_empty() {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     } else {
         Value::Null
+    };
+
+    // Extract model from request for validation
+    let model = json_body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // 3. Validate virtual API key if present
+    // Note: validated_key is used for tracking usage after response completes
+    #[allow(unused_variables)]
+    let validated_key: Option<ValidatedKey> = if let Some(ref key) = auth_header {
+        if is_virtual_key(key) {
+            // This is a virtual key - validate it
+            if let Some(validator) = state.get_key_validator() {
+                // Estimate tokens for rate limiting
+                let estimated_tokens = state
+                    .get_cost_calculator()
+                    .map(|calc| calc.estimate_request_tokens(&json_body, &model))
+                    .unwrap_or(0);
+
+                match validator
+                    .validate(key, &model, &provider_name, Some(estimated_tokens))
+                    .await
+                {
+                    Ok(validated) => Some(validated),
+                    Err(e) => {
+                        return Err((
+                            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+                            Json(ProxyError::new(e.to_string(), "authentication_error")
+                                .with_code(e.error_code())),
+                        )
+                            .into_response());
+                    }
+                }
+            } else {
+                // Keys enabled in request but validator not initialized
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ProxyError::new(
+                        "Virtual API keys are not available",
+                        "service_unavailable",
+                    )),
+                )
+                    .into_response());
+            }
+        } else {
+            // Not a virtual key - pass through
+            None
+        }
+    } else {
+        None
     };
 
     // Check for injections (new conversation store)
@@ -70,12 +171,19 @@ pub async fn proxy_handler(
         body: json_body.clone(),
     });
 
-    // 3. Get provider configuration
+    // 4. Get provider configuration
     let provider_config = state
         .config
         .get_provider(&provider_name)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ProxyError::new("Provider not found", "configuration_error")),
+            )
+                .into_response()
+        })?;
 
+    // Use real API key from provider config (virtual key was just for auth)
     let api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
 
@@ -90,7 +198,11 @@ pub async fn proxy_handler(
         // Parse incoming OpenAI-format request to canonical Context
         let context = parse_incoming_request(&json_body).map_err(|e| {
             tracing::error!("Failed to parse request: {}", e);
-            StatusCode::BAD_REQUEST
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(format!("Failed to parse request: {}", e), "invalid_request")),
+            )
+                .into_response()
         })?;
         
         let model = context.model.clone();
@@ -98,14 +210,32 @@ pub async fn proxy_handler(
         // Transform to target provider format
         let transformed = transformer.transform_request(&context).map_err(|e| {
             tracing::error!("Failed to transform request: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ProxyError::new(format!("Failed to transform request: {}", e), "internal_error")),
+            )
+                .into_response()
         })?;
         
-        (serde_json::to_vec(&transformed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, model)
+        let body = serde_json::to_vec(&transformed).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ProxyError::new(format!("Failed to serialize request: {}", e), "internal_error")),
+            )
+                .into_response()
+        })?;
+        (body, model)
     } else {
         // Pass through for OpenAI-compatible providers
         let model = json_body["model"].as_str().unwrap_or("unknown").to_string();
-        (serde_json::to_vec(&json_body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, model)
+        let body = serde_json::to_vec(&json_body).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ProxyError::new(format!("Failed to serialize request: {}", e), "internal_error")),
+            )
+                .into_response()
+        })?;
+        (body, model)
     };
 
     // Construct URL with transformer's endpoint path if transforming
@@ -168,7 +298,11 @@ pub async fn proxy_handler(
         .await
         .map_err(|e| {
             tracing::error!("Upstream request failed: {}", e);
-            StatusCode::BAD_GATEWAY
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(format!("Upstream request failed: {}", e), "upstream_error")),
+            )
+                .into_response()
         })?;
 
     // 5. Stream Response with optional transformation
@@ -179,12 +313,23 @@ pub async fn proxy_handler(
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 
+    // Prepare usage tracking state for virtual keys
+    let usage_tracker: Option<UsageTracker> = validated_key.as_ref().map(|vk| UsageTracker {
+        key_hash: vk.key_hash.clone(),
+        model: model.clone(),
+        provider: provider_name.clone(),
+        input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+    });
+
     if needs_transform {
         // Transform response from provider format back to OpenAI format
         let stream_state = Arc::new(Mutex::new(StreamState::default()));
         let transformer = Arc::new(ProviderTransformer::for_provider(provider_type));
         let model_for_stream = model_name.clone();
         let request_id = correlation_id.clone();
+        let tracker_clone = usage_tracker.clone();
         
         let stream_with_transform = stream.map(move |chunk_result| {
             match chunk_result {
@@ -204,6 +349,23 @@ pub async fn proxy_handler(
                         Ok(events) => {
                             let mut output = String::new();
                             for event in events {
+                                // Track usage from Usage event
+                                if let crate::types::StreamEvent::Usage { usage } = &event {
+                                    if let Some(tracker) = &tracker_clone {
+                                        tracker.input_tokens.store(
+                                            usage.prompt_tokens,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        tracker.output_tokens.store(
+                                            usage.completion_tokens,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        tracker.cached_tokens.store(
+                                            usage.cache_read_input_tokens.unwrap_or(0),
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                    }
+                                }
                                 output.push_str(&build_openai_sse_response(&event, &request_id, &model_for_stream));
                             }
                             Ok(Bytes::from(output))
@@ -231,12 +393,30 @@ pub async fn proxy_handler(
             "no-cache".parse().unwrap(),
         );
         
+        // Schedule usage recording after response completes
+        // Note: For streaming, usage is captured above and will be recorded when stream ends
+        if let Some(tracker) = usage_tracker {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                // Give time for stream to complete and usage to be captured
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                record_usage_from_tracker(&state_clone, &tracker).await;
+            });
+        }
+        
         Ok(response)
     } else {
         // Pass through without transformation
+        let tracker_clone = usage_tracker.clone();
         let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
             Ok(chunk) => {
                 let text = String::from_utf8_lossy(&chunk).to_string();
+                
+                // Try to extract usage from OpenAI-format streaming responses
+                if let Some(tracker) = &tracker_clone {
+                    extract_openai_usage(&text, tracker);
+                }
+                
                 let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
                     timestamp: chrono::Utc::now().timestamp_millis(),
                     id: correlation_id_clone.clone(),
@@ -251,7 +431,98 @@ pub async fn proxy_handler(
         *response.status_mut() = status;
         *response.headers_mut() = headers;
 
+        // Schedule usage recording after response completes
+        if let Some(tracker) = usage_tracker {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                // Give time for stream to complete and usage to be captured
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                record_usage_from_tracker(&state_clone, &tracker).await;
+            });
+        }
+
         Ok(response)
+    }
+}
+
+/// Tracks usage during streaming for virtual keys.
+#[derive(Clone)]
+struct UsageTracker {
+    key_hash: String,
+    model: String,
+    provider: String,
+    input_tokens: Arc<std::sync::atomic::AtomicU32>,
+    output_tokens: Arc<std::sync::atomic::AtomicU32>,
+    cached_tokens: Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// Extract usage from OpenAI-format streaming chunks.
+fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
+    // OpenAI sends usage in the final chunk with stream_options.include_usage=true
+    // Format: data: {"id":"...","usage":{"prompt_tokens":10,"completion_tokens":20,...}}
+    for line in chunk.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(json) = serde_json::from_str::<Value>(data) {
+                if let Some(usage) = json.get("usage") {
+                    if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                        tracker.input_tokens.store(input as u32, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                        tracker.output_tokens.store(output as u32, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if let Some(cached) = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                    {
+                        tracker.cached_tokens.store(cached as u32, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Record usage from tracker to the key validator.
+async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
+    let input = tracker.input_tokens.load(std::sync::atomic::Ordering::SeqCst);
+    let output = tracker.output_tokens.load(std::sync::atomic::Ordering::SeqCst);
+    let cached = tracker.cached_tokens.load(std::sync::atomic::Ordering::SeqCst);
+    
+    // Only record if we have any usage data
+    if input == 0 && output == 0 {
+        return;
+    }
+    
+    // Calculate cost
+    let cost = if let Some(calc) = state.get_cost_calculator() {
+        calc.calculate_actual_cost(&tracker.model, input, output, cached).await
+    } else {
+        0.0
+    };
+    
+    // Record to validator
+    if let Some(validator) = state.get_key_validator() {
+        validator
+            .record_usage(
+                &tracker.key_hash,
+                input,
+                output,
+                cached,
+                cost,
+                &tracker.model,
+                &tracker.provider,
+            )
+            .await;
+        
+        tracing::debug!(
+            key_hash = %tracker.key_hash,
+            input_tokens = input,
+            output_tokens = output,
+            cached_tokens = cached,
+            cost_usd = cost,
+            "Recorded usage for virtual key"
+        );
     }
 }
 

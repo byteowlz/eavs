@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub analysis: AnalysisConfig,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
+    pub keys: KeysConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -264,6 +266,64 @@ impl Default for StateConfig {
     }
 }
 
+/// Configuration for virtual API keys.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct KeysConfig {
+    /// Enable virtual API key support
+    pub enabled: bool,
+    /// Path to the SQLite database file
+    pub database_path: String,
+    /// Master key for admin API (if not set, admin API is disabled)
+    pub master_key: Option<String>,
+    /// Allow self-provisioning of keys (without master key)
+    pub allow_self_provisioning: bool,
+    /// Default rate limit for new keys (requests per minute, 0 = unlimited)
+    pub default_rpm_limit: Option<u32>,
+    /// Default budget for new keys (USD, None = unlimited)
+    pub default_budget_usd: Option<f64>,
+    /// Update pricing from LiteLLM on startup
+    pub update_pricing_on_startup: bool,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            database_path: "~/.eavs/keys.db".to_string(),
+            master_key: None,
+            allow_self_provisioning: false,
+            default_rpm_limit: None,
+            default_budget_usd: None,
+            update_pricing_on_startup: false,
+        }
+    }
+}
+
+impl KeysConfig {
+    /// Get the resolved database path (expanding ~).
+    pub fn resolved_database_path(&self) -> PathBuf {
+        let path = &self.database_path;
+        if let Some(stripped) = path.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(stripped);
+            }
+        }
+        PathBuf::from(path)
+    }
+
+    /// Get the master key (from env if specified).
+    pub fn resolved_master_key(&self) -> Option<String> {
+        self.master_key.as_ref().and_then(|k| {
+            if let Some(var_name) = k.strip_prefix("env:") {
+                std::env::var(var_name).ok()
+            } else {
+                Some(k.clone())
+            }
+        })
+    }
+}
+
 impl AppConfig {
     pub fn load() -> Result<Self, ConfigError> {
         let mut builder = Config::builder();
@@ -286,6 +346,16 @@ impl AppConfig {
             builder = builder.add_source(File::from(std::path::Path::new("config.yaml")));
         }
 
+        Self::finalize_config(builder)
+    }
+
+    /// Load configuration from a specific file path.
+    pub fn load_from(path: &str) -> Result<Self, ConfigError> {
+        let builder = Config::builder().add_source(File::from(std::path::Path::new(path)));
+        Self::finalize_config(builder)
+    }
+
+    fn finalize_config(builder: config::ConfigBuilder<config::builder::DefaultState>) -> Result<Self, ConfigError> {
         let mut config: AppConfig = builder.build()?.try_deserialize()?;
 
         // Merge legacy "upstream" into "providers" for backward compatibility

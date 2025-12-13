@@ -19,10 +19,19 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 once_cell = "1.19"
 dashmap = "5.5" # For concurrent state map
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+
+# Virtual API Keys
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tiktoken-rs = "0.6"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+governor = "0.8" # Rate limiting
+glob-match = "0.2" # For model pattern matching
 
 [dev-dependencies]
 toml = "0.8"
