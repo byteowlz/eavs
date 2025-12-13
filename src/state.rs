@@ -1,11 +1,12 @@
 use crate::config::{AppConfig, StateConfig};
+use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
 use dashmap::DashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, OnceCell};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,6 +18,16 @@ pub struct AppState {
     pub injections: Arc<DashMap<String, Vec<Injection>>>,
     /// Broadcast channel for analysis logs
     pub analysis_tx: broadcast::Sender<AnalysisEvent>,
+    /// Virtual API key store (lazily initialized)
+    pub key_store: Arc<OnceCell<Arc<KeyStore>>>,
+    /// Key validator (lazily initialized)
+    pub key_validator: Arc<OnceCell<Arc<KeyValidator>>>,
+    /// Rate limiter for keys
+    pub rate_limiter: Arc<RateLimiter>,
+    /// Pricing table for cost calculation
+    pub pricing: SharedPricingTable,
+    /// Cost calculator
+    pub cost_calculator: Arc<OnceCell<CostCalculator>>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -295,6 +306,7 @@ impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let (tx, _) = broadcast::channel(config.analysis.broadcast_channel_size);
         let conversations = Arc::new(ConversationStore::new(config.state.clone()));
+        let pricing = SharedPricingTable::new();
 
         Self {
             config: Arc::new(config),
@@ -302,14 +314,80 @@ impl AppState {
             conversations,
             injections: Arc::new(DashMap::new()), // Legacy support
             analysis_tx: tx,
+            key_store: Arc::new(OnceCell::new()),
+            key_validator: Arc::new(OnceCell::new()),
+            rate_limiter: Arc::new(RateLimiter::new()),
+            pricing: pricing.clone(),
+            cost_calculator: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Initialize the key store (call during startup if keys are enabled).
+    pub async fn init_key_store(&self) -> Result<(), String> {
+        if !self.config.keys.enabled {
+            return Ok(());
+        }
+
+        let db_path = self.config.keys.resolved_database_path();
+        tracing::info!("Initializing key store at {:?}", db_path);
+
+        let store = KeyStore::new(&db_path)
+            .await
+            .map_err(|e| format!("Failed to initialize key store: {}", e))?;
+
+        let store = Arc::new(store);
+        self.key_store
+            .set(store.clone())
+            .map_err(|_| "Key store already initialized")?;
+
+        // Initialize validator
+        let validator = KeyValidator::new(store.clone(), self.rate_limiter.clone());
+        self.key_validator
+            .set(Arc::new(validator))
+            .map_err(|_| "Key validator already initialized")?;
+
+        // Initialize cost calculator
+        let calculator = CostCalculator::new(self.pricing.clone());
+        self.cost_calculator
+            .set(calculator)
+            .map_err(|_| "Cost calculator already initialized")?;
+
+        // Update pricing if configured
+        if self.config.keys.update_pricing_on_startup {
+            match self.pricing.update_from_litellm().await {
+                Ok(count) => tracing::info!("Updated pricing for {} models from LiteLLM", count),
+                Err(e) => tracing::warn!("Failed to update pricing from LiteLLM: {}", e),
+            }
+        }
+
+        tracing::info!(
+            "Key store initialized with {} active keys",
+            store.active_key_count()
+        );
+
+        Ok(())
+    }
+
+    /// Get the key store if initialized.
+    pub fn get_key_store(&self) -> Option<&Arc<KeyStore>> {
+        self.key_store.get()
+    }
+
+    /// Get the key validator if initialized.
+    pub fn get_key_validator(&self) -> Option<&Arc<KeyValidator>> {
+        self.key_validator.get()
+    }
+
+    /// Get the cost calculator if initialized.
+    pub fn get_cost_calculator(&self) -> Option<&CostCalculator> {
+        self.cost_calculator.get()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnalysisConfig, LoggingConfig, ProviderConfig, ServerConfig};
+    use crate::config::{AnalysisConfig, KeysConfig, LoggingConfig, ProviderConfig, ServerConfig};
     use std::collections::HashMap;
     use std::thread::sleep;
     use std::time::Duration;
@@ -335,6 +413,7 @@ mod tests {
                 enabled: true,
                 broadcast_channel_size: 16,
             },
+            keys: KeysConfig::default(),
             state: StateConfig::default(),
         }
     }

@@ -1,5 +1,7 @@
 mod api;
+mod cli;
 mod config;
+mod keys;
 mod logging;
 mod provider;
 mod proxy;
@@ -7,19 +9,47 @@ mod state;
 mod transform;
 mod types;
 
+use crate::cli::{
+    run_key_create, run_key_info, run_key_list, run_key_revoke, run_key_usage, run_test_bench,
+    run_test_chat, run_test_health, run_test_rate_limit, Cli, CliConfig, Commands, EavsClient,
+    KeyCommands, TestCommands,
+};
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
 use crate::state::{start_cleanup_task, AppState};
 use axum::{
-    routing::{any, get, patch, post},
+    routing::{any, delete, get, patch, post},
     Router,
 };
+use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Serve { host, port, config } => {
+            run_server(host, port, config).await;
+        }
+        Commands::Key { action } => {
+            if let Err(e) = run_key_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Test { action } => {
+            if let Err(e) = run_test_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option<String>) {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -29,7 +59,20 @@ async fn main() {
         .init();
 
     // Load config
-    let config = AppConfig::load().expect("Failed to load configuration");
+    let mut config = if let Some(path) = config_path {
+        AppConfig::load_from(&path).expect("Failed to load configuration")
+    } else {
+        AppConfig::load().expect("Failed to load configuration")
+    };
+
+    // Override with CLI args
+    if let Some(h) = host {
+        config.server.host = h;
+    }
+    if let Some(p) = port {
+        config.server.port = p;
+    }
+
     tracing::info!("Configuration loaded");
     tracing::info!(
         "Available providers: {:?}",
@@ -46,11 +89,20 @@ async fn main() {
     let logger = Arc::new(Logger::from_config(&config.logging));
     tracing::info!("Logging backends: {:?}", logger.sink_names());
 
-    // Store cleanup interval before moving config
+    // Store cleanup interval and keys config before moving config
     let cleanup_interval = config.state.cleanup_interval_secs;
+    let keys_enabled = config.keys.enabled;
 
     // Initialize state
     let state = AppState::new(config);
+
+    // Initialize key store if enabled
+    if keys_enabled {
+        if let Err(e) = state.init_key_store().await {
+            tracing::error!("Failed to initialize key store: {}", e);
+            // Continue without keys - they're optional
+        }
+    }
 
     // Start logging task
     let log_rx = state.analysis_tx.subscribe();
@@ -68,20 +120,128 @@ async fn main() {
         // Control API - Conversations
         .route("/conversations", get(api::conversations_handler))
         .route("/conversations/stats", get(api::stats_handler))
-        .route("/conversations/:conversation_id", get(api::conversation_handler))
-        .route("/conversations/:conversation_id", patch(api::update_conversation_handler))
+        .route(
+            "/conversations/:conversation_id",
+            get(api::conversation_handler),
+        )
+        .route(
+            "/conversations/:conversation_id",
+            patch(api::update_conversation_handler),
+        )
         // Control API - Injections
         .route("/inject/:conversation_id", post(api::inject_handler))
         .route("/clear/:conversation_id", post(api::clear_handler))
         // Control API - Logs
         .route("/logs/stream", get(api::logs_stream_handler))
+        // Admin API - Virtual Keys
+        .route("/admin/keys", post(api::create_key_handler))
+        .route("/admin/keys", get(api::list_keys_handler))
+        .route("/admin/keys/stats", get(api::key_stats_handler))
+        .route("/admin/keys/:key_hash", get(api::get_key_handler))
+        .route("/admin/keys/:key_hash", delete(api::delete_key_handler))
+        .route("/admin/keys/:key_hash/usage", get(api::key_usage_handler))
+        // Admin API - Pricing
+        .route("/admin/pricing/update", post(api::update_pricing_handler))
+        // Self-provisioning endpoint
+        .route("/keys/provision", post(api::provision_key_handler))
         // Proxy API (capture all /v1 methods)
         .route("/v1/*path", any(proxy::proxy_handler))
         .with_state(state);
 
     // Run server
     tracing::info!("Listening on {}", addr);
+    if keys_enabled {
+        tracing::info!("Virtual API keys: enabled");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
+    let client = EavsClient::new(CliConfig::default());
+
+    match action {
+        KeyCommands::Create {
+            name,
+            models,
+            blocked_models,
+            providers,
+            rpm,
+            tpm,
+            rpd,
+            budget,
+            expires,
+            format,
+        } => {
+            run_key_create(
+                &client,
+                name,
+                models,
+                blocked_models,
+                providers,
+                rpm,
+                tpm,
+                rpd,
+                budget,
+                expires,
+                format,
+            )
+            .await
+        }
+        KeyCommands::List { all, format } => run_key_list(&client, all, format).await,
+        KeyCommands::Info { key, format } => run_key_info(&client, key, format).await,
+        KeyCommands::Revoke { key, yes } => run_key_revoke(&client, key, yes).await,
+        KeyCommands::Usage { key, days, format } => run_key_usage(&client, key, days, format).await,
+    }
+}
+
+async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
+    match action {
+        TestCommands::Chat {
+            message,
+            provider,
+            model,
+            key,
+            stream,
+            url,
+        } => {
+            let client = EavsClient::with_url(url);
+            run_test_chat(&client, message, model, provider, key, stream).await
+        }
+        TestCommands::RateLimit { count, key, url } => {
+            let client = EavsClient::with_url(url);
+            run_test_rate_limit(&client, count, key).await
+        }
+        TestCommands::Bench {
+            count,
+            provider,
+            model,
+            key,
+            compare_direct,
+            direct_url,
+            direct_key,
+            stream,
+            url,
+            format,
+        } => {
+            run_test_bench(
+                count,
+                provider,
+                model,
+                key,
+                compare_direct,
+                direct_url,
+                direct_key,
+                stream,
+                url,
+                format,
+            )
+            .await
+        }
+        TestCommands::Health { url, format } => {
+            let client = EavsClient::with_url(url);
+            run_test_health(&client, format).await
+        }
+    }
 }
