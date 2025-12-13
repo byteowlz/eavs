@@ -1,12 +1,18 @@
 use crate::state::{AnalysisEvent, AppState, Injection};
+use crate::transform::{
+    build_openai_sse_response, parse_incoming_request, ProviderTransformer,
+};
+use crate::types::StreamState;
 use axum::{
     body::Body,
     extract::{Request, State},
     http::StatusCode,
     response::Response,
 };
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 pub async fn proxy_handler(
@@ -64,10 +70,6 @@ pub async fn proxy_handler(
         body: json_body.clone(),
     });
 
-    // Re-serialize body
-    let new_body_bytes =
-        serde_json::to_vec(&json_body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // 3. Get provider configuration
     let provider_config = state
         .config
@@ -77,18 +79,55 @@ pub async fn proxy_handler(
     let api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
 
-    // Construct URL
+    // Check if we need format translation
+    let needs_transform = provider_type.needs_transform();
+    
+    // Get the transformer for this provider
+    let transformer = ProviderTransformer::for_provider(provider_type);
+    
+    // 4. Build request body - transform if needed
+    let (request_body, model_name) = if needs_transform {
+        // Parse incoming OpenAI-format request to canonical Context
+        let context = parse_incoming_request(&json_body).map_err(|e| {
+            tracing::error!("Failed to parse request: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+        
+        let model = context.model.clone();
+        
+        // Transform to target provider format
+        let transformed = transformer.transform_request(&context).map_err(|e| {
+            tracing::error!("Failed to transform request: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        
+        (serde_json::to_vec(&transformed).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, model)
+    } else {
+        // Pass through for OpenAI-compatible providers
+        let model = json_body["model"].as_str().unwrap_or("unknown").to_string();
+        (serde_json::to_vec(&json_body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?, model)
+    };
+
+    // Construct URL with transformer's endpoint path if transforming
     let base = provider_config.resolved_base_url();
     let base = base.trim_end_matches('/');
-    let path = parts.uri.path();
+    
+    let path = if needs_transform {
+        // Use transformer's endpoint path for non-OpenAI providers
+        let ctx = parse_incoming_request(&json_body).unwrap_or_default();
+        transformer.endpoint_path(&ctx)
+    } else {
+        parts.uri.path().to_string()
+    };
+    
     let mut url = format!("{}{}", base, path);
 
     // Handle Query Parameters (Original + API Version for Azure)
-    let mut query_string = parts
-        .uri
-        .query()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+    let mut query_string = if needs_transform {
+        String::new() // Transformer includes query params in path if needed
+    } else {
+        parts.uri.query().map(|s| s.to_string()).unwrap_or_default()
+    };
 
     if let Some(ref ver) = provider_config.api_version {
         if !query_string.is_empty() {
@@ -97,7 +136,7 @@ pub async fn proxy_handler(
         query_string.push_str(&format!("api-version={}", ver));
     }
 
-    if !query_string.is_empty() {
+    if !query_string.is_empty() && !url.contains('?') {
         url.push('?');
         url.push_str(&query_string);
     }
@@ -121,7 +160,7 @@ pub async fn proxy_handler(
         upstream_req = upstream_req.header(key, resolved_value);
     }
 
-    let upstream_req = upstream_req.body(new_body_bytes);
+    let upstream_req = upstream_req.body(request_body);
 
     // Execute Upstream Request
     let upstream_res = upstream_req
@@ -132,7 +171,7 @@ pub async fn proxy_handler(
             StatusCode::BAD_GATEWAY
         })?;
 
-    // 4. Stream Response
+    // 5. Stream Response with optional transformation
     let status = upstream_res.status();
     let headers = upstream_res.headers().clone();
     let stream = upstream_res.bytes_stream();
@@ -140,24 +179,80 @@ pub async fn proxy_handler(
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 
-    let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
-        Ok(chunk) => {
-            let text = String::from_utf8_lossy(&chunk).to_string();
-            let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
-                timestamp: chrono::Utc::now().timestamp_millis(),
-                id: correlation_id_clone.clone(),
-                chunk: text,
-            });
-            Ok(chunk)
-        }
-        Err(e) => Err(std::io::Error::other(e)),
-    });
+    if needs_transform {
+        // Transform response from provider format back to OpenAI format
+        let stream_state = Arc::new(Mutex::new(StreamState::default()));
+        let transformer = Arc::new(ProviderTransformer::for_provider(provider_type));
+        let model_for_stream = model_name.clone();
+        let request_id = correlation_id.clone();
+        
+        let stream_with_transform = stream.map(move |chunk_result| {
+            match chunk_result {
+                Ok(chunk) => {
+                    let text = String::from_utf8_lossy(&chunk).to_string();
+                    
+                    // Log original chunk
+                    let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                        id: correlation_id_clone.clone(),
+                        chunk: text.clone(),
+                    });
+                    
+                    // Parse and transform to OpenAI format
+                    let mut state = stream_state.lock().unwrap();
+                    match transformer.parse_stream_chunk(&text, &mut state) {
+                        Ok(events) => {
+                            let mut output = String::new();
+                            for event in events {
+                                output.push_str(&build_openai_sse_response(&event, &request_id, &model_for_stream));
+                            }
+                            Ok(Bytes::from(output))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse response chunk: {}", e);
+                            // Pass through on parse error
+                            Ok(chunk)
+                        }
+                    }
+                }
+                Err(e) => Err(std::io::Error::other(e)),
+            }
+        });
 
-    let mut response = Response::new(Body::from_stream(stream_with_logging));
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
+        let mut response = Response::new(Body::from_stream(stream_with_transform));
+        *response.status_mut() = status;
+        // Set OpenAI-compatible headers for transformed responses
+        response.headers_mut().insert(
+            "content-type",
+            "text/event-stream".parse().unwrap(),
+        );
+        response.headers_mut().insert(
+            "cache-control",
+            "no-cache".parse().unwrap(),
+        );
+        
+        Ok(response)
+    } else {
+        // Pass through without transformation
+        let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
+            Ok(chunk) => {
+                let text = String::from_utf8_lossy(&chunk).to_string();
+                let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    id: correlation_id_clone.clone(),
+                    chunk: text,
+                });
+                Ok(chunk)
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        });
 
-    Ok(response)
+        let mut response = Response::new(Body::from_stream(stream_with_logging));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+
+        Ok(response)
+    }
 }
 
 fn apply_injections(json_body: &mut Value, injections: &[Injection]) {

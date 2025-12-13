@@ -76,7 +76,7 @@ async fn main() {
         // Control API - Logs
         .route("/logs/stream", get(api::logs_stream_handler))
         // Proxy API (capture all /v1 methods)
-        .route("/v1/{*path}", any(proxy::proxy_handler))
+        .route("/v1/*path", any(proxy::proxy_handler))
         .with_state(state);
 
     // Run server
