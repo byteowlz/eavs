@@ -284,6 +284,9 @@ pub struct KeysConfig {
     pub default_budget_usd: Option<f64>,
     /// Update pricing from LiteLLM on startup
     pub update_pricing_on_startup: bool,
+    /// Path to word lists TOML file for human-readable key IDs.
+    /// If not specified, downloads from eavs GitHub repo to XDG data directory.
+    pub word_lists_path: Option<String>,
 }
 
 impl Default for KeysConfig {
@@ -296,6 +299,7 @@ impl Default for KeysConfig {
             default_rpm_limit: None,
             default_budget_usd: None,
             update_pricing_on_startup: false,
+            word_lists_path: None, // Uses XDG data directory by default
         }
     }
 }
@@ -321,6 +325,38 @@ impl KeysConfig {
                 Some(k.clone())
             }
         })
+    }
+
+    /// Get the resolved word lists path.
+    ///
+    /// If explicitly configured, expands ~ and returns that path.
+    /// Otherwise, returns the XDG data directory default:
+    /// `$XDG_DATA_HOME/eavs/word_lists.toml` or `~/.local/share/eavs/word_lists.toml`
+    pub fn resolved_word_lists_path(&self) -> PathBuf {
+        if let Some(path) = &self.word_lists_path {
+            // Expand ~ in configured path
+            if let Some(stripped) = path.strip_prefix("~/") {
+                if let Ok(home) = std::env::var("HOME") {
+                    return PathBuf::from(home).join(stripped);
+                }
+            }
+            return PathBuf::from(path);
+        }
+
+        // Default to XDG data directory
+        Self::get_xdg_data_path()
+    }
+
+    /// Get the XDG data directory path for word lists.
+    fn get_xdg_data_path() -> PathBuf {
+        let data_home = std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| {
+                std::env::var("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        data_home.join("eavs").join("word_lists.toml")
     }
 }
 

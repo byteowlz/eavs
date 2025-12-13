@@ -113,3 +113,20 @@ enabled = true
 ttl_secs = 3600              # Conversations expire after 1 hour of inactivity
 cleanup_interval_secs = 60   # Run cleanup every minute
 max_conversations = 10000    # Max 10k concurrent conversations (0 = unlimited)
+
+# --- Virtual API Keys ---
+
+# [keys]
+# enabled = true
+# database_path = "~/.eavs/keys.db"
+# master_key = "env:EAVS_MASTER_KEY"  # Admin API key (supports env: syntax)
+# allow_self_provisioning = false     # Allow creating keys without master key
+# default_rpm_limit = 60              # Default requests per minute (0 = unlimited)
+# default_budget_usd = 10.0           # Default budget in USD (omit for unlimited)
+# update_pricing_on_startup = true    # Fetch latest model pricing on startup
+#
+# Path to word lists TOML file for human-readable key IDs (adjective-noun format).
+# If not specified, downloads from eavs GitHub repo to XDG data directory:
+# - Linux: ~/.local/share/eavs/word_lists.toml
+# - macOS: ~/Library/Application Support/eavs/word_lists.toml
+# word_lists_path = "~/.config/eavs/word_lists.toml"
