@@ -10,9 +10,9 @@ mod transform;
 mod types;
 
 use crate::cli::{
-    run_key_create, run_key_info, run_key_list, run_key_revoke, run_key_usage, run_test_bench,
-    run_test_chat, run_test_health, run_test_rate_limit, Cli, CliConfig, Commands, EavsClient,
-    KeyCommands, TestCommands,
+    ensure_server_running, run_key_create, run_key_info, run_key_list, run_key_revoke,
+    run_key_usage, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit, Cli,
+    CliConfig, Commands, EavsClient, KeyCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -206,11 +206,15 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             stream,
             url,
         } => {
-            let client = EavsClient::with_url(url);
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, None).await?;
+            let client = EavsClient::with_url(server.url);
             run_test_chat(&client, message, model, provider, key, stream).await
         }
         TestCommands::RateLimit { count, key, url } => {
-            let client = EavsClient::with_url(url);
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, None).await?;
+            let client = EavsClient::with_url(server.url);
             run_test_rate_limit(&client, count, key).await
         }
         TestCommands::Bench {
@@ -225,6 +229,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             url,
             format,
         } => {
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, None).await?;
             run_test_bench(
                 count,
                 provider,
@@ -234,13 +240,15 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
                 direct_url,
                 direct_key,
                 stream,
-                url,
+                server.url,
                 format,
             )
             .await
         }
         TestCommands::Health { url, format } => {
-            let client = EavsClient::with_url(url);
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, None).await?;
+            let client = EavsClient::with_url(server.url);
             run_test_health(&client, format).await
         }
     }

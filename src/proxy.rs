@@ -247,7 +247,13 @@ pub async fn proxy_handler(
         let ctx = parse_incoming_request(&json_body).unwrap_or_default();
         transformer.endpoint_path(&ctx)
     } else {
-        parts.uri.path().to_string()
+        // For OpenAI-compatible pass-through, strip /v1 prefix if base URL already has it
+        let request_path = parts.uri.path();
+        if base.ends_with("/v1") && request_path.starts_with("/v1") {
+            request_path.strip_prefix("/v1").unwrap_or(request_path).to_string()
+        } else {
+            request_path.to_string()
+        }
     };
     
     let mut url = format!("{}{}", base, path);
@@ -276,6 +282,10 @@ pub async fn proxy_handler(
         .client
         .request(parts.method.clone(), &url)
         .header("Content-Type", "application/json");
+
+    tracing::debug!("Upstream URL: {}", url);
+    tracing::debug!("API key length: {}", api_key.len());
+    tracing::debug!("API key prefix: {}", if api_key.len() > 10 { &api_key[..10] } else { &api_key });
 
     upstream_req = provider_type.apply_auth(upstream_req, &api_key);
     upstream_req = provider_type.apply_extra_headers(upstream_req);
