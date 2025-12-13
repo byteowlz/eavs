@@ -32,6 +32,5 @@ base64 = "0.22"
 rand = "0.8"
 governor = "0.8" # Rate limiting
 glob-match = "0.2" # For model pattern matching
-
-[dev-dependencies]
-toml = "0.8"
+toml = "0.8" # For word lists parsing
+ureq = "2.10" # For synchronous HTTP (word lists download)
