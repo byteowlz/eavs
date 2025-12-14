@@ -84,6 +84,7 @@ pub struct KeyPermissions {
 /// Budget reset window options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum BudgetWindow {
     /// Never resets - lifetime budget
     Total,
@@ -92,14 +93,10 @@ pub enum BudgetWindow {
     /// Resets weekly on Sunday midnight UTC
     Weekly,
     /// Resets monthly on 1st at midnight UTC
+    #[default]
     Monthly,
 }
 
-impl Default for BudgetWindow {
-    fn default() -> Self {
-        Self::Monthly
-    }
-}
 
 /// Usage tracking for a virtual key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
