@@ -332,6 +332,7 @@ impl KeysConfig {
     /// If explicitly configured, expands ~ and returns that path.
     /// Otherwise, returns the XDG data directory default:
     /// `$XDG_DATA_HOME/eavs/word_lists.toml` or `~/.local/share/eavs/word_lists.toml`
+    #[allow(dead_code)]
     pub fn resolved_word_lists_path(&self) -> PathBuf {
         if let Some(path) = &self.word_lists_path {
             // Expand ~ in configured path
@@ -348,6 +349,7 @@ impl KeysConfig {
     }
 
     /// Get the XDG data directory path for word lists.
+    #[allow(dead_code)]
     fn get_xdg_data_path() -> PathBuf {
         let data_home = std::env::var("XDG_DATA_HOME")
             .map(PathBuf::from)

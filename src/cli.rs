@@ -1324,7 +1324,9 @@ pub async fn run_test_bench(
 /// Result of checking/starting an EAVS server
 pub struct ServerStatus {
     pub url: String,
+    #[allow(dead_code)]
     pub port: u16,
+    #[allow(dead_code)]
     pub was_started: bool,
 }
 
