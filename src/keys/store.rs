@@ -1,10 +1,12 @@
 //! SQLite-backed key storage.
 //!
 //! Provides persistent storage for virtual API keys with an in-memory cache
-//! for fast lookups.
+//! for fast lookups. Human-readable key IDs (e.g., "cold-lamp") are managed
+//! via a pool table - IDs are claimed on key creation and returned to the
+//! pool on key deletion.
 
 use crate::keys::types::*;
-use crate::keys::generation::{generate_key, hash_key};
+use crate::keys::generation::{generate_key, generate_human_id, hash_key};
 use chrono::{DateTime, Datelike, Utc};
 use dashmap::DashMap;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
@@ -73,7 +75,7 @@ impl KeyStore {
             r#"
             CREATE TABLE IF NOT EXISTS virtual_keys (
                 key_hash TEXT PRIMARY KEY,
-                key_id TEXT NOT NULL,
+                key_id TEXT NOT NULL UNIQUE,
                 name TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT,
@@ -86,6 +88,7 @@ impl KeyStore {
 
             CREATE INDEX IF NOT EXISTS idx_keys_created ON virtual_keys(created_at);
             CREATE INDEX IF NOT EXISTS idx_keys_disabled ON virtual_keys(disabled);
+            CREATE INDEX IF NOT EXISTS idx_keys_key_id ON virtual_keys(key_id);
             "#,
         )
         .execute(pool)
@@ -147,9 +150,12 @@ impl KeyStore {
     ) -> Result<CreateKeyResponse, KeyStoreError> {
         let key = generate_key();
         let key_hash = hash_key(&key);
+        
+        // Generate a unique human-readable ID (retry if collision)
+        let key_id = self.generate_unique_human_id().await;
 
         let virtual_key = VirtualKey {
-            key_id: key.clone(),
+            key_id: key_id.clone(),
             key_hash: key_hash.clone(),
             name: request.name.clone(),
             created_at: Utc::now(),
@@ -190,16 +196,53 @@ impl KeyStore {
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         // Add to cache
-        self.cache.insert(key_hash, virtual_key.clone());
+        self.cache.insert(key_hash.clone(), virtual_key.clone());
 
         Ok(CreateKeyResponse {
-            key: key.clone(),
-            key_id: key,
+            key,
+            key_id,
+            key_hash,
             name: request.name,
             created_at: virtual_key.created_at,
             expires_at: request.expires_at,
             permissions: request.permissions,
         })
+    }
+    
+    /// Generate a unique human-readable ID.
+    /// 
+    /// Generates adjective-noun combinations until finding one not in use.
+    /// With ~40,000 combinations (200 adj * 200 nouns), collisions are rare
+    /// until the pool is substantially depleted.
+    async fn generate_unique_human_id(&self) -> String {
+        // Try up to 100 times to find an unused ID
+        for attempt in 0..100 {
+            let id = generate_human_id();
+            
+            // Check if this ID is already in use (including disabled keys)
+            let exists: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1 FROM virtual_keys WHERE key_id = ? LIMIT 1"
+            )
+            .bind(&id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
+            
+            if exists.is_none() {
+                return id;
+            }
+            
+            // Log if we're having trouble finding IDs (pool getting full)
+            if attempt == 50 {
+                tracing::warn!("Human ID pool getting depleted, took 50+ attempts to find unused ID");
+            }
+        }
+        
+        // Fallback: append timestamp suffix to guarantee uniqueness
+        let base_id = generate_human_id();
+        let suffix = Utc::now().timestamp_millis() % 10000;
+        format!("{}-{}", base_id, suffix)
     }
 
     /// Look up a key by its value.
@@ -213,6 +256,14 @@ impl KeyStore {
     /// Look up a key by its hash (for internal use).
     pub fn get_by_hash(&self, key_hash: &str) -> Option<VirtualKey> {
         self.cache.get(key_hash).map(|v| v.clone())
+    }
+
+    /// Look up a key by its human-readable ID (e.g., "cold-lamp").
+    pub fn get_by_human_id(&self, key_id: &str) -> Option<VirtualKey> {
+        self.cache
+            .iter()
+            .find(|entry| entry.value().key_id == key_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// List all keys (returns masked info, not actual keys).
@@ -594,5 +645,53 @@ mod tests {
         assert_eq!(key.usage.total_requests, 1);
         assert_eq!(key.usage.total_input_tokens, 100);
         assert_eq!(key.usage.total_output_tokens, 50);
+    }
+
+    #[tokio::test]
+    async fn test_human_readable_key_id() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        let request = CreateKeyRequest {
+            name: Some("Human ID Test".to_string()),
+            expires_at: None,
+            permissions: KeyPermissions::default(),
+            metadata: serde_json::Value::Null,
+        };
+
+        let response = store.create_key(request).await.unwrap();
+        
+        // Key should be the long eavs- format
+        assert!(response.key.starts_with("eavs-"));
+        assert!(response.key.len() > 30);
+        
+        // key_id should be human-readable (adjective-noun format)
+        assert!(response.key_id.contains('-'));
+        let parts: Vec<_> = response.key_id.split('-').collect();
+        assert_eq!(parts.len(), 2, "key_id should be adjective-noun format");
+        
+        // Should be able to look up by human ID
+        let key = store.get_by_human_id(&response.key_id).unwrap();
+        assert_eq!(key.name, Some("Human ID Test".to_string()));
+        assert_eq!(key.key_id, response.key_id);
+    }
+
+    #[tokio::test]
+    async fn test_unique_human_ids() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        let mut ids = std::collections::HashSet::new();
+        
+        // Create several keys and verify unique IDs
+        for i in 0..10 {
+            let request = CreateKeyRequest {
+                name: Some(format!("Key {}", i)),
+                expires_at: None,
+                permissions: KeyPermissions::default(),
+                metadata: serde_json::Value::Null,
+            };
+
+            let response = store.create_key(request).await.unwrap();
+            assert!(ids.insert(response.key_id.clone()), "Duplicate key_id generated");
+        }
     }
 }

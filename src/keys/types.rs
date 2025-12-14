@@ -7,7 +7,7 @@ use std::collections::HashSet;
 /// A virtual API key with associated permissions and limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualKey {
-    /// Unique key identifier (the actual key value, e.g., "eavs-abc123...")
+    /// Human-readable key identifier (e.g., "cold-lamp", "blue-frog")
     pub key_id: String,
 
     /// Hash of the key for secure storage (SHA-256)
@@ -150,8 +150,11 @@ pub struct CreateKeyResponse {
     /// The actual key value (only returned once!)
     pub key: String,
 
-    /// Key ID (same as key for display)
+    /// Human-readable key ID (e.g., "cold-lamp")
     pub key_id: String,
+
+    /// Hash of the key for lookups
+    pub key_hash: String,
 
     /// Human-readable name
     pub name: Option<String>,
@@ -169,8 +172,11 @@ pub struct CreateKeyResponse {
 /// Key info for listing (does not include the actual key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyInfo {
-    /// Key ID (prefix shown, rest masked)
+    /// Human-readable key ID (e.g., "cold-lamp")
     pub key_id: String,
+
+    /// Hash of the key for operations
+    pub key_hash: String,
 
     /// Human-readable name
     pub name: Option<String>,
@@ -241,19 +247,19 @@ impl VirtualKey {
         }
     }
 
-    /// Get a masked version of the key ID for display.
-    pub fn masked_key_id(&self) -> String {
-        if self.key_id.len() > 12 {
-            format!("{}...{}", &self.key_id[..8], &self.key_id[self.key_id.len() - 4..])
-        } else {
-            self.key_id.clone()
-        }
+    /// Get the key ID for display.
+    /// 
+    /// Since key_id is now a human-readable ID (e.g., "cold-lamp"),
+    /// we return it as-is without masking.
+    pub fn display_key_id(&self) -> String {
+        self.key_id.clone()
     }
 
     /// Convert to KeyInfo for listing.
     pub fn to_info(&self) -> KeyInfo {
         KeyInfo {
-            key_id: self.masked_key_id(),
+            key_id: self.display_key_id(),
+            key_hash: self.key_hash.clone(),
             name: self.name.clone(),
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -363,13 +369,14 @@ mod tests {
     }
 
     #[test]
-    fn test_masked_key_id() {
+    fn test_display_key_id() {
         let key = VirtualKey::new(
-            "eavs-abc123def456ghi789".to_string(),
+            "cold-lamp".to_string(),
             "hash".to_string(),
             KeyPermissions::default(),
         );
 
-        assert_eq!(key.masked_key_id(), "eavs-abc...i789");
+        // Human-readable IDs are returned as-is
+        assert_eq!(key.display_key_id(), "cold-lamp");
     }
 }
