@@ -7,6 +7,7 @@
 
 pub mod anthropic;
 pub mod azure;
+pub mod bedrock;
 pub mod google;
 pub mod messages;
 pub mod mistral;
@@ -18,6 +19,7 @@ use crate::types::{Context, StreamEvent, StreamState};
 // Re-export transformers for convenience
 pub use anthropic::AnthropicTransformer;
 pub use azure::AzureTransformer;
+pub use bedrock::BedrockTransformer;
 pub use google::GoogleTransformer;
 pub use mistral::MistralTransformer;
 pub use openai::OpenAITransformer;
@@ -87,6 +89,7 @@ impl RequestResponseTransformer for AnthropicTransformer {}
 impl RequestResponseTransformer for GoogleTransformer {}
 impl RequestResponseTransformer for AzureTransformer {}
 impl RequestResponseTransformer for MistralTransformer {}
+impl RequestResponseTransformer for BedrockTransformer {}
 
 impl ProviderTransformer {
     /// Create a transformer for the given provider type.
@@ -102,6 +105,7 @@ impl ProviderTransformer {
             ProviderType::Google => Box::new(GoogleTransformer::new()),
             ProviderType::Azure => Box::new(AzureTransformer::new()),
             ProviderType::Mistral => Box::new(MistralTransformer::new()),
+            ProviderType::Bedrock => Box::new(BedrockTransformer::new()),
         };
         Self { inner }
     }

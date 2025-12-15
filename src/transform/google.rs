@@ -40,7 +40,7 @@ impl RequestTransformer for GoogleTransformer {
         }
 
         // Build contents
-        let contents = build_google_contents(context);
+        let contents = build_google_contents(context)?;
         request["contents"] = Value::Array(contents);
 
         // Add generation config
@@ -436,13 +436,13 @@ fn tool_to_google(tool: &Tool) -> Value {
     })
 }
 
-fn build_google_contents(context: &Context) -> Vec<Value> {
+fn build_google_contents(context: &Context) -> Result<Vec<Value>, TransformError> {
     let mut contents = Vec::new();
 
     for msg in &context.messages {
         match msg {
             Message::User(user) => {
-                let parts = build_google_parts(&user.content);
+                let parts = build_google_parts(&user.content)?;
                 contents.push(json!({
                     "role": "user",
                     "parts": parts
@@ -483,39 +483,42 @@ fn build_google_contents(context: &Context) -> Vec<Value> {
         }
     }
 
-    contents
+    Ok(contents)
 }
 
-fn build_google_parts(blocks: &[ContentBlock]) -> Vec<Value> {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(t) => Some(json!({"text": t.text})),
+fn build_google_parts(blocks: &[ContentBlock]) -> Result<Vec<Value>, TransformError> {
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text(t) => parts.push(json!({"text": t.text})),
             ContentBlock::Image(img) => {
                 if img.is_url {
-                    None // Google requires inline data
-                } else {
-                    Some(json!({
-                        "inlineData": {
-                            "mimeType": img.mime_type,
-                            "data": img.data
-                        }
-                    }))
+                    return Err(TransformError::Unsupported(
+                        "Google requires inlineData for images; provide a data: URL or base64"
+                            .to_string(),
+                    ));
                 }
+                parts.push(json!({
+                    "inlineData": {
+                        "mimeType": img.mime_type,
+                        "data": img.data
+                    }
+                }));
             }
             ContentBlock::ToolResult(tr) => {
-                let response: Value = serde_json::from_str(&tr.content)
-                    .unwrap_or(json!({"result": tr.content}));
-                Some(json!({
+                let response: Value =
+                    serde_json::from_str(&tr.content).unwrap_or(json!({"result": tr.content}));
+                parts.push(json!({
                     "functionResponse": {
                         "name": tr.tool_call_id,
                         "response": response
                     }
-                }))
+                }));
             }
-            _ => None,
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    Ok(parts)
 }
 
 fn build_google_model_parts(blocks: &[ContentBlock]) -> Vec<Value> {
@@ -923,7 +926,7 @@ mod tests {
                 Message::Tool(ToolResultMessage::text("get_weather", "get_weather", "Sunny, 72F")),
             ]);
 
-        let contents = build_google_contents(&ctx);
+        let contents = build_google_contents(&ctx).unwrap();
         
         assert_eq!(contents.len(), 3);
         // Tool result should be in a user message with functionResponse

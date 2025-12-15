@@ -14,6 +14,7 @@ pub enum ProviderType {
     Cerebras,
     XAI,
     OpenRouter,
+    Bedrock,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
 }
@@ -57,6 +58,7 @@ impl ProviderType {
             "cerebras" => Self::Cerebras,
             "xai" | "grok" => Self::XAI,
             "openrouter" => Self::OpenRouter,
+            "bedrock" | "aws-bedrock" => Self::Bedrock,
             "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible" => {
                 Self::OpenAICompatible
             }
@@ -121,6 +123,12 @@ impl ProviderType {
                 env_key_name: Some("OPENROUTER_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::Bedrock => ProviderInfo {
+                provider_type: *self,
+                default_base_url: None, // Region-specific; see ProviderConfig.aws_region
+                env_key_name: None,
+                auth_style: AuthStyle::None,
+            },
             Self::OpenAICompatible => ProviderInfo {
                 provider_type: *self,
                 default_base_url: None, // Must be specified
@@ -183,7 +191,7 @@ impl ProviderType {
     /// Check if this provider requires request transformation.
     #[allow(dead_code)]
     pub fn needs_transform(&self) -> bool {
-        matches!(self, Self::Anthropic | Self::Google)
+        matches!(self, Self::Anthropic | Self::Google | Self::Bedrock)
     }
 }
 

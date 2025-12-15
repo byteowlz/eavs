@@ -7,6 +7,7 @@
 //! - `test` - Test the proxy functionality
 
 use clap::{Parser, Subcommand};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -216,6 +217,70 @@ pub enum TestCommands {
     Chat {
         /// Message to send
         message: String,
+
+        /// Provider to use
+        #[arg(short, long, default_value = "default")]
+        provider: String,
+
+        /// Model to use
+        #[arg(short, long, default_value = "gpt-4o-mini")]
+        model: String,
+
+        /// API key to use (virtual or real)
+        #[arg(short, long, env = "EAVS_API_KEY")]
+        key: Option<String>,
+
+        /// Use streaming
+        #[arg(short, long)]
+        stream: bool,
+
+        /// EAVS server URL
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
+        url: String,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Send a vision/multimodal request with an image
+    Image {
+        /// Path to an image file (png/jpg/webp/gif)
+        image: String,
+
+        /// Prompt to send alongside the image
+        prompt: String,
+
+        /// Provider to use
+        #[arg(short, long, default_value = "default")]
+        provider: String,
+
+        /// Model to use
+        #[arg(short, long, default_value = "gpt-4o-mini")]
+        model: String,
+
+        /// API key to use (virtual or real)
+        #[arg(short, long, env = "EAVS_API_KEY")]
+        key: Option<String>,
+
+        /// Use streaming
+        #[arg(short, long)]
+        stream: bool,
+
+        /// EAVS server URL
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
+        url: String,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Send a request that encourages a tool call
+    ToolCall {
+        /// Prompt to send
+        #[arg(default_value = "What's the weather in Paris? Call get_weather(city) as needed.")]
+        prompt: String,
 
         /// Provider to use
         #[arg(short, long, default_value = "default")]
@@ -498,30 +563,20 @@ impl EavsClient {
         resp.json().await.map_err(CliError::Request)
     }
 
-    /// Send a chat completion request
-    pub async fn chat(
+    async fn post_chat_completions(
         &self,
-        message: &str,
-        model: &str,
+        body: &serde_json::Value,
         provider: &str,
         api_key: Option<&str>,
-        stream: bool,
-    ) -> Result<ChatResponse, CliError> {
+    ) -> Result<reqwest::Response, CliError> {
         let url = format!("{}/v1/chat/completions", self.config.server_url);
-
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [{"role": "user", "content": message}],
-            "stream": stream,
-            "max_tokens": 256
-        });
 
         let mut req = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Provider", provider)
-            .json(&body);
+            .json(body);
 
         if let Some(key) = api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
@@ -537,6 +592,26 @@ impl EavsClient {
                 message: body,
             });
         }
+
+        Ok(resp)
+    }
+
+    /// Send a chat completion request
+    pub async fn chat(
+        &self,
+        message: &str,
+        model: &str,
+        provider: &str,
+        api_key: Option<&str>,
+        stream: bool,
+    ) -> Result<ChatResponse, CliError> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": message}],
+            "stream": stream,
+            "max_tokens": 256
+        });
+        let resp = self.post_chat_completions(&body, provider, api_key).await?;
 
         if stream {
             // For streaming, collect the full response
@@ -596,6 +671,138 @@ impl EavsClient {
                     .to_string(),
                 usage,
             })
+        }
+    }
+
+    /// Send a multimodal request (OpenAI vision format).
+    pub async fn chat_with_image(
+        &self,
+        prompt: &str,
+        image_path: &str,
+        model: &str,
+        provider: &str,
+        api_key: Option<&str>,
+        stream: bool,
+    ) -> Result<ChatResponse, CliError> {
+        let bytes = std::fs::read(image_path).map_err(CliError::Io)?;
+        let mime = guess_image_mime(image_path).ok_or_else(|| {
+            CliError::Other("Unsupported image extension (expected png/jpg/jpeg/webp/gif)".to_string())
+        })?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let data_url = format!("data:{};base64,{}", mime, b64);
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]
+            }],
+            "stream": stream,
+            "max_tokens": 256
+        });
+
+        let resp = self.post_chat_completions(&body, provider, api_key).await?;
+
+        if stream {
+            let text = resp.text().await.map_err(CliError::Request)?;
+            let mut content = String::new();
+
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(delta) = chunk
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("delta"))
+                            .and_then(|d| d.get("content"))
+                            .and_then(|c| c.as_str())
+                        {
+                            content.push_str(delta);
+                        }
+                    }
+                }
+            }
+
+            Ok(ChatResponse {
+                content,
+                model: model.to_string(),
+                usage: None,
+            })
+        } else {
+            let json: serde_json::Value = resp.json().await.map_err(CliError::Request)?;
+            let content = json
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let usage = json.get("usage").map(|u| ChatUsage {
+                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: u
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+            });
+
+            Ok(ChatResponse {
+                content,
+                model: json
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or(model)
+                    .to_string(),
+                usage,
+            })
+        }
+    }
+
+    /// Send a request that encourages a tool call and return the raw response JSON.
+    pub async fn tool_call(
+        &self,
+        prompt: &str,
+        model: &str,
+        provider: &str,
+        api_key: Option<&str>,
+        stream: bool,
+    ) -> Result<serde_json::Value, CliError> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather for a city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }],
+            "tool_choice": "auto",
+            "stream": stream,
+            "max_tokens": 256
+        });
+
+        let resp = self.post_chat_completions(&body, provider, api_key).await?;
+
+        if stream {
+            Ok(serde_json::json!({
+                "stream": true,
+                "raw": resp.text().await.map_err(CliError::Request)?
+            }))
+        } else {
+            resp.json().await.map_err(CliError::Request)
         }
     }
 
@@ -745,6 +952,7 @@ pub struct HealthResponse {
 pub enum CliError {
     Request(reqwest::Error),
     Api { status: u16, message: String },
+    Io(std::io::Error),
     Other(String),
 }
 
@@ -753,6 +961,7 @@ impl std::fmt::Display for CliError {
         match self {
             Self::Request(e) => write!(f, "Request error: {}", e),
             Self::Api { status, message } => write!(f, "API error ({}): {}", status, message),
+            Self::Io(e) => write!(f, "IO error: {}", e),
             Self::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -1009,6 +1218,8 @@ pub async fn run_test_chat(
     api_key: Option<String>,
     stream: bool,
 ) -> Result<(), CliError> {
+    let start = std::time::Instant::now();
+
     println!("Sending request to EAVS...");
     println!("  Provider: {}", provider);
     println!("  Model: {}", model);
@@ -1023,12 +1234,81 @@ pub async fn run_test_chat(
     println!("{}", response.content);
     println!();
 
+    println!("Timing: {:.2?}", start.elapsed());
+
     if let Some(usage) = response.usage {
         println!(
             "Usage: {} prompt + {} completion tokens",
             usage.prompt_tokens, usage.completion_tokens
         );
     }
+
+    Ok(())
+}
+
+pub async fn run_test_image(
+    client: &EavsClient,
+    image: String,
+    prompt: String,
+    model: String,
+    provider: String,
+    api_key: Option<String>,
+    stream: bool,
+) -> Result<(), CliError> {
+    let start = std::time::Instant::now();
+
+    println!("Sending image request to EAVS...");
+    println!("  Provider: {}", provider);
+    println!("  Model: {}", model);
+    println!("  Stream: {}", stream);
+    println!("  Image: {}", image);
+    println!();
+
+    let response = client
+        .chat_with_image(&prompt, &image, &model, &provider, api_key.as_deref(), stream)
+        .await?;
+
+    println!("Response:");
+    println!("{}", response.content);
+    println!();
+
+    println!("Timing: {:.2?}", start.elapsed());
+
+    if let Some(usage) = response.usage {
+        println!(
+            "Usage: {} prompt + {} completion tokens",
+            usage.prompt_tokens, usage.completion_tokens
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn run_test_tool_call(
+    client: &EavsClient,
+    prompt: String,
+    model: String,
+    provider: String,
+    api_key: Option<String>,
+    stream: bool,
+) -> Result<(), CliError> {
+    let start = std::time::Instant::now();
+
+    println!("Sending tool-call request to EAVS...");
+    println!("  Provider: {}", provider);
+    println!("  Model: {}", model);
+    println!("  Stream: {}", stream);
+    println!();
+
+    let response = client
+        .tool_call(&prompt, &model, &provider, api_key.as_deref(), stream)
+        .await?;
+
+    println!("Response:");
+    println!("{}", serde_json::to_string_pretty(&response).unwrap_or_default());
+    println!();
+
+    println!("Timing: {:.2?}", start.elapsed());
 
     Ok(())
 }
@@ -1241,6 +1521,21 @@ async fn timed_request(
     let _ = resp.bytes().await;
 
     Ok(start.elapsed())
+}
+
+fn guess_image_mime(path: &str) -> Option<&'static str> {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".png") {
+        Some("image/png")
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
+    } else if lower.ends_with(".gif") {
+        Some("image/gif")
+    } else {
+        None
+    }
 }
 
 pub async fn run_test_bench(

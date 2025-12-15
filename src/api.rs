@@ -18,9 +18,15 @@ pub async fn inject_handler(
     Path(conversation_id): Path<String>,
     Json(payload): Json<InjectionPayload>,
 ) -> StatusCode {
-    state
-        .conversations
-        .add_injections(&conversation_id, payload.messages);
+    // If a WS session is active for this conversation, deliver immediately (mid-stream).
+    // Otherwise, queue for the next HTTP request (pre-request injection).
+    let delivered = state
+        .ws_sessions
+        .deliver_injections(&conversation_id, payload.messages.clone());
+
+    if !delivered {
+        state.conversations.add_injections(&conversation_id, payload.messages);
+    }
     StatusCode::OK
 }
 
@@ -556,7 +562,9 @@ mod tests {
             analysis: AnalysisConfig {
                 enabled: true,
                 broadcast_channel_size: 10,
+                plugins: Vec::new(),
             },
+            policy: Default::default(),
             state: StateConfig::default(),
             keys: KeysConfig::default(),
         };
@@ -588,7 +596,9 @@ mod tests {
             analysis: AnalysisConfig {
                 enabled: true,
                 broadcast_channel_size: 10,
+                plugins: Vec::new(),
             },
+            policy: Default::default(),
             state: StateConfig::default(),
             keys: KeysConfig::default(),
         };

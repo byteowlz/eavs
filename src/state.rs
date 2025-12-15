@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, StateConfig};
 use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
+use crate::upstream::{ReqwestUpstream, Upstream};
 use dashmap::DashMap;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,9 +11,11 @@ use tokio::sync::{broadcast, mpsc, OnceCell};
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
-    pub client: Client,
+    pub upstream: Arc<dyn Upstream>,
     /// Conversation state store with TTL support
     pub conversations: Arc<ConversationStore>,
+    /// Active WebSocket sessions (for mid-stream injection)
+    pub ws_sessions: Arc<WsSessionManager>,
     /// Legacy injections map (for backward compatibility)
     pub injections: Arc<DashMap<String, Vec<Injection>>>,
     /// Broadcast channel for analysis logs
@@ -60,6 +62,82 @@ pub struct ConversationStore {
     entries: DashMap<String, ConversationEntry>,
     config: StateConfig,
     stats: ConversationStats,
+}
+
+/// A handle to a registered WS session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsSessionToken(u64);
+
+#[derive(Clone)]
+struct WsSession {
+    id: WsSessionToken,
+    tx: mpsc::UnboundedSender<Vec<Injection>>,
+}
+
+/// Manages active WebSocket sessions per conversation for mid-stream injection.
+pub struct WsSessionManager {
+    sessions: DashMap<String, Vec<WsSession>>,
+    next_id: AtomicU64,
+}
+
+impl WsSessionManager {
+    pub fn new() -> Self {
+        Self {
+            sessions: DashMap::new(),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Register a WS session for a conversation.
+    pub fn register(&self, conversation_id: &str) -> (WsSessionToken, mpsc::UnboundedReceiver<Vec<Injection>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let id = WsSessionToken(self.next_id.fetch_add(1, Ordering::Relaxed));
+
+        self.sessions
+            .entry(conversation_id.to_string())
+            .and_modify(|v| v.push(WsSession { id, tx: tx.clone() }))
+            .or_insert_with(|| vec![WsSession { id, tx }]);
+
+        (id, rx)
+    }
+
+    /// Unregister a WS session.
+    pub fn unregister(&self, conversation_id: &str, token: WsSessionToken) {
+        if let Some(mut entry) = self.sessions.get_mut(conversation_id) {
+            entry.retain(|s| s.id != token);
+            if entry.is_empty() {
+                drop(entry);
+                self.sessions.remove(conversation_id);
+            }
+        }
+    }
+
+    /// Deliver injections to any active WS sessions for this conversation.
+    ///
+    /// Returns `true` if at least one session received the injections.
+    pub fn deliver_injections(&self, conversation_id: &str, injections: Vec<Injection>) -> bool {
+        let Some(mut entry) = self.sessions.get_mut(conversation_id) else {
+            return false;
+        };
+
+        let mut delivered = false;
+        entry.retain(|session| {
+            match session.tx.send(injections.clone()) {
+                Ok(()) => {
+                    delivered = true;
+                    true
+                }
+                Err(_) => false, // receiver dropped
+            }
+        });
+
+        if entry.is_empty() {
+            drop(entry);
+            self.sessions.remove(conversation_id);
+        }
+
+        delivered
+    }
 }
 
 /// Statistics for the conversation store.
@@ -304,14 +382,20 @@ pub enum AnalysisEvent {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
+        let client = reqwest::Client::new();
+        Self::new_with_upstream(config, Arc::new(ReqwestUpstream::new(client)))
+    }
+
+    pub fn new_with_upstream(config: AppConfig, upstream: Arc<dyn Upstream>) -> Self {
         let (tx, _) = broadcast::channel(config.analysis.broadcast_channel_size);
         let conversations = Arc::new(ConversationStore::new(config.state.clone()));
         let pricing = SharedPricingTable::new();
 
         Self {
             config: Arc::new(config),
-            client: Client::new(),
+            upstream,
             conversations,
+            ws_sessions: Arc::new(WsSessionManager::new()),
             injections: Arc::new(DashMap::new()), // Legacy support
             analysis_tx: tx,
             key_store: Arc::new(OnceCell::new()),
@@ -412,7 +496,9 @@ mod tests {
             analysis: AnalysisConfig {
                 enabled: true,
                 broadcast_channel_size: 16,
+                plugins: Vec::new(),
             },
+            policy: Default::default(),
             keys: KeysConfig::default(),
             state: StateConfig::default(),
         }
