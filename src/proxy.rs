@@ -477,6 +477,17 @@ pub async fn proxy_handler(
 
     tracing::debug!("Upstream URL: {}", url);
 
+    // Handle mock provider - return synthetic responses without network calls
+    if provider_type.is_mock() {
+        return handle_mock_response(
+            &model_name,
+            json_body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+            &correlation_id,
+            state.analysis_tx.clone(),
+        )
+        .await;
+    }
+
     // Execute Upstream Request
     let upstream_res = state.upstream.send(upstream_req).await.map_err(|e| {
         tracing::error!("Upstream request failed: {}", e);
@@ -739,6 +750,90 @@ struct UsageTracker {
     input_tokens: Arc<std::sync::atomic::AtomicU32>,
     output_tokens: Arc<std::sync::atomic::AtomicU32>,
     cached_tokens: Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// Handle mock provider requests - returns synthetic responses without network calls.
+/// This is used for benchmarking to measure pure proxy overhead.
+async fn handle_mock_response(
+    model: &str,
+    stream: bool,
+    request_id: &str,
+    analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
+) -> Result<Response, Response> {
+    let timestamp = chrono::Utc::now().timestamp();
+    
+    if stream {
+        // Return streaming SSE response
+        let chunks = vec![
+            format!(
+                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"\"}},\"finish_reason\":null}}]}}\n\n",
+                request_id, timestamp, model
+            ),
+            format!(
+                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"This is a mock response for benchmarking.\"}},\"finish_reason\":null}}]}}\n\n",
+                request_id, timestamp, model
+            ),
+            format!(
+                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":8,\"total_tokens\":18}}}}\n\n",
+                request_id, timestamp, model
+            ),
+            "data: [DONE]\n\n".to_string(),
+        ];
+
+        // Log the mock response
+        let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            id: request_id.to_string(),
+            chunk: "[mock streaming response]".to_string(),
+        });
+
+        let stream = futures::stream::iter(
+            chunks.into_iter().map(|c| Ok::<_, std::io::Error>(Bytes::from(c)))
+        );
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .header("x-mock-response", "true")
+            .body(Body::from_stream(stream))
+            .unwrap())
+    } else {
+        // Return non-streaming JSON response
+        let response = serde_json::json!({
+            "id": format!("chatcmpl-mock-{}", request_id),
+            "object": "chat.completion",
+            "created": timestamp,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "This is a mock response for benchmarking."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 8,
+                "total_tokens": 18
+            }
+        });
+
+        // Log the mock response
+        let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            id: request_id.to_string(),
+            chunk: "[mock non-streaming response]".to_string(),
+        });
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .header("x-mock-response", "true")
+            .body(Body::from(serde_json::to_vec(&response).unwrap()))
+            .unwrap())
+    }
 }
 
 /// Extract usage from OpenAI-format streaming chunks.
@@ -2622,5 +2717,116 @@ mod tests {
         let url = build_ws_upstream_url("https://api.example.com/v1", "/v1/realtime", Some("model=x"))
             .unwrap();
         assert_eq!(url, "wss://api.example.com/v1/realtime?model=x");
+    }
+
+    #[tokio::test]
+    async fn e2e_mock_provider_returns_synthetic_response() {
+        // Mock upstream won't be called since mock provider handles requests internally
+        let mock = MockUpstream::new(vec![]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                type_: "mock".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        // Non-streaming request
+        let req_body = json!({
+            "model": "mock-model",
+            "messages": [{"role":"user","content":"hello"}],
+            "stream": false
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("X-Provider", "mock")
+            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-mock-response").unwrap(),
+            "true"
+        );
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(body["object"], "chat.completion");
+        assert_eq!(body["model"], "mock-model");
+        assert!(body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("mock response"));
+
+        // Verify no upstream requests were made
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 0, "Mock provider should not make upstream requests");
+    }
+
+    #[tokio::test]
+    async fn e2e_mock_provider_returns_streaming_response() {
+        let mock = MockUpstream::new(vec![]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                type_: "mock".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        // Streaming request
+        let req_body = json!({
+            "model": "mock-model",
+            "messages": [{"role":"user","content":"hello"}],
+            "stream": true
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("X-Provider", "mock")
+            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        // Should contain SSE data lines
+        assert!(body_str.contains("data: "));
+        assert!(body_str.contains("mock response"));
+        assert!(body_str.contains("[DONE]"));
+
+        // Verify no upstream requests were made
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 0);
     }
 }

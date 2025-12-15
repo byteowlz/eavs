@@ -1,4 +1,3 @@
-use reqwest::RequestBuilder;
 use serde::Deserialize;
 
 /// Supported LLM provider types with their specific authentication and API patterns.
@@ -17,6 +16,8 @@ pub enum ProviderType {
     Bedrock,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
+    /// Mock provider for benchmarking - returns canned responses without network calls
+    Mock,
 }
 
 /// Provider metadata with default configuration values.
@@ -62,6 +63,7 @@ impl ProviderType {
             "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible" => {
                 Self::OpenAICompatible
             }
+            "mock" | "echo" | "benchmark" => Self::Mock,
             _ => Self::OpenAI, // Default fallback
         }
     }
@@ -135,41 +137,18 @@ impl ProviderType {
                 env_key_name: None,
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::Mock => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("mock://localhost"), // Special scheme - handled internally
+                env_key_name: None,
+                auth_style: AuthStyle::None,
+            },
         }
     }
 
-    /// Apply authentication headers/params to a request builder.
-    pub fn apply_auth(&self, builder: RequestBuilder, api_key: &str) -> RequestBuilder {
-        let info = self.info();
-
-        match info.auth_style {
-            AuthStyle::BearerToken => {
-                if !api_key.is_empty() {
-                    builder.header("Authorization", format!("Bearer {}", api_key))
-                } else {
-                    builder
-                }
-            }
-            AuthStyle::ApiKeyHeader(header_name) => builder.header(header_name, api_key),
-            AuthStyle::AzureApiKey => builder.header("api-key", api_key),
-            AuthStyle::QueryParam(_param_name) => {
-                // Query params are handled separately in URL construction
-                builder
-            }
-            AuthStyle::None => builder,
-        }
-    }
-
-    /// Apply provider-specific headers (e.g., Anthropic version header).
-    pub fn apply_extra_headers(&self, builder: RequestBuilder) -> RequestBuilder {
-        match self {
-            Self::Anthropic => builder.header("anthropic-version", "2023-06-01"),
-            Self::OpenRouter => {
-                // OpenRouter likes to know the app name
-                builder.header("HTTP-Referer", "https://github.com/eavs-proxy")
-            }
-            _ => builder,
-        }
+    /// Check if this provider is a mock provider (handled internally without network).
+    pub fn is_mock(&self) -> bool {
+        matches!(self, Self::Mock)
     }
 
     /// Check if this provider uses OpenAI-compatible chat completions API.
@@ -304,6 +283,20 @@ mod tests {
             ProviderType::OpenAICompatible
         );
         assert_eq!(ProviderType::from_str("unknown"), ProviderType::OpenAI);
+        assert_eq!(ProviderType::from_str("mock"), ProviderType::Mock);
+        assert_eq!(ProviderType::from_str("echo"), ProviderType::Mock);
+        assert_eq!(ProviderType::from_str("benchmark"), ProviderType::Mock);
+    }
+
+    #[test]
+    fn test_mock_provider() {
+        let mock = ProviderType::Mock;
+        assert!(mock.is_mock());
+        assert!(!ProviderType::OpenAI.is_mock());
+        
+        let info = mock.info();
+        assert_eq!(info.default_base_url, Some("mock://localhost"));
+        assert!(matches!(info.auth_style, AuthStyle::None));
     }
 
     #[test]
@@ -328,54 +321,6 @@ mod tests {
         let azure = ProviderType::Azure.info();
         assert!(azure.default_base_url.is_none());
         assert!(matches!(azure.auth_style, AuthStyle::AzureApiKey));
-    }
-
-    #[test]
-    fn test_apply_auth_bearer() {
-        let client = reqwest::Client::new();
-        let builder = client.get("https://api.openai.com/v1/chat/completions");
-        let builder = ProviderType::OpenAI.apply_auth(builder, "sk-test-key");
-        let request = builder.build().unwrap();
-
-        assert_eq!(
-            request.headers().get("Authorization").unwrap(),
-            "Bearer sk-test-key"
-        );
-    }
-
-    #[test]
-    fn test_apply_auth_anthropic() {
-        let client = reqwest::Client::new();
-        let builder = client.get("https://api.anthropic.com/v1/messages");
-        let builder = ProviderType::Anthropic.apply_auth(builder, "sk-ant-key");
-        let builder = ProviderType::Anthropic.apply_extra_headers(builder);
-        let request = builder.build().unwrap();
-
-        assert_eq!(request.headers().get("x-api-key").unwrap(), "sk-ant-key");
-        assert_eq!(
-            request.headers().get("anthropic-version").unwrap(),
-            "2023-06-01"
-        );
-    }
-
-    #[test]
-    fn test_apply_auth_azure() {
-        let client = reqwest::Client::new();
-        let builder = client.get("https://myresource.openai.azure.com/");
-        let builder = ProviderType::Azure.apply_auth(builder, "azure-key");
-        let request = builder.build().unwrap();
-
-        assert_eq!(request.headers().get("api-key").unwrap(), "azure-key");
-    }
-
-    #[test]
-    fn test_apply_auth_empty_key() {
-        let client = reqwest::Client::new();
-        let builder = client.get("http://localhost:11434/v1/chat/completions");
-        let builder = ProviderType::OpenAICompatible.apply_auth(builder, "");
-        let request = builder.build().unwrap();
-
-        assert!(request.headers().get("Authorization").is_none());
     }
 
     #[test]

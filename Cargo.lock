@@ -615,6 +615,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "tempfile",
  "tiktoken-rs",
  "tokio",
  "tokio-stream",
