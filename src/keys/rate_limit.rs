@@ -206,8 +206,8 @@ impl TokenBucketLimiter {
             .load(std::sync::atomic::Ordering::Relaxed);
 
         // Refill every 60 seconds
-        if now >= last + 60 {
-            if self
+        if now >= last + 60
+            && self
                 .last_refill
                 .compare_exchange(
                     last,
@@ -220,7 +220,6 @@ impl TokenBucketLimiter {
                 self.tokens
                     .store(self.limit, std::sync::atomic::Ordering::Relaxed);
             }
-        }
     }
 
     fn check(&self, tokens: u32) -> bool {
@@ -269,8 +268,8 @@ impl DailyLimiter {
         let today = Self::today_start();
         let stored = self.day_start.load(std::sync::atomic::Ordering::Relaxed);
 
-        if today > stored {
-            if self
+        if today > stored
+            && self
                 .day_start
                 .compare_exchange(
                     stored,
@@ -283,7 +282,6 @@ impl DailyLimiter {
                 self.count
                     .store(0, std::sync::atomic::Ordering::Relaxed);
             }
-        }
     }
 
     fn check(&self) -> bool {

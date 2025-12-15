@@ -1,13 +1,13 @@
 //! Human-readable ID generation using adjective-noun combinations.
 //!
 //! Generates memorable IDs like "cold-lamp" or "blue-frog" for virtual API keys.
-//! Word lists are loaded from a TOML file, which can be configured or auto-downloaded
-//! from the eavs GitHub repository.
+//! Word lists can be embedded (default) or loaded from a TOML file.
 
 use rand::seq::SliceRandom;
 use std::path::Path;
 
 /// Default URL for downloading word lists from eavs GitHub repository.
+#[allow(dead_code)]
 const WORD_LISTS_URL: &str =
     "https://raw.githubusercontent.com/wismut/eavs/main/data/word_lists.toml";
 
@@ -20,6 +20,7 @@ pub struct WordLists {
 
 /// Errors that can occur when working with word lists.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WordListError {
     /// Failed to read word lists file.
     Io(std::io::Error),
@@ -52,6 +53,7 @@ impl From<std::io::Error> for WordListError {
 
 impl WordLists {
     /// Parse word lists from TOML content.
+    #[allow(dead_code)]
     pub fn from_toml(content: &str) -> Result<Self, WordListError> {
         let parsed: toml::Value = content
             .parse()
@@ -83,6 +85,7 @@ impl WordLists {
     }
 
     /// Load word lists from a file path.
+    #[allow(dead_code)]
     pub fn from_file(path: &Path) -> Result<Self, WordListError> {
         let content = std::fs::read_to_string(path)?;
         Self::from_toml(&content)
@@ -92,6 +95,7 @@ impl WordLists {
     ///
     /// This is a blocking operation that will download the file synchronously
     /// if it doesn't exist at the specified path.
+    #[allow(dead_code)]
     pub fn load_or_download(path: &Path) -> Result<Self, WordListError> {
         if path.exists() {
             return Self::from_file(path);
@@ -114,6 +118,7 @@ impl WordLists {
     }
 
     /// Load word lists asynchronously, downloading from GitHub if the file doesn't exist.
+    #[allow(dead_code)]
     pub async fn load_or_download_async(path: &Path) -> Result<Self, WordListError> {
         if path.exists() {
             let content = tokio::fs::read_to_string(path).await?;
@@ -137,6 +142,7 @@ impl WordLists {
     }
 
     /// Validate that word lists are usable.
+    #[allow(dead_code)]
     fn validate(&self) -> Result<(), WordListError> {
         if self.adjectives.is_empty() {
             return Err(WordListError::Empty("no adjectives found".into()));
@@ -150,6 +156,7 @@ impl WordLists {
     /// Get the number of possible unique combinations.
     ///
     /// This excludes same-word pairs (e.g., "cold-cold").
+    #[allow(dead_code)]
     pub fn combination_count(&self) -> usize {
         let total = self.adjectives.len() * self.nouns.len();
         let overlap = self
@@ -183,6 +190,7 @@ impl WordLists {
     ///
     /// Returns up to `count` unique IDs. May return fewer if there aren't
     /// enough unique combinations available.
+    #[allow(dead_code)]
     pub fn generate_ids(&self, count: usize) -> Vec<String> {
         let mut ids = std::collections::HashSet::with_capacity(count);
         let max_attempts = count * 10; // Prevent infinite loops
@@ -209,6 +217,7 @@ impl WordLists {
 }
 
 /// Download word lists from GitHub (blocking).
+#[allow(dead_code)]
 fn download_word_lists() -> Result<String, WordListError> {
     // Use ureq for synchronous HTTP requests (already in dependencies via other crates)
     // Fall back to embedded lists if download fails
@@ -224,6 +233,7 @@ fn download_word_lists() -> Result<String, WordListError> {
 }
 
 /// Download word lists from GitHub (async).
+#[allow(dead_code)]
 async fn download_word_lists_async() -> Result<String, WordListError> {
     let client = reqwest::Client::new();
     match client.get(WORD_LISTS_URL).send().await {

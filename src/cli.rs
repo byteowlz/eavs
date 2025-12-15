@@ -1159,7 +1159,7 @@ impl BenchmarkResults {
         let max_ms = sorted[sorted.len() - 1];
         let mean_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
 
-        let median_ms = if sorted.len() % 2 == 0 {
+        let median_ms = if sorted.len().is_multiple_of(2) {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
         } else {
             sorted[sorted.len() / 2]
@@ -1302,7 +1302,7 @@ pub async fn run_test_bench(
         }
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
-    if count % 10 != 0 {
+    if !count.is_multiple_of(10) {
         println!();
     }
 
@@ -1341,7 +1341,7 @@ pub async fn run_test_bench(
             }
             std::io::Write::flush(&mut std::io::stdout()).ok();
         }
-        if count % 10 != 0 {
+        if !count.is_multiple_of(10) {
             println!();
         }
 
@@ -1410,7 +1410,9 @@ pub async fn run_test_bench(
 /// Result of checking/starting an EAVS server
 pub struct ServerStatus {
     pub url: String,
+    #[allow(dead_code)]
     pub port: u16,
+    #[allow(dead_code)]
     pub was_started: bool,
 }
 

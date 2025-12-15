@@ -335,9 +335,7 @@ impl PricingTable {
 
         // Also add common aliases
         let model_lower = pricing.model.to_lowercase();
-        if !self.models.contains_key(&model_lower) {
-            self.models.insert(model_lower, pricing);
-        }
+        self.models.entry(model_lower).or_insert(pricing);
     }
 
     /// Get pricing for a model, with fallback matching.
