@@ -663,6 +663,7 @@ impl AppConfig {
     /// Get a provider config by name (case-insensitive).
     /// Returns None if the provider is not found.
     /// Use "default" explicitly if you want the default provider.
+    #[allow(dead_code)]
     pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
         let name_lower = name.to_lowercase();
         self.providers

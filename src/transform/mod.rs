@@ -100,7 +100,8 @@ impl ProviderTransformer {
             | ProviderType::Cerebras
             | ProviderType::XAI
             | ProviderType::OpenRouter
-            | ProviderType::OpenAICompatible => Box::new(OpenAITransformer::new()),
+            | ProviderType::OpenAICompatible
+            | ProviderType::Mock => Box::new(OpenAITransformer::new()), // Mock uses OpenAI format
             ProviderType::Anthropic => Box::new(AnthropicTransformer::new()),
             ProviderType::Google => Box::new(GoogleTransformer::new()),
             ProviderType::Azure => Box::new(AzureTransformer::new()),

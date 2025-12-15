@@ -292,6 +292,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             direct_url,
             direct_key,
             stream,
+            concurrent,
+            duration,
             url,
             format,
             config,
@@ -307,6 +309,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
                 direct_url,
                 direct_key,
                 stream,
+                concurrent,
+                duration,
                 server.url,
                 format,
             )

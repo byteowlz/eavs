@@ -62,9 +62,9 @@ pub enum Commands {
 pub enum ServiceCommands {
     /// Start the EAVS server in the background
     Start {
-        /// Port to bind to
-        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
-        port: u16,
+        /// Port to bind to (overrides config file)
+        #[arg(short, long, env = "EAVS_PORT")]
+        port: Option<u16>,
 
         /// Path to config file
         #[arg(short, long, env = "EAVS_CONFIG")]
@@ -78,8 +78,8 @@ pub enum ServiceCommands {
     /// Stop the running EAVS server
     Stop {
         /// Port the server is running on (to identify the process)
-        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
-        port: u16,
+        #[arg(short, long, env = "EAVS_PORT")]
+        port: Option<u16>,
 
         /// Force kill if graceful shutdown fails
         #[arg(short, long)]
@@ -88,9 +88,9 @@ pub enum ServiceCommands {
 
     /// Restart the EAVS server
     Restart {
-        /// Port to bind to
-        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
-        port: u16,
+        /// Port to bind to (overrides config file)
+        #[arg(short, long, env = "EAVS_PORT")]
+        port: Option<u16>,
 
         /// Path to config file
         #[arg(short, long, env = "EAVS_CONFIG")]
@@ -100,8 +100,8 @@ pub enum ServiceCommands {
     /// Show the status of the EAVS server
     Status {
         /// Port to check
-        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
-        port: u16,
+        #[arg(short, long, env = "EAVS_PORT")]
+        port: Option<u16>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -332,7 +332,7 @@ pub enum TestCommands {
         #[arg(short, long, default_value = "10")]
         count: u32,
 
-        /// Provider to use
+        /// Provider to use (use "mock" for cost-free benchmarking)
         #[arg(short, long, default_value = "default")]
         provider: String,
 
@@ -359,6 +359,14 @@ pub enum TestCommands {
         /// Use streaming mode
         #[arg(short, long)]
         stream: bool,
+
+        /// Number of concurrent requests (default: 1 = sequential)
+        #[arg(long, default_value = "1")]
+        concurrent: u32,
+
+        /// Duration for sustained load test (e.g., "30s", "1m"). Overrides --count.
+        #[arg(long)]
+        duration: Option<String>,
 
         /// EAVS server URL
         #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
@@ -1393,95 +1401,7 @@ pub async fn run_test_health(client: &EavsClient, format: OutputFormat) -> Resul
     Ok(())
 }
 
-/// Benchmark results
-#[derive(Debug, Serialize)]
-pub struct BenchmarkResults {
-    pub target: String,
-    pub requests: u32,
-    pub successful: u32,
-    pub failed: u32,
-    pub latencies_ms: Vec<f64>,
-    pub min_ms: f64,
-    pub max_ms: f64,
-    pub mean_ms: f64,
-    pub median_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    pub stddev_ms: f64,
-}
 
-impl BenchmarkResults {
-    fn from_latencies(target: String, latencies: Vec<f64>, failed: u32) -> Self {
-        let successful = latencies.len() as u32;
-        let requests = successful + failed;
-
-        if latencies.is_empty() {
-            return Self {
-                target,
-                requests,
-                successful: 0,
-                failed,
-                latencies_ms: vec![],
-                min_ms: 0.0,
-                max_ms: 0.0,
-                mean_ms: 0.0,
-                median_ms: 0.0,
-                p95_ms: 0.0,
-                p99_ms: 0.0,
-                stddev_ms: 0.0,
-            };
-        }
-
-        let mut sorted = latencies.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let min_ms = sorted[0];
-        let max_ms = sorted[sorted.len() - 1];
-        let mean_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
-
-        let median_ms = if sorted.len().is_multiple_of(2) {
-            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
-        } else {
-            sorted[sorted.len() / 2]
-        };
-
-        let p95_idx = ((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1);
-        let p99_idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
-        let p95_ms = sorted[p95_idx];
-        let p99_ms = sorted[p99_idx];
-
-        let variance = sorted.iter().map(|x| (x - mean_ms).powi(2)).sum::<f64>() / sorted.len() as f64;
-        let stddev_ms = variance.sqrt();
-
-        Self {
-            target,
-            requests,
-            successful,
-            failed,
-            latencies_ms: sorted,
-            min_ms,
-            max_ms,
-            mean_ms,
-            median_ms,
-            p95_ms,
-            p99_ms,
-            stddev_ms,
-        }
-    }
-
-    fn print_text(&self) {
-        println!("  Requests:  {} ({} successful, {} failed)", self.requests, self.successful, self.failed);
-        if self.successful > 0 {
-            println!("  Min:       {:.2}ms", self.min_ms);
-            println!("  Max:       {:.2}ms", self.max_ms);
-            println!("  Mean:      {:.2}ms", self.mean_ms);
-            println!("  Median:    {:.2}ms", self.median_ms);
-            println!("  P95:       {:.2}ms", self.p95_ms);
-            println!("  P99:       {:.2}ms", self.p99_ms);
-            println!("  Std Dev:   {:.2}ms", self.stddev_ms);
-        }
-    }
-}
 
 /// Run a single timed request
 async fn timed_request(
@@ -1538,6 +1458,154 @@ fn guess_image_mime(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Parse duration string like "30s", "1m", "5m30s" into Duration
+fn parse_duration_string(s: &str) -> Option<Duration> {
+    let s = s.trim().to_lowercase();
+    let mut total_secs = 0u64;
+    let mut current_num = String::new();
+    
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            current_num.push(c);
+        } else {
+            let num: u64 = current_num.parse().ok()?;
+            current_num.clear();
+            match c {
+                's' => total_secs += num,
+                'm' => total_secs += num * 60,
+                'h' => total_secs += num * 3600,
+                _ => return None,
+            }
+        }
+    }
+    
+    // Handle case where just a number is given (assume seconds)
+    if !current_num.is_empty() {
+        total_secs += current_num.parse::<u64>().ok()?;
+    }
+    
+    if total_secs > 0 {
+        Some(Duration::from_secs(total_secs))
+    } else {
+        None
+    }
+}
+
+/// Concurrent benchmark results with throughput metrics
+#[derive(Debug, Serialize)]
+pub struct ConcurrentBenchmarkResults {
+    pub target: String,
+    pub concurrency: u32,
+    pub duration_secs: f64,
+    pub total_requests: u32,
+    pub successful: u32,
+    pub failed: u32,
+    pub requests_per_second: f64,
+    pub latencies_ms: Vec<f64>,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub mean_ms: f64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub stddev_ms: f64,
+}
+
+impl ConcurrentBenchmarkResults {
+    fn from_results(
+        target: String,
+        concurrency: u32,
+        duration_secs: f64,
+        latencies: Vec<f64>,
+        failed: u32,
+    ) -> Self {
+        let successful = latencies.len() as u32;
+        let total_requests = successful + failed;
+        let requests_per_second = if duration_secs > 0.0 {
+            total_requests as f64 / duration_secs
+        } else {
+            0.0
+        };
+
+        if latencies.is_empty() {
+            return Self {
+                target,
+                concurrency,
+                duration_secs,
+                total_requests,
+                successful: 0,
+                failed,
+                requests_per_second,
+                latencies_ms: vec![],
+                min_ms: 0.0,
+                max_ms: 0.0,
+                mean_ms: 0.0,
+                median_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                stddev_ms: 0.0,
+            };
+        }
+
+        let mut sorted = latencies.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let min_ms = sorted[0];
+        let max_ms = sorted[sorted.len() - 1];
+        let mean_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
+
+        let median_ms = if sorted.len() % 2 == 0 {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        } else {
+            sorted[sorted.len() / 2]
+        };
+
+        let p95_idx = ((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1);
+        let p99_idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+        let p95_ms = sorted[p95_idx];
+        let p99_ms = sorted[p99_idx];
+
+        let variance = sorted.iter().map(|x| (x - mean_ms).powi(2)).sum::<f64>() / sorted.len() as f64;
+        let stddev_ms = variance.sqrt();
+
+        Self {
+            target,
+            concurrency,
+            duration_secs,
+            total_requests,
+            successful,
+            failed,
+            requests_per_second,
+            latencies_ms: sorted,
+            min_ms,
+            max_ms,
+            mean_ms,
+            median_ms,
+            p95_ms,
+            p99_ms,
+            stddev_ms,
+        }
+    }
+
+    fn print_text(&self) {
+        println!("  Concurrency:       {}", self.concurrency);
+        println!("  Duration:          {:.2}s", self.duration_secs);
+        println!("  Total requests:    {} ({} successful, {} failed)", 
+                 self.total_requests, self.successful, self.failed);
+        println!("  Throughput:        {:.2} req/s", self.requests_per_second);
+        if self.successful > 0 {
+            println!("  Latency:");
+            println!("    Min:             {:.2}ms", self.min_ms);
+            println!("    Max:             {:.2}ms", self.max_ms);
+            println!("    Mean:            {:.2}ms", self.mean_ms);
+            println!("    Median:          {:.2}ms", self.median_ms);
+            println!("    P95:             {:.2}ms", self.p95_ms);
+            println!("    P99:             {:.2}ms", self.p99_ms);
+            println!("    Std Dev:         {:.2}ms", self.stddev_ms);
+        }
+    }
+}
+
 pub async fn run_test_bench(
     count: u32,
     provider: String,
@@ -1547,6 +1615,8 @@ pub async fn run_test_bench(
     direct_url: String,
     direct_key: Option<String>,
     stream: bool,
+    concurrent: u32,
+    duration: Option<String>,
     eavs_url: String,
     format: OutputFormat,
 ) -> Result<(), CliError> {
@@ -1563,49 +1633,56 @@ pub async fn run_test_bench(
         "max_tokens": 5
     });
 
-    println!("EAVS Latency Benchmark");
+    // Parse duration if provided
+    let test_duration = duration.as_ref().and_then(|d| parse_duration_string(d));
+    let is_duration_test = test_duration.is_some();
+    let concurrent = concurrent.max(1);
+
+    println!("EAVS Benchmark");
     println!("{}", "=".repeat(50));
     println!("Model: {}", model);
     println!("Provider: {}", provider);
-    println!("Requests: {}", count);
+    if is_duration_test {
+        println!("Duration: {:?}", test_duration.unwrap());
+    } else {
+        println!("Requests: {}", count);
+    }
+    println!("Concurrency: {}", concurrent);
     println!("Streaming: {}", stream);
     println!();
 
     // Warm-up request
     println!("Warming up...");
-    let warmup_url = format!("{}/v1/chat/completions", eavs_url);
-    let _ = timed_request(&client, &warmup_url, &body, api_key.as_deref(), Some(&provider)).await;
+    let endpoint_url = format!("{}/v1/chat/completions", eavs_url);
+    let _ = timed_request(&client, &endpoint_url, &body, api_key.as_deref(), Some(&provider)).await;
 
-    // Benchmark EAVS proxy
-    println!("Benchmarking EAVS proxy ({})...", eavs_url);
-    let mut eavs_latencies = Vec::with_capacity(count as usize);
-    let mut eavs_failed = 0u32;
-
-    for i in 1..=count {
-        match timed_request(&client, &warmup_url, &body, api_key.as_deref(), Some(&provider)).await {
-            Ok(duration) => {
-                eavs_latencies.push(duration.as_secs_f64() * 1000.0);
-                print!(".");
-            }
-            Err(_) => {
-                eavs_failed += 1;
-                print!("X");
-            }
-        }
-        if i % 10 == 0 {
-            println!(" [{}/{}]", i, count);
-        }
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-    }
-    if !count.is_multiple_of(10) {
-        println!();
-    }
-
-    let eavs_results = BenchmarkResults::from_latencies(
-        format!("EAVS ({})", eavs_url),
-        eavs_latencies,
-        eavs_failed,
-    );
+    // Run benchmark
+    let eavs_results = if concurrent == 1 {
+        // Sequential benchmark (original behavior)
+        run_sequential_benchmark(
+            &client,
+            &endpoint_url,
+            &body,
+            api_key.as_deref(),
+            Some(&provider),
+            count,
+            test_duration,
+            format!("EAVS ({})", eavs_url),
+        ).await
+    } else {
+        // Concurrent benchmark
+        run_concurrent_benchmark(
+            &client,
+            &endpoint_url,
+            &body,
+            api_key.as_deref(),
+            Some(&provider),
+            count,
+            concurrent,
+            test_duration,
+            format!("EAVS ({})", eavs_url),
+        ).await
+    };
 
     // Optionally benchmark direct provider access
     let direct_results = if compare_direct {
@@ -1617,34 +1694,31 @@ pub async fn run_test_bench(
         println!("Benchmarking direct provider ({})...", direct_url);
 
         let direct_endpoint = format!("{}/v1/chat/completions", direct_url);
-        let mut direct_latencies = Vec::with_capacity(count as usize);
-        let mut direct_failed = 0u32;
-
-        for i in 1..=count {
-            match timed_request(&client, &direct_endpoint, &body, Some(&direct_api_key), None).await {
-                Ok(duration) => {
-                    direct_latencies.push(duration.as_secs_f64() * 1000.0);
-                    print!(".");
-                }
-                Err(_) => {
-                    direct_failed += 1;
-                    print!("X");
-                }
-            }
-            if i % 10 == 0 {
-                println!(" [{}/{}]", i, count);
-            }
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+        
+        if concurrent == 1 {
+            Some(run_sequential_benchmark(
+                &client,
+                &direct_endpoint,
+                &body,
+                Some(&direct_api_key),
+                None,
+                count,
+                test_duration,
+                format!("Direct ({})", direct_url),
+            ).await)
+        } else {
+            Some(run_concurrent_benchmark(
+                &client,
+                &direct_endpoint,
+                &body,
+                Some(&direct_api_key),
+                None,
+                count,
+                concurrent,
+                test_duration,
+                format!("Direct ({})", direct_url),
+            ).await)
         }
-        if !count.is_multiple_of(10) {
-            println!();
-        }
-
-        Some(BenchmarkResults::from_latencies(
-            format!("Direct ({})", direct_url),
-            direct_latencies,
-            direct_failed,
-        ))
     } else {
         None
     };
@@ -1688,14 +1762,201 @@ pub async fn run_test_bench(
                     0.0
                 };
                 println!("  Mean overhead:   {:.2}ms ({:.1}%)", overhead_ms, overhead_pct);
-
-                let median_overhead = eavs_results.median_ms - direct.median_ms;
-                println!("  Median overhead: {:.2}ms", median_overhead);
+                println!("  Median overhead: {:.2}ms", eavs_results.median_ms - direct.median_ms);
             }
         }
     }
 
     Ok(())
+}
+
+/// Run sequential benchmark (original behavior)
+async fn run_sequential_benchmark(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: Option<&str>,
+    provider: Option<&str>,
+    count: u32,
+    duration: Option<Duration>,
+    target_name: String,
+) -> ConcurrentBenchmarkResults {
+    println!("Benchmarking {} (sequential)...", target_name);
+    
+    let start_time = std::time::Instant::now();
+    let mut latencies = Vec::with_capacity(count as usize);
+    let mut failed = 0u32;
+    let mut completed = 0u32;
+
+    loop {
+        // Check termination conditions
+        if let Some(dur) = duration {
+            if start_time.elapsed() >= dur {
+                break;
+            }
+        } else if completed >= count {
+            break;
+        }
+
+        match timed_request(client, url, body, api_key, provider).await {
+            Ok(dur) => {
+                latencies.push(dur.as_secs_f64() * 1000.0);
+                print!(".");
+            }
+            Err(_) => {
+                failed += 1;
+                print!("X");
+            }
+        }
+        completed += 1;
+        
+        if completed % 10 == 0 {
+            if let Some(_) = duration {
+                println!(" [{} in {:.1}s]", completed, start_time.elapsed().as_secs_f64());
+            } else {
+                println!(" [{}/{}]", completed, count);
+            }
+        }
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+    
+    if completed % 10 != 0 {
+        println!();
+    }
+
+    ConcurrentBenchmarkResults::from_results(
+        target_name,
+        1,
+        start_time.elapsed().as_secs_f64(),
+        latencies,
+        failed,
+    )
+}
+
+/// Run concurrent benchmark
+async fn run_concurrent_benchmark(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: Option<&str>,
+    provider: Option<&str>,
+    count: u32,
+    concurrency: u32,
+    duration: Option<Duration>,
+    target_name: String,
+) -> ConcurrentBenchmarkResults {
+    use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    println!("Benchmarking {} ({} concurrent)...", target_name, concurrency);
+
+    let start_time = std::time::Instant::now();
+    let latencies = Arc::new(Mutex::new(Vec::with_capacity(count as usize)));
+    let failed = Arc::new(AtomicU32::new(0));
+    let completed = Arc::new(AtomicU32::new(0));
+    let should_stop = Arc::new(AtomicBool::new(false));
+    
+    // Spawn worker tasks
+    let mut handles = Vec::new();
+    
+    for _ in 0..concurrency {
+        let client = client.clone();
+        let url = url.to_string();
+        let body = body.clone();
+        let api_key = api_key.map(|s| s.to_string());
+        let provider = provider.map(|s| s.to_string());
+        let latencies = latencies.clone();
+        let failed = failed.clone();
+        let completed = completed.clone();
+        let should_stop = should_stop.clone();
+        let start = start_time;
+        
+        let handle = tokio::spawn(async move {
+            loop {
+                // Check if we should stop
+                if should_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                
+                // Check termination conditions
+                if let Some(dur) = duration {
+                    if start.elapsed() >= dur {
+                        should_stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                } else {
+                    let current = completed.load(Ordering::Relaxed);
+                    if current >= count {
+                        break;
+                    }
+                }
+                
+                // Make request
+                let result = timed_request(
+                    &client,
+                    &url,
+                    &body,
+                    api_key.as_deref(),
+                    provider.as_deref(),
+                ).await;
+                
+                match result {
+                    Ok(dur) => {
+                        let mut lats = latencies.lock().await;
+                        lats.push(dur.as_secs_f64() * 1000.0);
+                    }
+                    Err(_) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                completed.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        
+        handles.push(handle);
+    }
+    
+    // Progress reporting task
+    let completed_progress = completed.clone();
+    let failed_progress = failed.clone();
+    let should_stop_progress = should_stop.clone();
+    let progress_handle = tokio::spawn(async move {
+        let mut last_count = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if should_stop_progress.load(Ordering::Relaxed) {
+                break;
+            }
+            let current = completed_progress.load(Ordering::Relaxed);
+            let fails = failed_progress.load(Ordering::Relaxed);
+            if current > last_count {
+                print!("\r  Progress: {} requests ({} failed)    ", current, fails);
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                last_count = current;
+            }
+        }
+    });
+    
+    // Wait for all workers
+    for handle in handles {
+        let _ = handle.await;
+    }
+    should_stop.store(true, Ordering::Relaxed);
+    let _ = progress_handle.await;
+    
+    println!();
+
+    let final_latencies = latencies.lock().await.clone();
+    let final_failed = failed.load(Ordering::Relaxed);
+    
+    ConcurrentBenchmarkResults::from_results(
+        target_name,
+        concurrency,
+        start_time.elapsed().as_secs_f64(),
+        final_latencies,
+        final_failed,
+    )
 }
 
 // =============================================================================
@@ -1761,7 +2022,7 @@ pub fn find_available_port(start_port: u16) -> u16 {
 
 /// Start the EAVS server in the background
 pub fn start_server_background(
-    port: u16,
+    port: Option<u16>,
     config_path: Option<&str>,
 ) -> Result<std::process::Child, CliError> {
     let exe_path = std::env::current_exe().map_err(|e| {
@@ -1770,10 +2031,13 @@ pub fn start_server_background(
 
     let mut cmd = std::process::Command::new(&exe_path);
     cmd.arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+
+    // Only pass --port if explicitly specified (let config file determine port otherwise)
+    if let Some(p) = port {
+        cmd.arg("--port").arg(p.to_string());
+    }
 
     if let Some(config) = config_path {
         cmd.arg("--config").arg(config);
@@ -1796,12 +2060,14 @@ pub async fn ensure_server_running(
     })?;
 
     let host = url.host_str().unwrap_or("127.0.0.1");
-    let preferred_port = url.port().unwrap_or(3000);
+    // Use port from URL if specified, otherwise get from config
+    let preferred_port = url.port().unwrap_or_else(|| get_effective_port(None, config_path));
 
     // First, check if EAVS is already running at the preferred URL
-    if is_eavs_server_running(preferred_url).await {
+    let check_url = format!("{}://{}:{}", url.scheme(), host, preferred_port);
+    if is_eavs_server_running(&check_url).await {
         return Ok(ServerStatus {
-            url: preferred_url.to_string(),
+            url: check_url,
             port: preferred_port,
             was_started: false,
         });
@@ -1820,9 +2086,10 @@ pub async fn ensure_server_running(
         preferred_port
     };
 
-    // Start the server
+    // Start the server (don't pass port - let config determine it, unless we had to find a new port)
     eprintln!("Starting EAVS server on port {}...", port);
-    let _child = start_server_background(port, config_path)?;
+    let cli_port = if port != preferred_port { Some(port) } else { None };
+    let _child = start_server_background(cli_port, config_path)?;
 
     // Build the new URL
     let new_url = format!("{}://{}:{}", url.scheme(), host, port);
@@ -1992,34 +2259,53 @@ pub struct ServiceStatus {
     pub providers: Vec<String>,
 }
 
+/// Get the effective port from CLI arg, env, or config file
+fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u16 {
+    // CLI/env takes precedence
+    if let Some(p) = cli_port {
+        return p;
+    }
+    
+    // Try to load from config file
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path).ok()
+    } else {
+        crate::config::AppConfig::load().ok()
+    };
+    
+    config.map(|c| c.server.port).unwrap_or(3000)
+}
+
 /// Start the EAVS service in the background
 pub async fn run_service_start(
-    port: u16,
+    port: Option<u16>,
     config_path: Option<String>,
     wait: bool,
 ) -> Result<(), CliError> {
-    let url = format!("http://127.0.0.1:{}", port);
+    // Determine the effective port (from CLI, env, or config)
+    let effective_port = get_effective_port(port, config_path.as_deref());
+    let url = format!("http://127.0.0.1:{}", effective_port);
 
     // Check if already running
     if is_eavs_server_running(&url).await {
-        println!("EAVS server is already running on port {}", port);
+        println!("EAVS server is already running on port {}", effective_port);
         return Ok(());
     }
 
     // Check if port is in use by something else
-    if !is_port_available(port) {
+    if !is_port_available(effective_port) {
         return Err(CliError::Other(format!(
             "Port {} is already in use by another application",
-            port
+            effective_port
         )));
     }
 
-    // Start the server
-    println!("Starting EAVS server on port {}...", port);
+    // Start the server (pass the CLI port only if explicitly set)
+    println!("Starting EAVS server on port {}...", effective_port);
     let child = start_server_background(port, config_path.as_deref())?;
 
     // Write PID file
-    write_pid_file(port, child.id())?;
+    write_pid_file(effective_port, child.id())?;
 
     if wait {
         // Wait for server to be ready
@@ -2036,10 +2322,10 @@ pub async fn run_service_start(
         }
 
         // Cleanup on failure
-        remove_pid_file(port);
+        remove_pid_file(effective_port);
         return Err(CliError::Other(format!(
             "Timed out waiting for EAVS server to start on port {}",
-            port
+            effective_port
         )));
     } else {
         println!("EAVS server starting in background (PID: {})", child.id());
@@ -2049,17 +2335,18 @@ pub async fn run_service_start(
 }
 
 /// Stop the EAVS service
-pub async fn run_service_stop(port: u16, force: bool) -> Result<(), CliError> {
-    let url = format!("http://127.0.0.1:{}", port);
+pub async fn run_service_stop(port: Option<u16>, force: bool) -> Result<(), CliError> {
+    let effective_port = get_effective_port(port, None);
+    let url = format!("http://127.0.0.1:{}", effective_port);
 
     // Try to find PID from file first, then by port
-    let pid = read_pid_file(port).or_else(|| find_eavs_pid_by_port(port));
+    let pid = read_pid_file(effective_port).or_else(|| find_eavs_pid_by_port(effective_port));
 
     match pid {
         Some(pid) => {
             if !is_process_running(pid) {
                 println!("EAVS server is not running (stale PID file)");
-                remove_pid_file(port);
+                remove_pid_file(effective_port);
                 return Ok(());
             }
 
@@ -2074,7 +2361,7 @@ pub async fn run_service_stop(port: u16, force: bool) -> Result<(), CliError> {
 
             while start.elapsed() < timeout {
                 if !is_process_running(pid) {
-                    remove_pid_file(port);
+                    remove_pid_file(effective_port);
                     println!("EAVS server stopped successfully");
                     return Ok(());
                 }
@@ -2088,7 +2375,7 @@ pub async fn run_service_stop(port: u16, force: bool) -> Result<(), CliError> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
 
-            remove_pid_file(port);
+            remove_pid_file(effective_port);
 
             if is_process_running(pid) {
                 return Err(CliError::Other(format!(
@@ -2103,22 +2390,22 @@ pub async fn run_service_stop(port: u16, force: bool) -> Result<(), CliError> {
         None => {
             // Check if something is responding on the port
             if is_eavs_server_running(&url).await {
-                println!("EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})", port);
+                println!("EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})", effective_port);
                 return Err(CliError::Other(
                     "Could not determine EAVS server PID".to_string(),
                 ));
             }
-            println!("EAVS server is not running on port {}", port);
+            println!("EAVS server is not running on port {}", effective_port);
             Ok(())
         }
     }
 }
 
 /// Restart the EAVS service
-pub async fn run_service_restart(port: u16, config_path: Option<String>) -> Result<(), CliError> {
+pub async fn run_service_restart(port: Option<u16>, config_path: Option<String>) -> Result<(), CliError> {
     println!("Restarting EAVS server...");
 
-    // Stop if running
+    // Stop if running (use config to find port if not specified)
     let _ = run_service_stop(port, false).await;
 
     // Small delay to ensure port is released
@@ -2129,9 +2416,10 @@ pub async fn run_service_restart(port: u16, config_path: Option<String>) -> Resu
 }
 
 /// Get the status of the EAVS service
-pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), CliError> {
-    let url = format!("http://127.0.0.1:{}", port);
-    let pid = read_pid_file(port).or_else(|| find_eavs_pid_by_port(port));
+pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Result<(), CliError> {
+    let effective_port = get_effective_port(port, None);
+    let url = format!("http://127.0.0.1:{}", effective_port);
+    let pid = read_pid_file(effective_port).or_else(|| find_eavs_pid_by_port(effective_port));
 
     let running = is_eavs_server_running(&url).await;
 
@@ -2148,7 +2436,7 @@ pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), C
     let status = ServiceStatus {
         running,
         pid: if running { pid } else { None },
-        port,
+        port: effective_port,
         url: url.clone(),
         uptime_secs: uptime,
         providers: providers.clone(),
@@ -2165,7 +2453,7 @@ pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), C
                 if let Some(pid) = status.pid {
                     println!("  PID:       {}", pid);
                 }
-                println!("  Port:      {}", port);
+                println!("  Port:      {}", effective_port);
                 println!("  URL:       {}", url);
                 if let Some(uptime) = uptime {
                     let hours = uptime / 3600;
@@ -2179,11 +2467,11 @@ pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), C
             } else {
                 println!("EAVS Server Status: STOPPED");
                 println!("{}", "=".repeat(40));
-                println!("  Port:      {}", port);
+                println!("  Port:      {}", effective_port);
 
                 // Check if port is in use by something else
-                if !is_port_available(port) {
-                    println!("  Note:      Port {} is in use by another application", port);
+                if !is_port_available(effective_port) {
+                    println!("  Note:      Port {} is in use by another application", effective_port);
                 }
             }
         }
@@ -2231,4 +2519,204 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_get_effective_port_cli_takes_precedence() {
+        // CLI port should always win
+        let port = get_effective_port(Some(8080), None);
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_get_effective_port_from_config_file() {
+        // Create a temp config file with a custom port
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test-config.toml");
+        fs::write(&config_path, r#"
+            [server]
+            port = 4242
+        "#).unwrap();
+
+        let port = get_effective_port(None, Some(config_path.to_str().unwrap()));
+        assert_eq!(port, 4242);
+    }
+
+    #[test]
+    fn test_get_effective_port_default_fallback() {
+        // When no CLI port and no config, should fall back to 3000
+        // This test uses a non-existent config path
+        let port = get_effective_port(None, Some("/nonexistent/path/config.toml"));
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_get_effective_port_cli_overrides_config() {
+        // Create a temp config file with a custom port
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test-config.toml");
+        fs::write(&config_path, r#"
+            [server]
+            port = 4242
+        "#).unwrap();
+
+        // CLI port should override config file port
+        let port = get_effective_port(Some(9999), Some(config_path.to_str().unwrap()));
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn test_get_effective_port_env_via_config() {
+        // When EAVS_PORT env is set, config library should pick it up
+        // Note: The env var is processed by the config crate, not get_effective_port directly
+        // This test verifies the CLI arg takes precedence over everything
+        let port = get_effective_port(Some(7777), None);
+        assert_eq!(port, 7777);
+    }
+
+    #[test]
+    fn test_parse_expiration_days() {
+        let result = parse_expiration("30d");
+        assert!(result.is_some());
+        // Should be a valid RFC3339 timestamp
+        let timestamp = result.unwrap();
+        assert!(timestamp.contains("T"));
+    }
+
+    #[test]
+    fn test_parse_expiration_hours() {
+        let result = parse_expiration("24h");
+        assert!(result.is_some());
+        let timestamp = result.unwrap();
+        assert!(timestamp.contains("T"));
+    }
+
+    #[test]
+    fn test_parse_expiration_minutes() {
+        let result = parse_expiration("60m");
+        assert!(result.is_some());
+        let timestamp = result.unwrap();
+        assert!(timestamp.contains("T"));
+    }
+
+    #[test]
+    fn test_parse_expiration_never() {
+        assert!(parse_expiration("never").is_none());
+        assert!(parse_expiration("").is_none());
+    }
+
+    #[test]
+    fn test_parse_expiration_invalid() {
+        assert!(parse_expiration("invalid").is_none());
+        assert!(parse_expiration("30").is_none());
+        assert!(parse_expiration("30x").is_none());
+    }
+
+    #[test]
+    fn test_is_port_available() {
+        // Port 0 should be available (OS assigns random port)
+        // We can't reliably test specific ports as they might be in use
+        // Just verify the function doesn't panic
+        let _ = is_port_available(0);
+        let _ = is_port_available(65535);
+    }
+
+    #[test]
+    fn test_find_available_port() {
+        // Should return a port in the range
+        let port = find_available_port(50000);
+        assert!(port >= 50000);
+        assert!(port < 50100);
+    }
+
+    #[test]
+    fn test_benchmark_results_from_empty_latencies() {
+        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, vec![], 5);
+        assert_eq!(results.successful, 0);
+        assert_eq!(results.failed, 5);
+        assert_eq!(results.total_requests, 5);
+        assert_eq!(results.min_ms, 0.0);
+        assert_eq!(results.max_ms, 0.0);
+    }
+
+    #[test]
+    fn test_benchmark_results_statistics() {
+        let latencies = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, latencies, 0);
+        
+        assert_eq!(results.successful, 5);
+        assert_eq!(results.failed, 0);
+        assert_eq!(results.min_ms, 10.0);
+        assert_eq!(results.max_ms, 50.0);
+        assert_eq!(results.mean_ms, 30.0);
+        assert_eq!(results.median_ms, 30.0);
+    }
+
+    #[test]
+    fn test_parse_duration_string() {
+        assert_eq!(parse_duration_string("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration_string("1m"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_duration_string("2m30s"), Some(Duration::from_secs(150)));
+        assert_eq!(parse_duration_string("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration_string("1h30m"), Some(Duration::from_secs(5400)));
+        assert_eq!(parse_duration_string("invalid"), None);
+        assert_eq!(parse_duration_string(""), None);
+    }
+
+    #[test]
+    fn test_concurrent_benchmark_throughput() {
+        let latencies = vec![100.0, 100.0, 100.0, 100.0, 100.0]; // 5 requests at 100ms each
+        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 5, 1.0, latencies, 0);
+        
+        assert_eq!(results.total_requests, 5);
+        assert_eq!(results.requests_per_second, 5.0); // 5 requests in 1 second
+        assert_eq!(results.concurrency, 5);
+    }
+
+    #[test]
+    fn test_guess_image_mime() {
+        assert_eq!(guess_image_mime("test.png"), Some("image/png"));
+        assert_eq!(guess_image_mime("test.PNG"), Some("image/png"));
+        assert_eq!(guess_image_mime("test.jpg"), Some("image/jpeg"));
+        assert_eq!(guess_image_mime("test.jpeg"), Some("image/jpeg"));
+        assert_eq!(guess_image_mime("test.webp"), Some("image/webp"));
+        assert_eq!(guess_image_mime("test.gif"), Some("image/gif"));
+        assert_eq!(guess_image_mime("test.txt"), None);
+        assert_eq!(guess_image_mime("test.pdf"), None);
+    }
+
+    #[test]
+    fn test_xdg_state_dir() {
+        // Save original env
+        let original_state = env::var("XDG_STATE_HOME").ok();
+        let original_home = env::var("HOME").ok();
+
+        // Test with XDG_STATE_HOME set
+        env::set_var("XDG_STATE_HOME", "/custom/state");
+        assert_eq!(xdg_state_dir(), PathBuf::from("/custom/state"));
+
+        // Test without XDG_STATE_HOME but with HOME
+        env::remove_var("XDG_STATE_HOME");
+        env::set_var("HOME", "/home/testuser");
+        assert_eq!(xdg_state_dir(), PathBuf::from("/home/testuser/.local/state"));
+
+        // Restore original env
+        if let Some(val) = original_state {
+            env::set_var("XDG_STATE_HOME", val);
+        } else {
+            env::remove_var("XDG_STATE_HOME");
+        }
+        if let Some(val) = original_home {
+            env::set_var("HOME", val);
+        } else {
+            env::remove_var("HOME");
+        }
+    }
 }
