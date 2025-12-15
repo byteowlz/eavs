@@ -12,7 +12,7 @@ mod types;
 mod validation;
 mod word_lists;
 
-// Public API - some items may not be used internally but are exposed for external use
+// Public API
 pub use cost::CostCalculator;
 pub use generation::is_virtual_key;
 pub use pricing::SharedPricingTable;
@@ -20,4 +20,3 @@ pub use rate_limit::RateLimiter;
 pub use store::{KeyStore, UsageRecord};
 pub use types::*;
 pub use validation::{KeyValidator, ValidatedKey};
-pub use word_lists::{WordListError, WordLists};

@@ -301,7 +301,7 @@ pub async fn list_keys_handler(
 pub async fn get_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(key_hash): Path<String>,
+    Path(key_id_or_hash): Path<String>,
 ) -> Result<Json<KeyInfo>, (StatusCode, Json<KeyApiError>)> {
     check_keys_enabled(&state)?;
     check_master_key(&headers, &state)?;
@@ -313,24 +313,30 @@ pub async fn get_key_handler(
         )
     })?;
 
-    let key = store.get_by_hash(&key_hash).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(KeyApiError::new("Key not found", "not_found")),
-        )
-    })?;
+    // Try lookup by human ID first (e.g., "cold-lamp"), then by hash
+    let key = store
+        .get_by_human_id(&key_id_or_hash)
+        .or_else(|| store.get_by_hash(&key_id_or_hash))
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(KeyApiError::new("Key not found", "not_found")),
+            )
+        })?;
 
     Ok(Json(key.to_info()))
 }
 
 /// Disable a virtual API key.
 /// 
-/// DELETE /admin/keys/:key_hash
+/// DELETE /admin/keys/:key_id_or_hash
 /// Authorization: Bearer <master_key>
+/// 
+/// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn delete_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(key_hash): Path<String>,
+    Path(key_id_or_hash): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<KeyApiError>)> {
     check_keys_enabled(&state)?;
     check_master_key(&headers, &state)?;
@@ -341,6 +347,13 @@ pub async fn delete_key_handler(
             Json(KeyApiError::new("Key store not initialized", "internal_error")),
         )
     })?;
+
+    // Resolve human ID to hash if needed
+    let key_hash = if let Some(key) = store.get_by_human_id(&key_id_or_hash) {
+        key.key_hash
+    } else {
+        key_id_or_hash
+    };
 
     let deleted = store.disable_key(&key_hash).await.map_err(|e| {
         (
@@ -363,12 +376,14 @@ pub async fn delete_key_handler(
 
 /// Get usage history for a key.
 /// 
-/// GET /admin/keys/:key_hash/usage
+/// GET /admin/keys/:key_id_or_hash/usage
 /// Authorization: Bearer <master_key>
+/// 
+/// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn key_usage_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(key_hash): Path<String>,
+    Path(key_id_or_hash): Path<String>,
 ) -> Result<Json<Vec<crate::keys::UsageRecord>>, (StatusCode, Json<KeyApiError>)> {
     check_keys_enabled(&state)?;
     check_master_key(&headers, &state)?;
@@ -379,6 +394,13 @@ pub async fn key_usage_handler(
             Json(KeyApiError::new("Key store not initialized", "internal_error")),
         )
     })?;
+
+    // Resolve human ID to hash if needed
+    let key_hash = if let Some(key) = store.get_by_human_id(&key_id_or_hash) {
+        key.key_hash
+    } else {
+        key_id_or_hash
+    };
 
     let history = store.get_usage_history(&key_hash, Some(100)).await.map_err(|e| {
         (

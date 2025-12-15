@@ -79,9 +79,7 @@ impl RequestTransformer for AzureTransformer {
         // Azure uses deployment-based URLs:
         // /openai/deployments/{deployment}/chat/completions?api-version=2024-02-15-preview
         let deployment = self
-            .deployment
-            .as_ref()
-            .map(|d| d.as_str())
+            .deployment.as_deref()
             .unwrap_or(&context.model);
 
         format!(

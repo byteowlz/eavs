@@ -3,6 +3,8 @@
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
+use super::word_lists::WordLists;
+
 /// Key prefix for EAVS virtual keys.
 pub const KEY_PREFIX: &str = "eavs-";
 
@@ -21,6 +23,22 @@ pub fn generate_key() -> String {
 
     let encoded = base62_encode(&random_bytes);
     format!("{}{}", KEY_PREFIX, encoded)
+}
+
+/// Generate a human-readable key ID using word lists.
+///
+/// Format: `adjective-noun` (e.g., "cold-lamp", "blue-frog")
+///
+/// Uses embedded word lists for generation. The combination provides
+/// ~40,000 unique IDs (200 adjectives * 200 nouns).
+pub fn generate_human_id() -> String {
+    let words = WordLists::embedded();
+    words.generate_id().unwrap_or_else(|| {
+        // Fallback to short random ID if word generation fails
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 4] = rng.gen();
+        format!("key-{}", base62_encode(&bytes))
+    })
 }
 
 /// Generate a hash of a key for storage.
