@@ -65,11 +65,24 @@ type = "openrouter"
 api_key = "env:OPENROUTER_API_KEY"
 # base_url defaults to https://openrouter.ai/api/v1
 
+# AWS Bedrock
+[providers.bedrock]
+type = "bedrock"
+aws_region = "env:AWS_REGION"
+aws_access_key_id = "env:AWS_ACCESS_KEY_ID"
+aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
+# aws_session_token = "env:AWS_SESSION_TOKEN"  # optional
+# base_url defaults to https://bedrock-runtime.${aws_region}.amazonaws.com
+
 # Azure OpenAI
 [providers.azure]
 type = "azure"
 api_key = "env:AZURE_OPENAI_KEY"
-base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+# Option 1 (recommended): point directly at a deployment
+# base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+#
+# Option 2: point at the Azure resource endpoint; EAVS will treat `model` as the deployment name
+base_url = "env:AZURE_OPENAI_ENDPOINT"
 api_version = "2024-02-15-preview"
 
 # Local Ollama
@@ -126,6 +139,41 @@ default = "stdout"
 [analysis]
 enabled = true
 broadcast_channel_size = 1024
+
+# Optional: Run analysis plugins (external processes).
+# Each plugin receives JSONL AnalysisEvent records on stdin.
+# Plugins can emit JSON commands on stdout:
+#   {"type":"inject","conversation_id":"conv1","messages":[{"role":"system","content":"..."}]}
+#   {"type":"clear","conversation_id":"conv1"}
+#
+# [[analysis.plugins]]
+# name = "my-analyzer"
+# command = "my-analyzer"
+# args = ["--mode", "observe"]
+# env = { MY_API_KEY = "env:MY_API_KEY" }
+
+# =============================================================================
+# Policy Engine
+# =============================================================================
+# Apply deny/rewrite/filter rules to requests before proxying upstream.
+#
+# [policy]
+# enabled = true
+#
+# [[policy.rules]]
+# action = "deny"
+# model = "gpt-4*"
+# reason = "This model family is disabled by local policy"
+#
+# [[policy.rules]]
+# action = "rewrite_model"
+# provider = "default"
+# model = "gpt-4o-mini"
+# to = "gpt-4o"
+#
+# [[policy.rules]]
+# action = "filter_tools"
+# deny = ["delete_*", "rm_*"]
 
 # =============================================================================
 # Conversation State

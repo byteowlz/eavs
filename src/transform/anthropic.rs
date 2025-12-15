@@ -60,7 +60,7 @@ impl RequestTransformer for AnthropicTransformer {
         }
 
         // Build messages
-        let messages = build_anthropic_messages(context, self.enable_cache);
+        let messages = build_anthropic_messages(context, self.enable_cache)?;
         request["messages"] = Value::Array(messages);
 
         // Add max_tokens (required for Anthropic)
@@ -247,8 +247,8 @@ pub fn parse_anthropic_request(body: &Value) -> Result<Context, TransformError> 
 
         match role {
             "user" => {
-                let user_msg = parse_anthropic_user_message(msg)?;
-                context.messages.push(Message::User(user_msg));
+                let msgs = parse_anthropic_user_message_to_messages(msg)?;
+                context.messages.extend(msgs);
             }
             "assistant" => {
                 let assistant_msg = parse_anthropic_assistant_message(msg)?;
@@ -281,6 +281,68 @@ pub fn parse_anthropic_request(body: &Value) -> Result<Context, TransformError> 
     context.original_request = Some(body.clone());
 
     Ok(context)
+}
+
+fn parse_anthropic_user_message_to_messages(msg: &Value) -> Result<Vec<Message>, TransformError> {
+    let mut out = Vec::new();
+
+    match &msg["content"] {
+        Value::String(s) => {
+            out.push(Message::User(crate::types::UserMessage {
+                content: vec![ContentBlock::Text(TextContent::new(s))],
+                timestamp: 0,
+            }));
+        }
+        Value::Array(parts) => {
+            let mut current = Vec::new();
+            for part in parts {
+                let part_type = part["type"].as_str().unwrap_or("text");
+                match part_type {
+                    "text" => {
+                        let text = part["text"].as_str().unwrap_or_default();
+                        current.push(ContentBlock::Text(TextContent::new(text)));
+                    }
+                    "image" => {
+                        let source = &part["source"];
+                        let media_type = source["media_type"].as_str().unwrap_or("image/png");
+                        let data = source["data"].as_str().unwrap_or_default();
+                        current.push(ContentBlock::Image(ImageContent::base64(data, media_type)));
+                    }
+                    "tool_result" => {
+                        if !current.is_empty() {
+                            out.push(Message::User(crate::types::UserMessage {
+                                content: std::mem::take(&mut current),
+                                timestamp: 0,
+                            }));
+                        }
+
+                        let tool_call_id = part["tool_use_id"].as_str().unwrap_or_default();
+                        let result_content = part["content"].as_str().unwrap_or_default();
+                        let is_error = part["is_error"].as_bool().unwrap_or(false);
+
+                        out.push(Message::Tool(crate::types::ToolResultMessage {
+                            tool_call_id: tool_call_id.to_string(),
+                            tool_name: String::new(),
+                            content: vec![ContentBlock::Text(TextContent::new(result_content))],
+                            is_error,
+                            timestamp: 0,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+
+            if !current.is_empty() {
+                out.push(Message::User(crate::types::UserMessage {
+                    content: current,
+                    timestamp: 0,
+                }));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(out)
 }
 
 /// Build Anthropic SSE response from canonical stream events.
@@ -560,7 +622,7 @@ fn tool_to_anthropic(tool: &Tool) -> Value {
     })
 }
 
-fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Vec<Value> {
+fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec<Value>, TransformError> {
     let mut messages = Vec::new();
     let mut last_user_idx = None;
 
@@ -574,7 +636,7 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Vec<Value>
     for (idx, msg) in context.messages.iter().enumerate() {
         match msg {
             Message::User(user) => {
-                let content = build_anthropic_content(&user.content);
+                let content = build_anthropic_content(&user.content)?;
                 let is_last_user = last_user_idx == Some(idx);
                 
                 let mut msg_obj = json!({
@@ -635,43 +697,45 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Vec<Value>
         }
     }
 
-    messages
+    Ok(messages)
 }
 
-fn build_anthropic_content(blocks: &[ContentBlock]) -> Value {
-    let parts: Vec<Value> = blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(t) => Some(json!({
+fn build_anthropic_content(blocks: &[ContentBlock]) -> Result<Value, TransformError> {
+    let mut parts = Vec::new();
+
+    for block in blocks {
+        match block {
+            ContentBlock::Text(t) => parts.push(json!({
                 "type": "text",
                 "text": t.text
             })),
             ContentBlock::Image(img) => {
                 if img.is_url {
-                    // Anthropic doesn't support URL images directly
-                    None
-                } else {
-                    Some(json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": img.mime_type,
-                            "data": img.data
-                        }
-                    }))
+                    return Err(TransformError::Unsupported(
+                        "Anthropic does not support URL images; provide a data: URL or base64"
+                            .to_string(),
+                    ));
                 }
+                parts.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.mime_type,
+                        "data": img.data
+                    }
+                }));
             }
-            ContentBlock::ToolResult(tr) => Some(json!({
+            ContentBlock::ToolResult(tr) => parts.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tr.tool_call_id,
                 "content": tr.content,
                 "is_error": tr.is_error
             })),
-            _ => None,
-        })
-        .collect();
+            _ => {}
+        }
+    }
 
-    Value::Array(parts)
+    Ok(Value::Array(parts))
 }
 
 fn build_anthropic_assistant_content(blocks: &[ContentBlock]) -> Value {
@@ -933,6 +997,7 @@ fn process_anthropic_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::{parse_incoming_request, OpenAITransformer};
     use crate::types::ToolResultMessage;
 
     #[test]
@@ -1145,7 +1210,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
                 Message::Tool(ToolResultMessage::text("tool_123", "get_weather", "Sunny, 72F")),
             ]);
 
-        let messages = build_anthropic_messages(&ctx, false);
+        let messages = build_anthropic_messages(&ctx, false).unwrap();
         
         assert_eq!(messages.len(), 3);
         // Tool result should be in a user message
@@ -1167,5 +1232,68 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         assert_eq!(parts[0]["type"], "thinking");
         assert_eq!(parts[0]["signature"], "sig123");
         assert_eq!(parts[1]["type"], "text");
+    }
+
+    #[test]
+    fn test_openai_anthropic_openai_round_trip_preserves_image_and_tool_calls() {
+        let openai_req = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "system", "content": "Be helpful"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAEC"}}
+                ]},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_123", "content": "{\"temp_c\":20}"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }],
+            "max_tokens": 128
+        });
+
+        // OpenAI -> canonical
+        let ctx = parse_incoming_request(&openai_req).unwrap();
+        assert_eq!(ctx.system_prompt.as_deref(), Some("Be helpful"));
+
+        // canonical -> Anthropic
+        let anthropic_req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+
+        // Anthropic -> canonical
+        let ctx2 = parse_anthropic_request(&anthropic_req).unwrap();
+        assert_eq!(ctx2.system_prompt.as_deref(), Some("Be helpful"));
+
+        // canonical -> OpenAI
+        let openai_back = OpenAITransformer::new().transform_request(&ctx2).unwrap();
+        let msgs = openai_back["messages"].as_array().unwrap();
+
+        // User multimodal content preserved (as data URL)
+        assert!(msgs[1]["content"].is_array());
+        let img_url = msgs[1]["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(img_url.starts_with("data:image/png;base64,"));
+
+        // Tool call ID preserved
+        assert_eq!(msgs[2]["tool_calls"][0]["id"], "call_123");
+        assert_eq!(msgs[3]["tool_call_id"], "call_123");
     }
 }

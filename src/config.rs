@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::policy::PolicyConfig;
 use crate::provider::{CompatSettings, ProviderType};
 
 fn env_var_nonempty(name: &str) -> Option<String> {
@@ -89,6 +90,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub analysis: AnalysisConfig,
     #[serde(default)]
+    pub policy: PolicyConfig,
+    #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
     pub keys: KeysConfig,
@@ -130,6 +133,21 @@ pub struct ProviderConfig {
     /// Custom headers to add to requests
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// AWS region (Bedrock only). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub aws_region: String,
+    /// AWS access key id (Bedrock only). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub aws_access_key_id: String,
+    /// AWS secret access key (Bedrock only). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub aws_secret_access_key: String,
+    /// AWS session token (Bedrock only, optional). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub aws_session_token: String,
+    /// AWS service name for SigV4 (Bedrock only). Defaults to `bedrock`.
+    #[serde(default)]
+    pub aws_service: String,
 }
 
 impl Default for ProviderConfig {
@@ -141,6 +159,11 @@ impl Default for ProviderConfig {
             api_version: None,
             compat: CompatSettings::default(),
             headers: HashMap::new(),
+            aws_region: String::new(),
+            aws_access_key_id: String::new(),
+            aws_secret_access_key: String::new(),
+            aws_session_token: String::new(),
+            aws_service: String::new(),
         }
     }
 }
@@ -148,15 +171,26 @@ impl Default for ProviderConfig {
 impl ProviderConfig {
     /// Get the resolved base URL (using provider defaults if not specified).
     pub fn resolved_base_url(&self) -> String {
-        if !self.base_url.is_empty() {
-            self.base_url.clone()
-        } else {
+        if let Some(base_url) = get_api_key(&self.base_url) {
+            if !base_url.is_empty() {
+                return base_url;
+            }
+        }
+
+        if self.base_url.is_empty() {
             let provider = ProviderType::from_str(&self.type_);
+            if provider == ProviderType::Bedrock {
+                if let Some(region) = self.resolved_aws_region() {
+                    return format!("https://bedrock-runtime.{}.amazonaws.com", region);
+                }
+            }
             provider
                 .info()
                 .default_base_url
                 .unwrap_or("http://localhost:8000/v1")
                 .to_string()
+        } else {
+            self.base_url.clone()
         }
     }
 
@@ -171,6 +205,32 @@ impl ProviderConfig {
                 String::new()
             }
         })
+    }
+
+    pub fn resolved_aws_region(&self) -> Option<String> {
+        get_api_key(&self.aws_region).or_else(|| std::env::var("AWS_REGION").ok())
+    }
+
+    pub fn resolved_aws_access_key_id(&self) -> Option<String> {
+        get_api_key(&self.aws_access_key_id).or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+    }
+
+    pub fn resolved_aws_secret_access_key(&self) -> Option<String> {
+        get_api_key(&self.aws_secret_access_key)
+            .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+    }
+
+    pub fn resolved_aws_session_token(&self) -> Option<String> {
+        get_api_key(&self.aws_session_token).or_else(|| std::env::var("AWS_SESSION_TOKEN").ok())
+    }
+
+    pub fn resolved_aws_service(&self) -> String {
+        if let Some(s) = get_api_key(&self.aws_service) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        "bedrock".to_string()
     }
 
     /// Get the provider type enum.
@@ -300,6 +360,7 @@ fn default_service_name() -> String {
 pub struct AnalysisConfig {
     pub enabled: bool,
     pub broadcast_channel_size: usize,
+    pub plugins: Vec<AnalysisPluginConfig>,
 }
 
 impl Default for AnalysisConfig {
@@ -307,6 +368,32 @@ impl Default for AnalysisConfig {
         Self {
             enabled: true,
             broadcast_channel_size: 1024,
+            plugins: Vec::new(),
+        }
+    }
+}
+
+/// Analysis plugin configuration.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct AnalysisPluginConfig {
+    /// Unique name for the plugin (for logs/observability).
+    pub name: String,
+    /// Executable to run (resolved via PATH unless absolute).
+    pub command: String,
+    /// Arguments to pass to the plugin.
+    pub args: Vec<String>,
+    /// Environment variables for the plugin (supports `env:VAR` values).
+    pub env: HashMap<String, String>,
+}
+
+impl Default for AnalysisPluginConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 }
@@ -670,6 +757,18 @@ mod tests {
             config_with_url.resolved_base_url(),
             "https://custom.api.com/v1"
         );
+    }
+
+    #[test]
+    fn test_provider_config_resolved_base_url_env() {
+        env::set_var("TEST_BASE_URL", "https://env.api.test/v1");
+        let config_with_env = ProviderConfig {
+            type_: "openai".to_string(),
+            base_url: "env:TEST_BASE_URL".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config_with_env.resolved_base_url(), "https://env.api.test/v1");
+        env::remove_var("TEST_BASE_URL");
     }
 
     #[test]

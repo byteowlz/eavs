@@ -15,7 +15,9 @@ config = "0.14"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 bytes = "1"
 futures = "0.3"
-tower = "0.4"
+tokio-tungstenite = "0.24"
+http = "1"
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -28,6 +30,8 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tiktoken-rs = "0.6"
 sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
 base64 = "0.22"
 rand = "0.8"
 governor = "0.8" # Rate limiting
@@ -36,3 +40,6 @@ toml = "0.8" # For word lists parsing
 ureq = "2.10" # For synchronous HTTP (word lists download)
 url = "2" # For URL parsing in CLI
 libc = "0.2.178"
+
+[features]
+integration = []

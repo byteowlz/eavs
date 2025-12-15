@@ -1,22 +1,31 @@
 mod api;
+mod aws_sigv4;
 mod cli;
 mod config;
 mod keys;
 mod logging;
+mod policy;
 mod provider;
+mod plugins;
 mod proxy;
 mod state;
 mod transform;
 mod types;
+mod upstream;
+
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests;
 
 use crate::cli::{
     ensure_server_running, run_key_create, run_key_info, run_key_list, run_key_revoke,
     run_key_usage, run_service_logs, run_service_restart, run_service_start, run_service_status,
     run_service_stop, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit, Cli,
-    CliConfig, Commands, EavsClient, KeyCommands, ServiceCommands, TestCommands,
+    run_test_image, run_test_tool_call, CliConfig, Commands, EavsClient, KeyCommands,
+    ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
+use crate::plugins::start_analysis_plugins;
 use crate::state::{start_cleanup_task, AppState};
 use axum::{
     routing::{any, delete, get, patch, post},
@@ -115,6 +124,9 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     let log_rx = state.analysis_tx.subscribe();
     let _logging_shutdown = start_logging_task(logger, log_rx);
 
+    // Start analysis plugins (optional)
+    let _plugin_tasks = start_analysis_plugins(state.clone());
+
     // Start conversation cleanup task
     let _cleanup_shutdown = start_cleanup_task(state.conversations.clone(), cleanup_interval);
 
@@ -151,6 +163,8 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
+        // WebSocket proxy (e.g. OpenAI Realtime)
+        .route("/v1/realtime", get(proxy::ws_proxy_handler))
         // Proxy API (capture all /v1 methods)
         .route("/v1/*path", any(proxy::proxy_handler))
         .with_state(state);
@@ -230,6 +244,33 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);
             run_test_chat(&client, message, model, provider, key, stream).await
+        }
+        TestCommands::Image {
+            image,
+            prompt,
+            provider,
+            model,
+            key,
+            stream,
+            url,
+            config,
+        } => {
+            let server = ensure_server_running(&url, config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url);
+            run_test_image(&client, image, prompt, model, provider, key, stream).await
+        }
+        TestCommands::ToolCall {
+            prompt,
+            provider,
+            model,
+            key,
+            stream,
+            url,
+            config,
+        } => {
+            let server = ensure_server_running(&url, config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url);
+            run_test_tool_call(&client, prompt, model, provider, key, stream).await
         }
         TestCommands::RateLimit {
             count,

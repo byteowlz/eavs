@@ -79,6 +79,34 @@
           "description": "Size of the broadcast channel buffer",
           "default": 1024,
           "minimum": 1
+        },
+        "plugins": {
+          "type": "array",
+          "description": "Optional analysis plugins (external processes) that receive analysis events on stdin and can emit control commands on stdout",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/analysisPlugin"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "description": "Policy engine configuration (deny/rewrite/filter rules)",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable policy evaluation in the proxy",
+          "default": false
+        },
+        "rules": {
+          "type": "array",
+          "description": "Ordered list of policy rules applied to requests",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/policyRule"
+          }
         }
       },
       "additionalProperties": false
@@ -165,6 +193,88 @@
     }
   },
   "$defs": {
+    "policyRule": {
+      "description": "Single policy rule (deny/rewrite_model/filter_tools)",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": { "const": "deny" },
+            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
+            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
+            "path": { "type": ["string", "null"], "description": "Glob match against request path (e.g. /v1/chat/completions)" },
+            "reason": { "type": ["string", "null"], "description": "User-facing denial reason" }
+          },
+          "required": ["action"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": { "const": "rewrite_model" },
+            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
+            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
+            "to": { "type": "string", "description": "Replacement model name" }
+          },
+          "required": ["action", "to"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": { "const": "filter_tools" },
+            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
+            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
+            "allow": {
+              "type": ["array", "null"],
+              "description": "Allow-list tool name globs",
+              "items": { "type": "string" }
+            },
+            "deny": {
+              "type": ["array", "null"],
+              "description": "Deny-list tool name globs",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["action"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "analysisPlugin": {
+      "type": "object",
+      "description": "Analysis plugin process configuration",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Plugin name (for logs/observability)",
+          "default": ""
+        },
+        "command": {
+          "type": "string",
+          "description": "Executable to run (resolved via PATH unless absolute)",
+          "default": ""
+        },
+        "args": {
+          "type": "array",
+          "description": "Arguments to pass to the plugin",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables for the plugin (supports env:VAR values)",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["name", "command"],
+      "additionalProperties": false
+    },
     "provider": {
       "type": "object",
       "description": "LLM provider configuration",
@@ -182,6 +292,8 @@
             "cerebras",
             "xai",
             "openrouter",
+            "bedrock",
+            "aws-bedrock",
             "ollama",
             "vllm",
             "openai-compatible"
@@ -195,7 +307,7 @@
         },
         "base_url": {
           "type": "string",
-          "description": "Base URL for the API. Defaults based on provider type if not specified.",
+          "description": "Base URL for the API. Defaults based on provider type if not specified. Supports 'env:VAR_NAME' syntax to read from environment.",
           "format": "uri",
           "examples": [
             "https://api.openai.com/v1",
@@ -217,8 +329,46 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "aws_region": {
+          "type": "string",
+          "description": "AWS region (Bedrock only). Supports 'env:VAR_NAME' syntax.",
+          "examples": ["us-east-1", "env:AWS_REGION"]
+        },
+        "aws_access_key_id": {
+          "type": "string",
+          "description": "AWS access key id (Bedrock only). Supports 'env:VAR_NAME' syntax.",
+          "examples": ["env:AWS_ACCESS_KEY_ID"]
+        },
+        "aws_secret_access_key": {
+          "type": "string",
+          "description": "AWS secret access key (Bedrock only). Supports 'env:VAR_NAME' syntax.",
+          "examples": ["env:AWS_SECRET_ACCESS_KEY"]
+        },
+        "aws_session_token": {
+          "type": "string",
+          "description": "AWS session token (Bedrock only, optional). Supports 'env:VAR_NAME' syntax.",
+          "examples": ["env:AWS_SESSION_TOKEN"]
+        },
+        "aws_service": {
+          "type": "string",
+          "description": "AWS service name for SigV4 (Bedrock only).",
+          "default": "bedrock",
+          "examples": ["bedrock"]
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["bedrock", "aws-bedrock"] }
+            }
+          },
+          "then": {
+            "required": ["aws_region", "aws_access_key_id", "aws_secret_access_key"]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "compatSettings": {
