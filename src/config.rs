@@ -5,6 +5,76 @@ use std::path::PathBuf;
 
 use crate::provider::{CompatSettings, ProviderType};
 
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn expand_path(input: &str) -> PathBuf {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+
+    if input.starts_with("~/") {
+        if let Some(home) = env_var_nonempty("HOME") {
+            out.push_str(&home);
+            out.push('/');
+            for _ in 0..2 {
+                let _ = chars.next();
+            }
+        }
+    }
+
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('{') => {
+                let _ = chars.next();
+                let mut var = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '}' {
+                        break;
+                    }
+                    var.push(c);
+                }
+                if let Some(val) = env_var_nonempty(&var) {
+                    out.push_str(&val);
+                } else {
+                    out.push_str("${");
+                    out.push_str(&var);
+                    out.push('}');
+                }
+            }
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                let mut var = String::new();
+                while let Some(c2) = chars.peek().copied() {
+                    if c2.is_ascii_alphanumeric() || c2 == '_' {
+                        var.push(c2);
+                        let _ = chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(val) = env_var_nonempty(&var) {
+                    out.push_str(&val);
+                } else {
+                    out.push('$');
+                    out.push_str(&var);
+                }
+            }
+            _ => out.push('$'),
+        }
+    }
+
+    if out.is_empty() {
+        PathBuf::from(input)
+    } else {
+        PathBuf::from(out)
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
@@ -349,12 +419,10 @@ impl KeysConfig {
 
     /// Get the XDG data directory path for word lists.
     fn get_xdg_data_path() -> PathBuf {
-        let data_home = std::env::var("XDG_DATA_HOME")
+        let data_home = env_var_nonempty("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .or_else(|_| {
-                std::env::var("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-            })
-            .unwrap_or_else(|_| PathBuf::from("."));
+            .or_else(|| env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .unwrap_or_else(|| PathBuf::from("."));
 
         data_home.join("eavs").join("word_lists.toml")
     }
@@ -362,33 +430,21 @@ impl KeysConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self, ConfigError> {
-        let mut builder = Config::builder();
+        Self::load_with_override_path(None)
+    }
 
-        // 1. XDG Config (User Global)
-        let xdg_path = Self::get_xdg_config_path();
-        if let Some(path) = xdg_path {
-            if path.exists() {
-                tracing::info!("Loading config from XDG path: {:?}", path);
-                builder = builder.add_source(File::from(path).required(false));
+    pub fn load_or_init() -> Result<Self, ConfigError> {
+        if let Some(path) = Self::get_xdg_config_path() {
+            if !path.exists() {
+                Self::init_default_global_config(&path)?;
             }
         }
-
-        // 2. Local Config (Current Directory) - Overrides global
-        if std::path::Path::new("config.toml").exists() {
-            tracing::info!("Loading config from local path: config.toml");
-            builder = builder.add_source(File::from(std::path::Path::new("config.toml")));
-        } else if std::path::Path::new("config.yaml").exists() {
-            tracing::info!("Loading config from local path: config.yaml");
-            builder = builder.add_source(File::from(std::path::Path::new("config.yaml")));
-        }
-
-        Self::finalize_config(builder)
+        Self::load()
     }
 
     /// Load configuration from a specific file path.
     pub fn load_from(path: &str) -> Result<Self, ConfigError> {
-        let builder = Config::builder().add_source(File::from(std::path::Path::new(path)));
-        Self::finalize_config(builder)
+        Self::load_with_override_path(Some(path))
     }
 
     fn finalize_config(builder: config::ConfigBuilder<config::builder::DefaultState>) -> Result<Self, ConfigError> {
@@ -414,13 +470,85 @@ impl AppConfig {
         Ok(config)
     }
 
+    fn load_with_override_path(override_path: Option<&str>) -> Result<Self, ConfigError> {
+        let mut builder = Config::builder();
+
+        // Global config (XDG)
+        if let Some(path) = Self::get_xdg_config_path() {
+            if path.exists() {
+                tracing::info!("Loading config from XDG path: {:?}", path);
+                builder = builder.add_source(File::from(path).required(false));
+            }
+        }
+
+        // Local config (current directory)
+        if std::path::Path::new("eavs.toml").exists() {
+            tracing::info!("Loading config from local path: eavs.toml");
+            builder = builder.add_source(File::from(std::path::Path::new("eavs.toml")));
+        } else if std::path::Path::new("eavs.yaml").exists() {
+            tracing::info!("Loading config from local path: eavs.yaml");
+            builder = builder.add_source(File::from(std::path::Path::new("eavs.yaml")));
+        } else if std::path::Path::new("eavs.yml").exists() {
+            tracing::info!("Loading config from local path: eavs.yml");
+            builder = builder.add_source(File::from(std::path::Path::new("eavs.yml")));
+        }
+
+        // Environment overrides (EAVS_SERVER__PORT=..., EAVS_PROVIDERS__AZURE__BASE_URL=..., etc.)
+        builder = builder.add_source(
+            config::Environment::with_prefix("EAVS")
+                .separator("__")
+                .try_parsing(true),
+        );
+
+        // Explicit config path (highest priority among file/env sources)
+        if let Some(path) = override_path {
+            let expanded = expand_path(path);
+            tracing::info!("Loading config from explicit path: {:?}", expanded);
+            builder = builder.add_source(File::from(expanded));
+        }
+
+        Self::finalize_config(builder)
+    }
+
     fn get_xdg_config_path() -> Option<PathBuf> {
-        let config_home = std::env::var("XDG_CONFIG_HOME")
+        let config_home = env_var_nonempty("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|_| std::env::var("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok()?;
+            .or_else(|| env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".config")))?;
 
         Some(config_home.join("eavs").join("config.toml"))
+    }
+
+    fn init_default_global_config(config_path: &PathBuf) -> Result<(), ConfigError> {
+        let Some(dir) = config_path.parent() else {
+            return Ok(());
+        };
+
+        std::fs::create_dir_all(dir).map_err(|e| {
+            ConfigError::Message(format!("Failed to create config dir {}: {}", dir.display(), e))
+        })?;
+
+        let schema_path = dir.join("config.schema.json");
+        if !schema_path.exists() {
+            std::fs::write(&schema_path, include_bytes!("../config/config.schema.json")).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to write schema file {}: {}",
+                    schema_path.display(),
+                    e
+                ))
+            })?;
+        }
+
+        if !config_path.exists() {
+            std::fs::write(config_path, include_str!("../config/config.example.toml")).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to write default config file {}: {}",
+                    config_path.display(),
+                    e
+                ))
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Get a provider config by name (case-insensitive).

@@ -31,8 +31,10 @@ curl http://localhost:3000/v1/chat/completions \
 
 EAVS uses TOML configuration. It looks for config files in:
 
-1. `$XDG_CONFIG_HOME/eavs/config.toml` (or `~/.config/eavs/config.toml`)
-2. `./config.toml` (current directory, overrides global)
+1. `--config PATH` / `EAVS_CONFIG` (explicit config file)
+2. `EAVS_*` environment variables (e.g. `EAVS_SERVER__PORT=3001`)
+3. `./eavs.toml` (current directory, overrides global)
+4. `$XDG_CONFIG_HOME/eavs/config.toml` (or `~/.config/eavs/config.toml`, auto-created on first run)
 
 See [`config/config.example.toml`](config/config.example.toml) for a fully documented example configuration. A JSON schema is available at [`config/config.schema.json`](config/config.schema.json) for editor validation and autocompletion.
 

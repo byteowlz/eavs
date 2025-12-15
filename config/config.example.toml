@@ -4,7 +4,11 @@
 #
 # Copy this file to one of these locations:
 #   - ~/.config/eavs/config.toml (global)
-#   - ./config.toml (local, overrides global)
+#   - ./eavs.toml (local, overrides global)
+#
+# Or point EAVS at an explicit config file:
+#   - eavs serve --config /path/to/config.toml
+#   - EAVS_CONFIG=/path/to/config.toml eavs serve
 #
 # For schema validation and autocompletion in your editor, ensure the
 # JSON schema reference above is recognized (works with taplo and other TOML LSPs).

@@ -69,7 +69,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     let mut config = if let Some(path) = config_path {
         AppConfig::load_from(&path).expect("Failed to load configuration")
     } else {
-        AppConfig::load().expect("Failed to load configuration")
+        AppConfig::load_or_init().expect("Failed to load configuration")
     };
 
     // Override with CLI args
@@ -224,15 +224,21 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             key,
             stream,
             url,
+            config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, None).await?;
+            let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);
             run_test_chat(&client, message, model, provider, key, stream).await
         }
-        TestCommands::RateLimit { count, key, url } => {
+        TestCommands::RateLimit {
+            count,
+            key,
+            url,
+            config,
+        } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, None).await?;
+            let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);
             run_test_rate_limit(&client, count, key).await
         }
@@ -247,9 +253,10 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             stream,
             url,
             format,
+            config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, None).await?;
+            let server = ensure_server_running(&url, config.as_deref()).await?;
             run_test_bench(
                 count,
                 provider,
@@ -264,9 +271,9 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             )
             .await
         }
-        TestCommands::Health { url, format } => {
+        TestCommands::Health { url, format, config } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, None).await?;
+            let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);
             run_test_health(&client, format).await
         }

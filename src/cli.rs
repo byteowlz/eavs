@@ -8,6 +8,7 @@
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// EAVS - Bidirectional LLM Proxy with Virtual API Keys
@@ -235,6 +236,10 @@ pub enum TestCommands {
         /// EAVS server URL
         #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Test rate limiting with rapid requests
@@ -250,6 +255,10 @@ pub enum TestCommands {
         /// EAVS server URL
         #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
         url: String,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Benchmark latency overhead introduced by EAVS proxy
@@ -293,6 +302,10 @@ pub enum TestCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Check proxy health and configuration
@@ -304,6 +317,10 @@ pub enum TestCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 }
 
@@ -1539,16 +1556,25 @@ pub async fn ensure_server_running(
 // Service Management Functions
 // =============================================================================
 
+fn xdg_state_dir() -> PathBuf {
+    if let Ok(val) = std::env::var("XDG_STATE_HOME") {
+        if !val.trim().is_empty() {
+            return PathBuf::from(val);
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join(".local/state");
+        }
+    }
+
+    PathBuf::from("/tmp")
+}
+
 /// Get the PID file path for a given port
 fn get_pid_file_path(port: u16) -> std::path::PathBuf {
-    let state_dir = std::env::var("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| {
-            std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
-        })
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-
-    state_dir.join("eavs").join(format!("eavs-{}.pid", port))
+    xdg_state_dir().join("eavs").join(format!("eavs-{}.pid", port))
 }
 
 /// Write the PID file
@@ -1872,14 +1898,7 @@ pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), C
 /// Show EAVS logs (placeholder - needs file logging to be configured)
 pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError> {
     // Try to find log file from XDG state directory
-    let state_dir = std::env::var("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| {
-            std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
-        })
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-
-    let log_file = state_dir.join("eavs").join("eavs.log");
+    let log_file = xdg_state_dir().join("eavs").join("eavs.log");
 
     if !log_file.exists() {
         println!("No log file found at {:?}", log_file);
