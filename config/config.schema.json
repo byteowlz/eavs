@@ -1,0 +1,355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/byteowlz/eavs/config/config.schema.json",
+  "title": "EAVS Configuration",
+  "description": "Configuration schema for EAVS (Enhanced AI Validation System)",
+  "type": "object",
+  "properties": {
+    "server": {
+      "type": "object",
+      "description": "Server configuration",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host address to bind to",
+          "default": "127.0.0.1",
+          "examples": ["127.0.0.1", "0.0.0.0", "localhost"]
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port number to listen on",
+          "default": 3000,
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "description": "LLM provider configurations. Keys are provider names (e.g., 'default', 'anthropic')",
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "description": "Legacy alias for 'providers'. Use 'providers' instead.",
+      "deprecated": true,
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "logging": {
+      "type": "object",
+      "description": "Logging configuration",
+      "properties": {
+        "default": {
+          "type": "string",
+          "description": "Default logging backend",
+          "enum": ["stdout", "file", "none"],
+          "default": "stdout"
+        },
+        "sink": {
+          "type": "string",
+          "description": "Legacy alias for 'default'. Use 'default' instead.",
+          "deprecated": true
+        },
+        "backends": {
+          "type": "array",
+          "description": "Additional logging backends",
+          "items": {
+            "$ref": "#/$defs/logBackend"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "analysis": {
+      "type": "object",
+      "description": "Analysis pipeline configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the analysis broadcast channel",
+          "default": true
+        },
+        "broadcast_channel_size": {
+          "type": "integer",
+          "description": "Size of the broadcast channel buffer",
+          "default": 1024,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "description": "Conversation state storage configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable conversation state storage",
+          "default": true
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "description": "TTL for conversation state in seconds (0 = no expiration)",
+          "default": 3600,
+          "minimum": 0
+        },
+        "cleanup_interval_secs": {
+          "type": "integer",
+          "description": "How often to run cleanup in seconds",
+          "default": 60,
+          "minimum": 1
+        },
+        "max_conversations": {
+          "type": "integer",
+          "description": "Maximum number of conversations to store (0 = unlimited)",
+          "default": 10000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "keys": {
+      "type": "object",
+      "description": "Virtual API keys configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable virtual API key support",
+          "default": false
+        },
+        "database_path": {
+          "type": "string",
+          "description": "Path to the SQLite database file. Supports ~ expansion.",
+          "default": "~/.eavs/keys.db",
+          "examples": ["~/.eavs/keys.db", "/var/lib/eavs/keys.db"]
+        },
+        "master_key": {
+          "type": ["string", "null"],
+          "description": "Master key for admin API. Supports 'env:VAR_NAME' syntax.",
+          "examples": ["env:EAVS_MASTER_KEY", "sk-admin-secret"]
+        },
+        "allow_self_provisioning": {
+          "type": "boolean",
+          "description": "Allow creating keys without master key",
+          "default": false
+        },
+        "default_rpm_limit": {
+          "type": ["integer", "null"],
+          "description": "Default rate limit for new keys (requests per minute, null = unlimited)",
+          "minimum": 0,
+          "examples": [60, 100, null]
+        },
+        "default_budget_usd": {
+          "type": ["number", "null"],
+          "description": "Default budget for new keys in USD (null = unlimited)",
+          "minimum": 0,
+          "examples": [10.0, 100.0, null]
+        },
+        "update_pricing_on_startup": {
+          "type": "boolean",
+          "description": "Fetch latest model pricing from LiteLLM on startup",
+          "default": false
+        },
+        "word_lists_path": {
+          "type": ["string", "null"],
+          "description": "Path to word lists TOML file for human-readable key IDs. If not specified, downloads to XDG data directory.",
+          "examples": ["~/.config/eavs/word_lists.toml", null]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "description": "LLM provider configuration",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Provider type",
+          "enum": [
+            "openai",
+            "anthropic",
+            "google",
+            "azure",
+            "mistral",
+            "groq",
+            "cerebras",
+            "xai",
+            "openrouter",
+            "ollama",
+            "vllm",
+            "openai-compatible"
+          ],
+          "default": "openai"
+        },
+        "api_key": {
+          "type": "string",
+          "description": "API key. Supports 'env:VAR_NAME' syntax to read from environment.",
+          "examples": ["env:OPENAI_API_KEY", "sk-..."]
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Base URL for the API. Defaults based on provider type if not specified.",
+          "format": "uri",
+          "examples": [
+            "https://api.openai.com/v1",
+            "https://api.anthropic.com/v1",
+            "http://localhost:11434/v1"
+          ]
+        },
+        "api_version": {
+          "type": ["string", "null"],
+          "description": "API version (primarily for Azure OpenAI)",
+          "examples": ["2024-02-15-preview"]
+        },
+        "compat": {
+          "$ref": "#/$defs/compatSettings"
+        },
+        "headers": {
+          "type": "object",
+          "description": "Custom headers to add to requests. Values support 'env:VAR_NAME' syntax.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "compatSettings": {
+      "type": "object",
+      "description": "Compatibility settings for OpenAI-compatible APIs",
+      "properties": {
+        "supports_developer_role": {
+          "type": ["boolean", "null"],
+          "description": "Whether the provider supports the 'developer' role (vs 'system')"
+        },
+        "supports_store": {
+          "type": ["boolean", "null"],
+          "description": "Whether the provider supports the 'store' field"
+        },
+        "max_tokens_field": {
+          "type": ["string", "null"],
+          "description": "Field name for max tokens ('max_tokens' or 'max_completion_tokens')",
+          "enum": ["max_tokens", "max_completion_tokens", null]
+        }
+      },
+      "additionalProperties": false
+    },
+    "logBackend": {
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "Standard output logging",
+          "properties": {
+            "type": {
+              "const": "stdout"
+            },
+            "format": {
+              "type": "string",
+              "description": "Log format",
+              "enum": ["json", "pretty"],
+              "default": "json"
+            }
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "File-based logging",
+          "properties": {
+            "type": {
+              "const": "file"
+            },
+            "path": {
+              "type": "string",
+              "description": "Path to log file"
+            },
+            "rotate": {
+              "type": "string",
+              "description": "Rotation strategy",
+              "enum": ["daily", "size", "none"],
+              "default": "none"
+            },
+            "max_size": {
+              "type": ["integer", "null"],
+              "description": "Max file size in bytes (for size-based rotation)",
+              "minimum": 1
+            }
+          },
+          "required": ["type", "path"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Webhook/HTTP endpoint logging",
+          "properties": {
+            "type": {
+              "const": "webhook"
+            },
+            "url": {
+              "type": "string",
+              "description": "URL to POST logs to",
+              "format": "uri"
+            },
+            "headers": {
+              "type": "object",
+              "description": "Custom headers. Values support 'env:VAR_NAME' syntax.",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "batch_size": {
+              "type": "integer",
+              "description": "Batch size before sending",
+              "default": 100,
+              "minimum": 1
+            },
+            "flush_interval_secs": {
+              "type": "integer",
+              "description": "Flush interval in seconds",
+              "default": 5,
+              "minimum": 1
+            }
+          },
+          "required": ["type", "url"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "OpenTelemetry export",
+          "properties": {
+            "type": {
+              "enum": ["otel", "opentelemetry"]
+            },
+            "endpoint": {
+              "type": "string",
+              "description": "OTLP endpoint",
+              "format": "uri"
+            },
+            "protocol": {
+              "type": "string",
+              "description": "Protocol to use",
+              "enum": ["grpc", "http"],
+              "default": "grpc"
+            },
+            "service_name": {
+              "type": "string",
+              "description": "Service name for traces",
+              "default": "eavs"
+            }
+          },
+          "required": ["type", "endpoint"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

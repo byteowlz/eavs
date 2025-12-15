@@ -172,16 +172,41 @@ pub async fn proxy_handler(
     });
 
     // 4. Get provider configuration
-    let provider_config = state
+    let provider_lookup = state
         .config
-        .get_provider(&provider_name)
+        .resolve_provider(&provider_name)
         .ok_or_else(|| {
+            let available = state.config.provider_names();
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProxyError::new("Provider not found", "configuration_error")),
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    format!(
+                        "Unknown provider '{}'. Available providers: {:?}",
+                        provider_name, available
+                    ),
+                    "invalid_provider",
+                )),
             )
                 .into_response()
         })?;
+
+    let provider_config = provider_lookup.config;
+    let resolved_provider = provider_lookup.resolved_name.clone();
+    
+    // Log if provider name was normalized or fell back
+    if provider_lookup.was_fallback {
+        tracing::info!(
+            requested = %provider_name,
+            resolved = %resolved_provider,
+            "Provider name was empty, using default"
+        );
+    } else if provider_name != resolved_provider {
+        tracing::debug!(
+            requested = %provider_name,
+            resolved = %resolved_provider,
+            "Provider name normalized"
+        );
+    }
 
     // Use real API key from provider config (virtual key was just for auth)
     let api_key = provider_config.resolved_api_key();
@@ -402,6 +427,11 @@ pub async fn proxy_handler(
             "cache-control",
             "no-cache".parse().unwrap(),
         );
+        // Add header indicating which provider was used
+        response.headers_mut().insert(
+            "x-eavs-provider",
+            resolved_provider.parse().unwrap(),
+        );
         
         // Schedule usage recording after response completes
         // Note: For streaming, usage is captured above and will be recorded when stream ends
@@ -440,6 +470,11 @@ pub async fn proxy_handler(
         let mut response = Response::new(Body::from_stream(stream_with_logging));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
+        // Add header indicating which provider was used
+        response.headers_mut().insert(
+            "x-eavs-provider",
+            resolved_provider.parse().unwrap(),
+        );
 
         // Schedule usage recording after response completes
         if let Some(tracker) = usage_tracker {

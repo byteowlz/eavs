@@ -1,4 +1,4 @@
-# EAVS - Enhanced AI Validation System
+# eavs - a no-nonsense LLM proxy
 
 A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full logging, and live context injection.
 
@@ -30,8 +30,11 @@ curl http://localhost:3000/v1/chat/completions \
 ## Configuration
 
 EAVS uses TOML configuration. It looks for config files in:
+
 1. `$XDG_CONFIG_HOME/eavs/config.toml` (or `~/.config/eavs/config.toml`)
 2. `./config.toml` (current directory, overrides global)
+
+See [`config/config.example.toml`](config/config.example.toml) for a fully documented example configuration. A JSON schema is available at [`config/config.schema.json`](config/config.schema.json) for editor validation and autocompletion.
 
 ### Providers
 
@@ -52,6 +55,7 @@ base_url = "http://localhost:11434/v1"
 ```
 
 Supported providers:
+
 - `openai` - OpenAI API
 - `anthropic` - Anthropic Claude
 - `google` - Google Gemini
@@ -120,16 +124,19 @@ curl http://localhost:3000/v1/chat/completions \
 ### Control API
 
 #### Health Check
+
 ```bash
 curl http://localhost:3000/health
 ```
 
 #### List Providers
+
 ```bash
 curl http://localhost:3000/providers
 ```
 
 #### Inject Context
+
 ```bash
 curl -X POST http://localhost:3000/inject/my-conversation \
   -H "Content-Type: application/json" \
@@ -137,26 +144,31 @@ curl -X POST http://localhost:3000/inject/my-conversation \
 ```
 
 #### Clear Injections
+
 ```bash
 curl -X POST http://localhost:3000/clear/my-conversation
 ```
 
 #### List Conversations
+
 ```bash
 curl http://localhost:3000/conversations
 ```
 
 #### Get Conversation Stats
+
 ```bash
 curl http://localhost:3000/conversations/stats
 ```
 
 #### Get Conversation Details
+
 ```bash
 curl http://localhost:3000/conversations/my-conversation
 ```
 
 #### Update Conversation Metadata
+
 ```bash
 curl -X PATCH http://localhost:3000/conversations/my-conversation \
   -H "Content-Type: application/json" \
@@ -164,6 +176,7 @@ curl -X PATCH http://localhost:3000/conversations/my-conversation \
 ```
 
 #### Stream Logs (SSE)
+
 ```bash
 curl http://localhost:3000/logs/stream
 ```

@@ -11,8 +11,9 @@ mod types;
 
 use crate::cli::{
     ensure_server_running, run_key_create, run_key_info, run_key_list, run_key_revoke,
-    run_key_usage, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit, Cli,
-    CliConfig, Commands, EavsClient, KeyCommands, TestCommands,
+    run_key_usage, run_service_logs, run_service_restart, run_service_start, run_service_status,
+    run_service_stop, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit, Cli,
+    CliConfig, Commands, EavsClient, KeyCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -33,6 +34,12 @@ async fn main() {
     match cli.command {
         Commands::Serve { host, port, config } => {
             run_server(host, port, config).await;
+        }
+        Commands::Service { action } => {
+            if let Err(e) = run_service_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Key { action } => {
             if let Err(e) = run_key_command(action).await {
@@ -156,6 +163,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn run_service_command(action: ServiceCommands) -> Result<(), cli::CliError> {
+    match action {
+        ServiceCommands::Start { port, config, wait } => {
+            run_service_start(port, config, wait).await
+        }
+        ServiceCommands::Stop { port, force } => run_service_stop(port, force).await,
+        ServiceCommands::Restart { port, config } => run_service_restart(port, config).await,
+        ServiceCommands::Status { port, format } => run_service_status(port, format).await,
+        ServiceCommands::Logs { lines, follow } => run_service_logs(lines, follow).await,
+    }
 }
 
 async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
