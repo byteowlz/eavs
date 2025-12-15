@@ -1,5 +1,9 @@
+# yaml-language-server: $schema=config/config.schema.json
 # EAVS Configuration
 # Enhanced AI Validation System
+#
+# See config/config.example.toml for full documentation of all options.
+# JSON schema available at config/config.schema.json for editor validation.
 
 [server]
 host = "127.0.0.1"

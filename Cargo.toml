@@ -35,3 +35,4 @@ glob-match = "0.2" # For model pattern matching
 toml = "0.8" # For word lists parsing
 ureq = "2.10" # For synchronous HTTP (word lists download)
 url = "2" # For URL parsing in CLI
+libc = "0.2.178"

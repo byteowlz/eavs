@@ -1,7 +1,8 @@
 //! CLI module for EAVS.
 //!
 //! Provides subcommands for:
-//! - `serve` - Run the proxy server
+//! - `serve` - Run the proxy server (foreground)
+//! - `service` - Manage the proxy server as a background service
 //! - `key` - Manage virtual API keys
 //! - `test` - Test the proxy functionality
 
@@ -21,7 +22,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start the EAVS proxy server
+    /// Start the EAVS proxy server (foreground)
     Serve {
         /// Host to bind to
         #[arg(short = 'H', long, env = "EAVS_HOST")]
@@ -36,6 +37,12 @@ pub enum Commands {
         config: Option<String>,
     },
 
+    /// Manage the EAVS server as a background service
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommands,
+    },
+
     /// Manage virtual API keys
     Key {
         #[command(subcommand)]
@@ -46,6 +53,68 @@ pub enum Commands {
     Test {
         #[command(subcommand)]
         action: TestCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    /// Start the EAVS server in the background
+    Start {
+        /// Port to bind to
+        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
+        port: u16,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+
+        /// Wait for server to be ready before returning
+        #[arg(long, default_value = "true")]
+        wait: bool,
+    },
+
+    /// Stop the running EAVS server
+    Stop {
+        /// Port the server is running on (to identify the process)
+        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
+        port: u16,
+
+        /// Force kill if graceful shutdown fails
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Restart the EAVS server
+    Restart {
+        /// Port to bind to
+        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
+        port: u16,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Show the status of the EAVS server
+    Status {
+        /// Port to check
+        #[arg(short, long, env = "EAVS_PORT", default_value = "3000")]
+        port: u16,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+
+    /// Show server logs (if running with file logging)
+    Logs {
+        /// Number of lines to show
+        #[arg(short, long, default_value = "50")]
+        lines: usize,
+
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
     },
 }
 
@@ -1464,4 +1533,386 @@ pub async fn ensure_server_running(
         "Timed out waiting for EAVS server to start on port {}",
         port
     )))
+}
+
+// =============================================================================
+// Service Management Functions
+// =============================================================================
+
+/// Get the PID file path for a given port
+fn get_pid_file_path(port: u16) -> std::path::PathBuf {
+    let state_dir = std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+
+    state_dir.join("eavs").join(format!("eavs-{}.pid", port))
+}
+
+/// Write the PID file
+fn write_pid_file(port: u16, pid: u32) -> Result<(), CliError> {
+    let pid_path = get_pid_file_path(port);
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::Other(format!("Failed to create PID directory: {}", e))
+        })?;
+    }
+    std::fs::write(&pid_path, pid.to_string()).map_err(|e| {
+        CliError::Other(format!("Failed to write PID file: {}", e))
+    })
+}
+
+/// Read the PID from file
+fn read_pid_file(port: u16) -> Option<u32> {
+    let pid_path = get_pid_file_path(port);
+    std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Remove the PID file
+fn remove_pid_file(port: u16) {
+    let pid_path = get_pid_file_path(port);
+    let _ = std::fs::remove_file(pid_path);
+}
+
+/// Check if a process with the given PID is running
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Use kill -0 to check if process exists
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix, try a different approach
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
+}
+
+/// Kill a process by PID
+fn kill_process(pid: u32, force: bool) -> Result<(), CliError> {
+    #[cfg(unix)]
+    {
+        let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+        let result = unsafe { libc::kill(pid as i32, signal) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(CliError::Other(format!(
+                "Failed to kill process {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            )))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("taskkill")
+            .args(if force { vec!["/F", "/PID"] } else { vec!["/PID"] })
+            .arg(pid.to_string())
+            .output()
+            .map_err(|e| CliError::Other(format!("Failed to kill process: {}", e)))?;
+        Ok(())
+    }
+}
+
+/// Find EAVS process by port (fallback when no PID file)
+fn find_eavs_pid_by_port(port: u16) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // Use lsof to find the process using the port
+        let output = std::process::Command::new("lsof")
+            .args(["-ti", &format!(":{}", port)])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().next().and_then(|s| s.trim().parse().ok())
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, use netstat
+        let output = std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(&format!(":{}", port)) && line.contains("LISTENING") {
+                if let Some(pid_str) = line.split_whitespace().last() {
+                    if let Ok(pid) = pid_str.parse() {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Service status information
+#[derive(Debug, Serialize)]
+pub struct ServiceStatus {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub port: u16,
+    pub url: String,
+    pub uptime_secs: Option<u64>,
+    pub providers: Vec<String>,
+}
+
+/// Start the EAVS service in the background
+pub async fn run_service_start(
+    port: u16,
+    config_path: Option<String>,
+    wait: bool,
+) -> Result<(), CliError> {
+    let url = format!("http://127.0.0.1:{}", port);
+
+    // Check if already running
+    if is_eavs_server_running(&url).await {
+        println!("EAVS server is already running on port {}", port);
+        return Ok(());
+    }
+
+    // Check if port is in use by something else
+    if !is_port_available(port) {
+        return Err(CliError::Other(format!(
+            "Port {} is already in use by another application",
+            port
+        )));
+    }
+
+    // Start the server
+    println!("Starting EAVS server on port {}...", port);
+    let child = start_server_background(port, config_path.as_deref())?;
+
+    // Write PID file
+    write_pid_file(port, child.id())?;
+
+    if wait {
+        // Wait for server to be ready
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(10);
+
+        while start.elapsed() < timeout {
+            if is_eavs_server_running(&url).await {
+                println!("EAVS server started successfully (PID: {})", child.id());
+                println!("  URL: {}", url);
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // Cleanup on failure
+        remove_pid_file(port);
+        return Err(CliError::Other(format!(
+            "Timed out waiting for EAVS server to start on port {}",
+            port
+        )));
+    } else {
+        println!("EAVS server starting in background (PID: {})", child.id());
+    }
+
+    Ok(())
+}
+
+/// Stop the EAVS service
+pub async fn run_service_stop(port: u16, force: bool) -> Result<(), CliError> {
+    let url = format!("http://127.0.0.1:{}", port);
+
+    // Try to find PID from file first, then by port
+    let pid = read_pid_file(port).or_else(|| find_eavs_pid_by_port(port));
+
+    match pid {
+        Some(pid) => {
+            if !is_process_running(pid) {
+                println!("EAVS server is not running (stale PID file)");
+                remove_pid_file(port);
+                return Ok(());
+            }
+
+            println!("Stopping EAVS server (PID: {})...", pid);
+
+            // Send SIGTERM (graceful) or SIGKILL (force)
+            kill_process(pid, force)?;
+
+            // Wait for process to exit
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(if force { 2 } else { 10 });
+
+            while start.elapsed() < timeout {
+                if !is_process_running(pid) {
+                    remove_pid_file(port);
+                    println!("EAVS server stopped successfully");
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            // If graceful shutdown failed, try force kill
+            if !force {
+                println!("Graceful shutdown timed out, forcing...");
+                kill_process(pid, true)?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+
+            remove_pid_file(port);
+
+            if is_process_running(pid) {
+                return Err(CliError::Other(format!(
+                    "Failed to stop EAVS server (PID: {})",
+                    pid
+                )));
+            }
+
+            println!("EAVS server stopped successfully");
+            Ok(())
+        }
+        None => {
+            // Check if something is responding on the port
+            if is_eavs_server_running(&url).await {
+                println!("EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})", port);
+                return Err(CliError::Other(
+                    "Could not determine EAVS server PID".to_string(),
+                ));
+            }
+            println!("EAVS server is not running on port {}", port);
+            Ok(())
+        }
+    }
+}
+
+/// Restart the EAVS service
+pub async fn run_service_restart(port: u16, config_path: Option<String>) -> Result<(), CliError> {
+    println!("Restarting EAVS server...");
+
+    // Stop if running
+    let _ = run_service_stop(port, false).await;
+
+    // Small delay to ensure port is released
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Start again
+    run_service_start(port, config_path, true).await
+}
+
+/// Get the status of the EAVS service
+pub async fn run_service_status(port: u16, format: OutputFormat) -> Result<(), CliError> {
+    let url = format!("http://127.0.0.1:{}", port);
+    let pid = read_pid_file(port).or_else(|| find_eavs_pid_by_port(port));
+
+    let running = is_eavs_server_running(&url).await;
+
+    // Get additional info if running
+    let (uptime, providers) = if running {
+        let client = EavsClient::with_url(url.clone());
+        let health = client.health().await.ok();
+        let providers = client.providers().await.unwrap_or_default();
+        (health.and_then(|h| h.uptime_secs), providers)
+    } else {
+        (None, vec![])
+    };
+
+    let status = ServiceStatus {
+        running,
+        pid: if running { pid } else { None },
+        port,
+        url: url.clone(),
+        uptime_secs: uptime,
+        providers: providers.clone(),
+    };
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&status).unwrap());
+        }
+        OutputFormat::Text => {
+            if running {
+                println!("EAVS Server Status: RUNNING");
+                println!("{}", "=".repeat(40));
+                if let Some(pid) = status.pid {
+                    println!("  PID:       {}", pid);
+                }
+                println!("  Port:      {}", port);
+                println!("  URL:       {}", url);
+                if let Some(uptime) = uptime {
+                    let hours = uptime / 3600;
+                    let minutes = (uptime % 3600) / 60;
+                    let seconds = uptime % 60;
+                    println!("  Uptime:    {}h {}m {}s", hours, minutes, seconds);
+                }
+                if !status.providers.is_empty() {
+                    println!("  Providers: {}", status.providers.join(", "));
+                }
+            } else {
+                println!("EAVS Server Status: STOPPED");
+                println!("{}", "=".repeat(40));
+                println!("  Port:      {}", port);
+
+                // Check if port is in use by something else
+                if !is_port_available(port) {
+                    println!("  Note:      Port {} is in use by another application", port);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Show EAVS logs (placeholder - needs file logging to be configured)
+pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError> {
+    // Try to find log file from XDG state directory
+    let state_dir = std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+
+    let log_file = state_dir.join("eavs").join("eavs.log");
+
+    if !log_file.exists() {
+        println!("No log file found at {:?}", log_file);
+        println!();
+        println!("To enable file logging, add to your config.toml:");
+        println!();
+        println!("  [[logging.backends]]");
+        println!("  type = \"file\"");
+        println!("  path = \"~/.local/state/eavs/eavs.log\"");
+        println!("  rotate = \"daily\"");
+        return Ok(());
+    }
+
+    if follow {
+        // Use tail -f
+        let mut cmd = std::process::Command::new("tail")
+            .args(["-f", "-n", &lines.to_string()])
+            .arg(&log_file)
+            .spawn()
+            .map_err(|e| CliError::Other(format!("Failed to tail logs: {}", e)))?;
+
+        cmd.wait()
+            .map_err(|e| CliError::Other(format!("Failed to wait for tail: {}", e)))?;
+    } else {
+        // Use tail
+        let output = std::process::Command::new("tail")
+            .args(["-n", &lines.to_string()])
+            .arg(&log_file)
+            .output()
+            .map_err(|e| CliError::Other(format!("Failed to read logs: {}", e)))?;
+
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    Ok(())
 }

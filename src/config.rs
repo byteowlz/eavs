@@ -423,12 +423,61 @@ impl AppConfig {
         Some(config_home.join("eavs").join("config.toml"))
     }
 
-    /// Get a provider config by name, falling back to "default".
+    /// Get a provider config by name (case-insensitive).
+    /// Returns None if the provider is not found.
+    /// Use "default" explicitly if you want the default provider.
     pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
+        let name_lower = name.to_lowercase();
         self.providers
-            .get(name)
-            .or_else(|| self.providers.get("default"))
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == name_lower)
+            .map(|(_, v)| v)
     }
+
+    /// Get a provider config by name (case-insensitive).
+    /// If the provider is not found and the name is empty, falls back to "default".
+    /// Returns the config along with metadata about how it was resolved.
+    pub fn resolve_provider(&self, name: &str) -> Option<ProviderLookupResult<'_>> {
+        let name_lower = name.to_lowercase();
+        
+        // First, try exact match (case-insensitive)
+        if let Some((resolved_name, config)) = self.providers
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == name_lower)
+        {
+            return Some(ProviderLookupResult {
+                config,
+                resolved_name: resolved_name.clone(),
+                was_fallback: false,
+            });
+        }
+        
+        // If name is empty, fall back to default
+        if name.is_empty() {
+            if let Some(config) = self.providers.get("default") {
+                return Some(ProviderLookupResult {
+                    config,
+                    resolved_name: "default".to_string(),
+                    was_fallback: true,
+                });
+            }
+        }
+        
+        None
+    }
+
+    /// Get available provider names.
+    pub fn provider_names(&self) -> Vec<&String> {
+        self.providers.keys().collect()
+    }
+}
+
+/// Result of provider lookup with information about what was resolved.
+#[derive(Debug, Clone)]
+pub struct ProviderLookupResult<'a> {
+    pub config: &'a ProviderConfig,
+    pub resolved_name: String,
+    pub was_fallback: bool,
 }
 
 /// Resolve API key from config value.
@@ -675,5 +724,94 @@ mod tests {
         } else {
             env::remove_var("XDG_CONFIG_HOME");
         }
+    }
+
+    #[test]
+    fn test_resolve_provider_case_insensitive() {
+        let toml_str = r#"
+            [providers.OpenAI]
+            type = "openai"
+            api_key = "test-key"
+
+            [providers.Anthropic]
+            type = "anthropic"
+            api_key = "test-key"
+        "#;
+
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+
+        // Test various case combinations
+        let result = config.resolve_provider("openai");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resolved_name, "OpenAI");
+
+        let result = config.resolve_provider("OPENAI");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resolved_name, "OpenAI");
+
+        let result = config.resolve_provider("OpenAI");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resolved_name, "OpenAI");
+
+        let result = config.resolve_provider("ANTHROPIC");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resolved_name, "Anthropic");
+
+        // Test unknown provider returns None
+        let result = config.resolve_provider("unknown");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_provider_fallback_to_default() {
+        let toml_str = r#"
+            [providers.default]
+            type = "openai"
+            api_key = "test-key"
+
+            [providers.anthropic]
+            type = "anthropic"
+            api_key = "test-key"
+        "#;
+
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+
+        // Empty string should fall back to default
+        let result = config.resolve_provider("");
+        assert!(result.is_some());
+        let lookup = result.unwrap();
+        assert_eq!(lookup.resolved_name, "default");
+        assert!(lookup.was_fallback);
+
+        // "default" should not be marked as fallback
+        let result = config.resolve_provider("default");
+        assert!(result.is_some());
+        let lookup = result.unwrap();
+        assert_eq!(lookup.resolved_name, "default");
+        assert!(!lookup.was_fallback);
+
+        // Unknown provider should NOT fall back to default
+        let result = config.resolve_provider("unknown");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_provider_case_insensitive() {
+        let toml_str = r#"
+            [providers.Azure]
+            type = "azure"
+            api_key = "test-key"
+        "#;
+
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+
+        // All case variants should work
+        assert!(config.get_provider("azure").is_some());
+        assert!(config.get_provider("AZURE").is_some());
+        assert!(config.get_provider("Azure").is_some());
+        assert!(config.get_provider("AzUrE").is_some());
+
+        // Unknown should return None
+        assert!(config.get_provider("unknown").is_none());
     }
 }
