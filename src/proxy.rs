@@ -338,7 +338,11 @@ pub async fn proxy_handler(
         };
 
         if provider_type == ProviderType::Azure && !base.contains("/openai/deployments/") {
-            format!("/openai/deployments/{}{}", model_name, stripped_path)
+            // Use explicit deployment name if configured, otherwise fall back to model name
+            let deployment = provider_config
+                .resolved_deployment()
+                .unwrap_or_else(|| model_name.clone());
+            format!("/openai/deployments/{}{}", deployment, stripped_path)
         } else {
             stripped_path.to_string()
         }
@@ -353,7 +357,7 @@ pub async fn proxy_handler(
         parts.uri.query().map(|s| s.to_string()).unwrap_or_default()
     };
 
-    if let Some(ref ver) = provider_config.api_version {
+    if let Some(ref ver) = provider_config.resolved_api_version() {
         if !query_string.is_empty() {
             query_string.push('&');
         }
