@@ -148,6 +148,10 @@ pub struct ProviderConfig {
     /// AWS service name for SigV4 (Bedrock only). Defaults to `bedrock`.
     #[serde(default)]
     pub aws_service: String,
+    /// Azure deployment name (Azure only). If not set, uses model name as deployment.
+    /// Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub deployment: String,
 }
 
 impl Default for ProviderConfig {
@@ -164,6 +168,7 @@ impl Default for ProviderConfig {
             aws_secret_access_key: String::new(),
             aws_session_token: String::new(),
             aws_service: String::new(),
+            deployment: String::new(),
         }
     }
 }
@@ -205,6 +210,21 @@ impl ProviderConfig {
                 String::new()
             }
         })
+    }
+
+    /// Get the resolved API version (from env var if specified).
+    pub fn resolved_api_version(&self) -> Option<String> {
+        self.api_version.as_ref().and_then(|v| get_api_key(v))
+    }
+
+    /// Get the resolved Azure deployment name (from env var if specified).
+    /// Returns None if not set, allowing fallback to model name.
+    pub fn resolved_deployment(&self) -> Option<String> {
+        if self.deployment.is_empty() {
+            None
+        } else {
+            get_api_key(&self.deployment)
+        }
     }
 
     pub fn resolved_aws_region(&self) -> Option<String> {

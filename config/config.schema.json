@@ -317,8 +317,13 @@
         },
         "api_version": {
           "type": ["string", "null"],
-          "description": "API version (primarily for Azure OpenAI)",
-          "examples": ["2024-02-15-preview"]
+          "description": "API version (primarily for Azure OpenAI). Supports 'env:VAR_NAME' syntax.",
+          "examples": ["2024-02-15-preview", "env:AZURE_OPENAI_API_VERSION"]
+        },
+        "deployment": {
+          "type": "string",
+          "description": "Azure deployment name (Azure only). If not set, uses model name as deployment. Supports 'env:VAR_NAME' syntax.",
+          "examples": ["my-gpt4-deployment", "env:AZURE_DEPLOYMENT"]
         },
         "compat": {
           "$ref": "#/$defs/compatSettings"
