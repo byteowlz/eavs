@@ -4,7 +4,9 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 
 ## Features
 
-- **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Azure, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
+- **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Azure, AWS Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
+- **Virtual API Keys**: Issue keys with rate limits, budgets, and model restrictions
+- **Cost Tracking**: Automatic token counting and cost calculation per key
 - **Transparent Proxy**: Forwards requests with zero latency
 - **Live Logging**: Multiple backends (stdout, file, webhook, OpenTelemetry)
 - **Context Injection**: Pre-request injection of system or user messages
@@ -17,13 +19,16 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 # Set your API key
 export OPENAI_API_KEY=your_key_here
 
-# Run the server
-cargo run
+# Run the server (foreground)
+eavs serve
+
+# Or run as a background service
+eavs service start
 
 # Test with curl
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer unused" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
@@ -67,7 +72,9 @@ Supported providers:
 - `xai` - xAI (Grok)
 - `openrouter` - OpenRouter
 - `azure` - Azure OpenAI
+- `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
+- `mock` - Mock provider for testing (no network calls)
 
 ### Logging
 
@@ -102,6 +109,65 @@ enabled = true
 ttl_secs = 3600              # 1 hour TTL
 cleanup_interval_secs = 60   # Cleanup every minute
 max_conversations = 10000    # Max concurrent conversations
+```
+
+### Virtual API Keys
+
+Issue API keys with rate limits, budgets, and model restrictions:
+
+```toml
+[keys]
+enabled = true
+database_path = "~/.eavs/keys.db"
+master_key = "env:EAVS_MASTER_KEY"  # Required for admin operations
+default_rpm_limit = 60              # Requests per minute
+default_budget_usd = 10.0           # Budget in USD
+```
+
+Manage keys via CLI:
+
+```bash
+# Create a key with limits
+eavs key create --name "dev-key" --rpm 100 --budget 50.0
+
+# Create a key with model restrictions
+eavs key create --name "gpt4-only" --models "gpt-4,gpt-4-turbo"
+
+# List all keys
+eavs key list
+
+# Check usage
+eavs key usage <key-id>
+
+# Revoke a key
+eavs key revoke <key-id>
+```
+
+### AWS Bedrock
+
+```toml
+[providers.bedrock]
+type = "bedrock"
+aws_region = "env:AWS_REGION"
+aws_access_key_id = "env:AWS_ACCESS_KEY_ID"
+aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
+# aws_session_token = "env:AWS_SESSION_TOKEN"  # Optional
+```
+
+## CLI Reference
+
+### Service Management
+
+```bash
+# Start server in foreground
+eavs serve --host 0.0.0.0 --port 8080
+
+# Background service
+eavs service start [--port 3000]
+eavs service stop
+eavs service restart
+eavs service status
+eavs service logs
 ```
 
 ## API Reference
@@ -183,11 +249,36 @@ curl -X PATCH http://localhost:3000/conversations/my-conversation \
 curl http://localhost:3000/logs/stream
 ```
 
-## Running Tests
+## Testing and Benchmarking
 
 ```bash
+# Run tests
 cargo test
+
+# Quick chat test
+eavs test chat "Hello" --provider openai
+
+# Sequential benchmark (mock provider = no API costs)
+eavs test bench --provider mock --count 50
+
+# Concurrent benchmark
+eavs test bench --provider mock --concurrent 10 --count 100
+
+# Duration-based load test
+eavs test bench --provider mock --concurrent 50 --duration 30s
 ```
+
+### Benchmark Options
+
+| Flag | Description |
+|------|-------------|
+| `--provider <name>` | Provider to test (default: "default") |
+| `--count <n>` | Number of requests (default: 10) |
+| `--concurrent <n>` | Parallel requests (default: 1) |
+| `--duration <time>` | Run for duration (e.g., "30s", "1m") |
+| `--model <model>` | Model to use (optional) |
+
+The `mock` provider returns synthetic responses without network calls, ideal for measuring proxy overhead.
 
 ## License
 
