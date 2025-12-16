@@ -1,17 +1,14 @@
-# yaml-language-server: $schema=config.schema.json
+"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/eavs/eavs.config.schema.json"
+
 # EAVS Configuration Example
-# Enhanced AI Validation System
 #
 # Copy this file to one of these locations:
 #   - ~/.config/eavs/config.toml (global)
 #   - ./eavs.toml (local, overrides global)
 #
-# Or point EAVS at an explicit config file:
+# Or specify explicitly:
 #   - eavs serve --config /path/to/config.toml
 #   - EAVS_CONFIG=/path/to/config.toml eavs serve
-#
-# For schema validation and autocompletion in your editor, ensure the
-# JSON schema reference above is recognized (works with taplo and other TOML LSPs).
 
 [server]
 host = "127.0.0.1"
@@ -78,8 +75,8 @@ aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
 [providers.azure]
 type = "azure"
 api_key = "env:AZURE_OPENAI_API_KEY"
-base_url = "env:AZURE_OPENAI_ENDPOINT"  # e.g., https://your-resource.openai.azure.com/
-api_version = "env:AZURE_OPENAI_API_VERSION"  # e.g., 2024-02-15-preview
+base_url = "env:AZURE_OPENAI_ENDPOINT"       # e.g., https://your-resource.openai.azure.com/
+api_version = "env:AZURE_OPENAI_API_VERSION" # e.g., 2024-02-15-preview
 # deployment = "my-gpt4-deployment"  # Optional: explicit deployment name
 #
 # URL construction:
@@ -183,9 +180,9 @@ broadcast_channel_size = 1024
 
 [state]
 enabled = true
-ttl_secs = 3600              # Conversations expire after 1 hour of inactivity
-cleanup_interval_secs = 60   # Run cleanup every minute
-max_conversations = 10000    # Max 10k concurrent conversations (0 = unlimited)
+ttl_secs = 3600            # Conversations expire after 1 hour of inactivity
+cleanup_interval_secs = 60 # Run cleanup every minute
+max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 
 # =============================================================================
 # Virtual API Keys
@@ -206,3 +203,31 @@ max_conversations = 10000    # Max 10k concurrent conversations (0 = unlimited)
 # - Linux: ~/.local/share/eavs/word_lists.toml
 # - macOS: ~/Library/Application Support/eavs/word_lists.toml
 # word_lists_path = "~/.config/eavs/word_lists.toml"
+
+# =============================================================================
+# Transparent Traffic Capture (via mitmproxy)
+# =============================================================================
+# Enable automatic transparent interception of LLM API traffic.
+# This requires mitmproxy 10.1.5+ to be installed.
+#
+# When enabled, Eaves will automatically start mitmproxy with the
+# eavs_capture.py addon to intercept traffic from:
+#   - API calls (api.openai.com, api.anthropic.com, etc.)
+#   - Desktop apps (ChatGPT, Claude, etc.)
+#
+# Install mitmproxy:
+#   macOS:   brew install mitmproxy
+#   Windows: winget install mitmproxy
+#   Linux:   pip install mitmproxy
+#
+# On first run, you may need to trust mitmproxy's CA certificate.
+# See: https://docs.mitmproxy.org/stable/concepts/certificates/
+
+# [capture]
+# enabled = false                        # Enable transparent capture mode
+# mitmproxy_path = "mitmproxy"           # Path to mitmproxy executable (or just the name if in PATH)
+# mode = "local"                         # Capture mode: "local" for all traffic, "local:AppName" for specific app
+# verbose = false                        # Enable verbose logging from mitmproxy addon
+# api_only = false                       # Only capture API traffic (skip desktop app domains)
+# addon_path = "/path/to/eavs_capture.py"  # Custom path to addon script (usually auto-detected)
+# extra_args = []                        # Additional mitmproxy arguments (e.g., ["--quiet"])

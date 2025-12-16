@@ -1,6 +1,6 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/byteowlz/eavs/config/config.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/eavs/eavs.config.schema.json",
   "title": "EAVS Configuration",
   "description": "Configuration schema for EAVS (Enhanced AI Validation System)",
   "type": "object",
@@ -190,6 +190,58 @@
         }
       },
       "additionalProperties": false
+    },
+    "capture": {
+      "type": "object",
+      "description": "Transparent traffic capture via mitmproxy. Requires mitmproxy 10.1.5+ to be installed.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable automatic mitmproxy capture mode",
+          "default": false
+        },
+        "mitmproxy_path": {
+          "type": "string",
+          "description": "Path to mitmproxy executable (default uses PATH)",
+          "default": "mitmproxy",
+          "examples": [
+            "mitmproxy",
+            "/usr/local/bin/mitmproxy",
+            "/opt/homebrew/bin/mitmproxy"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "description": "Capture mode: 'local' for all traffic, 'local:AppName' for specific app",
+          "default": "local",
+          "examples": ["local", "local:ChatGPT", "local:Claude", "local:curl"]
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Enable verbose logging from mitmproxy addon",
+          "default": false
+        },
+        "api_only": {
+          "type": "boolean",
+          "description": "Only capture API traffic (skip desktop app domains like chat.openai.com)",
+          "default": false
+        },
+        "addon_path": {
+          "type": ["string", "null"],
+          "description": "Custom path to eavs_capture.py addon script. Auto-detected if not specified.",
+          "examples": ["/path/to/eavs_capture.py", null]
+        },
+        "extra_args": {
+          "type": "array",
+          "description": "Additional mitmproxy command-line arguments",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "examples": [["--quiet"], ["--listen-port", "8080"]]
+        }
+      },
+      "additionalProperties": false
     }
   },
   "$defs": {
@@ -200,10 +252,22 @@
           "type": "object",
           "properties": {
             "action": { "const": "deny" },
-            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
-            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
-            "path": { "type": ["string", "null"], "description": "Glob match against request path (e.g. /v1/chat/completions)" },
-            "reason": { "type": ["string", "null"], "description": "User-facing denial reason" }
+            "provider": {
+              "type": ["string", "null"],
+              "description": "Glob match against provider name"
+            },
+            "model": {
+              "type": ["string", "null"],
+              "description": "Glob match against requested model"
+            },
+            "path": {
+              "type": ["string", "null"],
+              "description": "Glob match against request path (e.g. /v1/chat/completions)"
+            },
+            "reason": {
+              "type": ["string", "null"],
+              "description": "User-facing denial reason"
+            }
           },
           "required": ["action"],
           "additionalProperties": false
@@ -212,8 +276,14 @@
           "type": "object",
           "properties": {
             "action": { "const": "rewrite_model" },
-            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
-            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
+            "provider": {
+              "type": ["string", "null"],
+              "description": "Glob match against provider name"
+            },
+            "model": {
+              "type": ["string", "null"],
+              "description": "Glob match against requested model"
+            },
             "to": { "type": "string", "description": "Replacement model name" }
           },
           "required": ["action", "to"],
@@ -223,8 +293,14 @@
           "type": "object",
           "properties": {
             "action": { "const": "filter_tools" },
-            "provider": { "type": ["string", "null"], "description": "Glob match against provider name" },
-            "model": { "type": ["string", "null"], "description": "Glob match against requested model" },
+            "provider": {
+              "type": ["string", "null"],
+              "description": "Glob match against provider name"
+            },
+            "model": {
+              "type": ["string", "null"],
+              "description": "Glob match against requested model"
+            },
             "allow": {
               "type": ["array", "null"],
               "description": "Allow-list tool name globs",
@@ -370,7 +446,11 @@
             }
           },
           "then": {
-            "required": ["aws_region", "aws_access_key_id", "aws_secret_access_key"]
+            "required": [
+              "aws_region",
+              "aws_access_key_id",
+              "aws_secret_access_key"
+            ]
           }
         }
       ],

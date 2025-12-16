@@ -501,6 +501,7 @@ mod tests {
             policy: Default::default(),
             keys: KeysConfig::default(),
             state: StateConfig::default(),
+            capture: Default::default(),
         }
     }
 

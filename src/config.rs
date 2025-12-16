@@ -95,6 +95,8 @@ pub struct AppConfig {
     pub state: StateConfig,
     #[serde(default)]
     pub keys: KeysConfig,
+    #[serde(default)]
+    pub capture: CaptureConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -616,6 +618,123 @@ impl Default for KeysConfig {
             update_pricing_on_startup: false,
             word_lists_path: None, // Uses XDG data directory by default
         }
+    }
+}
+
+/// Configuration for transparent traffic capture via mitmproxy.
+///
+/// When enabled, Eaves will automatically start mitmproxy with the
+/// eavs_capture.py addon to intercept LLM API traffic.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct CaptureConfig {
+    /// Enable automatic mitmproxy capture mode
+    pub enabled: bool,
+    /// Path to mitmproxy executable (default: "mitmproxy" - uses PATH)
+    pub mitmproxy_path: String,
+    /// Capture mode: "local" for all traffic, "local:AppName" for specific app
+    pub mode: String,
+    /// Enable verbose logging from mitmproxy addon
+    pub verbose: bool,
+    /// Only capture API traffic (skip desktop app domains like chat.openai.com)
+    pub api_only: bool,
+    /// Path to the eavs_capture.py addon script (default: bundled with eavs)
+    pub addon_path: Option<String>,
+    /// Additional mitmproxy arguments
+    pub extra_args: Vec<String>,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mitmproxy_path: "mitmproxy".to_string(),
+            mode: "local".to_string(),
+            verbose: false,
+            api_only: false,
+            addon_path: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+impl CaptureConfig {
+    /// Get the resolved addon script path.
+    ///
+    /// If explicitly configured, returns that path.
+    /// Otherwise, looks for the addon in standard locations:
+    /// 1. Next to the eavs binary (for installed versions)
+    /// 2. In the scripts/ directory (for development)
+    pub fn resolved_addon_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.addon_path {
+            return Some(expand_path(path));
+        }
+
+        // Try to find addon relative to current executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                // Check next to binary
+                let addon_next_to_exe = exe_dir.join("eavs_capture.py");
+                if addon_next_to_exe.exists() {
+                    return Some(addon_next_to_exe);
+                }
+
+                // Check in scripts/ subdirectory
+                let addon_in_scripts = exe_dir.join("scripts").join("eavs_capture.py");
+                if addon_in_scripts.exists() {
+                    return Some(addon_in_scripts);
+                }
+
+                // Check in share/eavs/ (for system installs)
+                let addon_in_share = exe_dir.join("../share/eavs/eavs_capture.py");
+                if addon_in_share.exists() {
+                    return Some(addon_in_share.canonicalize().ok()?);
+                }
+            }
+        }
+
+        // Check current working directory
+        let cwd_addon = PathBuf::from("scripts/eavs_capture.py");
+        if cwd_addon.exists() {
+            return Some(cwd_addon);
+        }
+
+        None
+    }
+
+    /// Build mitmproxy command arguments.
+    pub fn build_mitmproxy_args(&self, eavs_port: u16) -> Vec<String> {
+        let mut args = vec![
+            "--mode".to_string(),
+            self.mode.clone(),
+        ];
+
+        // Add addon script
+        if let Some(addon_path) = self.resolved_addon_path() {
+            args.push("-s".to_string());
+            args.push(addon_path.to_string_lossy().to_string());
+        }
+
+        // Set Eaves port for the addon
+        args.push("--set".to_string());
+        args.push(format!("eavs_port={}", eavs_port));
+
+        // Verbose mode
+        if self.verbose {
+            args.push("--set".to_string());
+            args.push("eavs_verbose=true".to_string());
+        }
+
+        // API-only mode
+        if self.api_only {
+            args.push("--set".to_string());
+            args.push("eavs_api_only=true".to_string());
+        }
+
+        // Add any extra arguments
+        args.extend(self.extra_args.clone());
+
+        args
     }
 }
 

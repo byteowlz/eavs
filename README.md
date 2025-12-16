@@ -5,6 +5,7 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 ## Features
 
 - **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Azure, AWS Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
+- **Transparent Traffic Capture**: Automatically intercept LLM API calls from any app via mitmproxy integration
 - **Virtual API Keys**: Issue keys with rate limits, budgets, and model restrictions
 - **Cost Tracking**: Automatic token counting and cost calculation per key
 - **Transparent Proxy**: Forwards requests with zero latency
@@ -153,6 +154,50 @@ aws_access_key_id = "env:AWS_ACCESS_KEY_ID"
 aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
 # aws_session_token = "env:AWS_SESSION_TOKEN"  # Optional
 ```
+
+### Transparent Traffic Capture
+
+Automatically intercept LLM API calls from any application (including desktop apps like ChatGPT and Claude) without changing client configuration. This feature uses mitmproxy for cross-platform traffic interception.
+
+**Prerequisites:**
+- mitmproxy 10.1.5+ (`brew install mitmproxy` on macOS, `pip install mitmproxy` elsewhere)
+- On first run, trust mitmproxy's CA certificate (see [mitmproxy docs](https://docs.mitmproxy.org/stable/concepts/certificates/))
+
+**Option 1: Auto-start via config (recommended)**
+
+```toml
+[capture]
+enabled = true
+mode = "local"              # Capture all local traffic
+# mode = "local:ChatGPT"    # Capture specific app only
+# verbose = true            # Enable verbose logging
+# api_only = true           # Skip desktop app domains
+```
+
+Then just run `eavs serve` - mitmproxy starts automatically.
+
+**Option 2: Manual mitmproxy start**
+
+```bash
+# Terminal 1: Start Eaves
+eavs serve
+
+# Terminal 2: Start mitmproxy with capture addon
+mitmproxy --mode local -s scripts/eavs_capture.py
+
+# Capture specific app only
+mitmproxy --mode local:ChatGPT -s scripts/eavs_capture.py
+```
+
+**Captured domains:**
+- API endpoints: api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, api.mistral.ai, api.groq.com, etc.
+- Desktop apps: chat.openai.com, claude.ai, gemini.google.com, perplexity.ai, poe.com, etc.
+
+**How it works:**
+1. mitmproxy intercepts outgoing HTTPS traffic using its local capture mode
+2. The `eavs_capture.py` addon detects LLM-related domains and redirects them to Eaves
+3. Eaves auto-detects the provider from the original host and proxies the request
+4. All traffic is logged and can be analyzed, rate-limited, or modified
 
 ## CLI Reference
 
