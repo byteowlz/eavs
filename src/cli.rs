@@ -440,9 +440,29 @@ pub struct CliConfig {
 
 impl Default for CliConfig {
     fn default() -> Self {
+        Self::from_config(None)
+    }
+}
+
+impl CliConfig {
+    /// Create a CliConfig by loading settings from config file.
+    /// Priority: EAVS_URL env > config file > default (127.0.0.1:3000)
+    pub fn from_config(config_path: Option<&str>) -> Self {
+        // EAVS_URL env var takes highest priority
+        if let Ok(url) = std::env::var("EAVS_URL") {
+            if !url.trim().is_empty() {
+                return Self {
+                    server_url: url,
+                    master_key: std::env::var("EAVS_MASTER_KEY").ok(),
+                    timeout: Duration::from_secs(30),
+                };
+            }
+        }
+
+        // Try to load port from config file
+        let port = get_effective_port(None, config_path);
         Self {
-            server_url: std::env::var("EAVS_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string()),
+            server_url: format!("http://127.0.0.1:{}", port),
             master_key: std::env::var("EAVS_MASTER_KEY").ok(),
             timeout: Duration::from_secs(30),
         }
