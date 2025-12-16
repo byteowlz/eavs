@@ -147,7 +147,7 @@ mod tests {
     fn test_capture_config_build_args() {
         let config = CaptureConfig {
             enabled: true,
-            mitmproxy_path: "mitmproxy".to_string(),
+            mitmproxy_path: "mitmdump".to_string(),
             mode: "local:ChatGPT".to_string(),
             verbose: true,
             api_only: true,

@@ -180,6 +180,7 @@ broadcast_channel_size = 1024
 
 [state]
 enabled = true
+capture_all = false        # Track all conversations (not just those with injections)
 ttl_secs = 3600            # Conversations expire after 1 hour of inactivity
 cleanup_interval_secs = 60 # Run cleanup every minute
 max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
@@ -225,7 +226,7 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 
 # [capture]
 # enabled = false                        # Enable transparent capture mode
-# mitmproxy_path = "mitmproxy"           # Path to mitmproxy executable (or just the name if in PATH)
+# mitmproxy_path = "mitmdump"            # Path to mitmdump executable (use mitmdump, not mitmproxy, for background use)
 # mode = "local"                         # Capture mode: "local" for all traffic, "local:AppName" for specific app
 # verbose = false                        # Enable verbose logging from mitmproxy addon
 # api_only = false                       # Only capture API traffic (skip desktop app domains)

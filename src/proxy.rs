@@ -207,6 +207,16 @@ pub async fn proxy_handler(
         None
     };
 
+    // Register/update conversation in store if capture_all is enabled
+    if state.config.state.capture_all {
+        let _ = state.conversations.get_or_create(&conversation_id);
+        state.conversations.update_metadata(&conversation_id, |meta| {
+            meta.provider = Some(provider_name.clone());
+            meta.model = Some(model.clone());
+            meta.request_count += 1;
+        });
+    }
+
     // Check for injections (new conversation store)
     let injections = state.conversations.take_injections(&conversation_id);
     if !injections.is_empty() {
@@ -1112,6 +1122,16 @@ pub async fn ws_proxy_handler(
                     .into_response();
             }
         }
+    }
+
+    // Register/update conversation in store if capture_all is enabled
+    if state.config.state.capture_all {
+        let _ = state.conversations.get_or_create(&conversation_id);
+        state.conversations.update_metadata(&conversation_id, |meta| {
+            meta.provider = Some(provider_name.clone());
+            meta.model = Some("websocket".to_string());
+            meta.request_count += 1;
+        });
     }
 
     let provider_lookup = match state.config.resolve_provider(&provider_name) {
