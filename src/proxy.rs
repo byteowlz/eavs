@@ -1,6 +1,6 @@
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
-use crate::provider::{AuthStyle, ProviderType};
+use crate::provider::{detect_provider_from_host, AuthStyle, ProviderType};
 use crate::state::{AnalysisEvent, AppState, Injection};
 use crate::transform::{
     build_openai_sse_response, parse_incoming_request, ProviderTransformer, TransformError,
@@ -83,12 +83,37 @@ pub async fn proxy_handler(
         .unwrap_or_else(|| "default".to_string());
 
     // Allow selecting provider via header (e.g., X-Provider: anthropic)
-    let provider_name = req
+    // Fallback: detect from X-Original-Host (for mitmproxy integration)
+    let explicit_provider = req
         .headers()
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string());
+    
+    let original_host = req
+        .headers()
+        .get("X-Original-Host")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    
+    let provider_name = explicit_provider
+        .clone()
+        .or_else(|| {
+            // Try to detect provider from X-Original-Host (mitmproxy capture mode)
+            original_host.as_deref()
+                .and_then(detect_provider_from_host)
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "default".to_string());
+
+    // Log when using mitmproxy capture mode
+    if explicit_provider.is_none() && original_host.is_some() {
+        tracing::debug!(
+            original_host = %original_host.as_deref().unwrap_or(""),
+            detected_provider = %provider_name,
+            "Request intercepted via mitmproxy capture mode"
+        );
+    }
 
     // 2. Read and modify body if needed (Pre-request Injection)
     let (parts, body) = req.into_parts();
@@ -1844,6 +1869,7 @@ mod tests {
             policy: Default::default(),
             state: Default::default(),
             keys: Default::default(),
+            capture: Default::default(),
         }
     }
 

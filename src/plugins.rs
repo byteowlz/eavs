@@ -191,6 +191,7 @@ mod tests {
             policy: Default::default(),
             state: Default::default(),
             keys: Default::default(),
+            capture: Default::default(),
         }
     }
 

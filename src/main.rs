@@ -1,5 +1,6 @@
 mod api;
 mod aws_sigv4;
+mod capture;
 mod cli;
 mod config;
 mod keys;
@@ -108,6 +109,8 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     // Store cleanup interval and keys config before moving config
     let cleanup_interval = config.state.cleanup_interval_secs;
     let keys_enabled = config.keys.enabled;
+    let capture_config = config.capture.clone();
+    let server_port = config.server.port;
 
     // Initialize state
     let state = AppState::new(config);
@@ -169,6 +172,23 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/v1/*path", any(proxy::proxy_handler))
         .with_state(state);
 
+    // Start mitmproxy capture if enabled
+    let _capture_handle = if capture_config.enabled {
+        match capture::start_capture_async(capture_config, server_port).await {
+            Ok(handle) => {
+                tracing::info!("Transparent capture mode: enabled (via mitmproxy)");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::error!("Failed to start capture mode: {}", e);
+                tracing::warn!("Continuing without transparent capture...");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Run server
     tracing::info!("Listening on {}", addr);
     if keys_enabled {
@@ -177,6 +197,11 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+
+    // Clean up capture on shutdown (handle will be dropped automatically)
+    if let Some(handle) = _capture_handle {
+        handle.stop();
+    }
 }
 
 async fn run_service_command(action: ServiceCommands) -> Result<(), cli::CliError> {

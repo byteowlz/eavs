@@ -174,6 +174,98 @@ impl ProviderType {
     }
 }
 
+/// Detect provider name from a hostname.
+///
+/// Used by the mitmproxy integration to automatically detect which provider
+/// a request is targeting based on the original host. This allows transparent
+/// interception without requiring explicit X-Provider headers.
+///
+/// Returns `None` if the host doesn't match any known LLM provider.
+pub fn detect_provider_from_host(host: &str) -> Option<&'static str> {
+    let host_lower = host.to_lowercase();
+
+    // OpenAI (API and desktop app)
+    if host_lower.contains("openai.com") || host_lower.contains("chatgpt.com") {
+        return Some("openai");
+    }
+
+    // Anthropic (API and desktop app)
+    if host_lower.contains("anthropic.com") || host_lower.contains("claude.ai") {
+        return Some("anthropic");
+    }
+
+    // Google AI / Vertex AI / Gemini
+    if host_lower.contains("googleapis.com")
+        || host_lower.contains("aiplatform.googleapis.com")
+        || host_lower.contains("gemini.google.com")
+        || host_lower.contains("aistudio.google.com")
+    {
+        return Some("google");
+    }
+
+    // Mistral
+    if host_lower.contains("mistral.ai") {
+        return Some("mistral");
+    }
+
+    // Groq
+    if host_lower.contains("groq.com") {
+        return Some("groq");
+    }
+
+    // Cerebras
+    if host_lower.contains("cerebras.ai") {
+        return Some("cerebras");
+    }
+
+    // xAI (Grok)
+    if host_lower.contains("x.ai") {
+        return Some("xai");
+    }
+
+    // OpenRouter
+    if host_lower.contains("openrouter.ai") {
+        return Some("openrouter");
+    }
+
+    // Together AI
+    if host_lower.contains("together.xyz") {
+        return Some("together");
+    }
+
+    // Cohere
+    if host_lower.contains("cohere.ai") || host_lower.contains("cohere.com") {
+        return Some("cohere");
+    }
+
+    // Perplexity
+    if host_lower.contains("perplexity.ai") {
+        return Some("perplexity");
+    }
+
+    // DeepSeek
+    if host_lower.contains("deepseek.com") {
+        return Some("deepseek");
+    }
+
+    // Fireworks AI
+    if host_lower.contains("fireworks.ai") {
+        return Some("fireworks");
+    }
+
+    // AI21
+    if host_lower.contains("ai21.com") {
+        return Some("ai21");
+    }
+
+    // Replicate
+    if host_lower.contains("replicate.com") {
+        return Some("replicate");
+    }
+
+    None
+}
+
 /// Configuration for compatibility settings with OpenAI-compatible APIs.
 /// Some providers have slight differences from the OpenAI API.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -357,5 +449,41 @@ mod tests {
         assert_eq!(custom.max_tokens_field(), "max_tokens");
         // Non-overridden should use detection (OpenAI default)
         assert!(custom.supports_developer_role());
+    }
+
+    #[test]
+    fn test_detect_provider_from_host() {
+        // OpenAI
+        assert_eq!(detect_provider_from_host("api.openai.com"), Some("openai"));
+        assert_eq!(detect_provider_from_host("chat.openai.com"), Some("openai"));
+        assert_eq!(detect_provider_from_host("chatgpt.com"), Some("openai"));
+
+        // Anthropic
+        assert_eq!(detect_provider_from_host("api.anthropic.com"), Some("anthropic"));
+        assert_eq!(detect_provider_from_host("claude.ai"), Some("anthropic"));
+
+        // Google
+        assert_eq!(detect_provider_from_host("generativelanguage.googleapis.com"), Some("google"));
+        assert_eq!(detect_provider_from_host("gemini.google.com"), Some("google"));
+
+        // Other providers
+        assert_eq!(detect_provider_from_host("api.mistral.ai"), Some("mistral"));
+        assert_eq!(detect_provider_from_host("api.groq.com"), Some("groq"));
+        assert_eq!(detect_provider_from_host("api.cerebras.ai"), Some("cerebras"));
+        assert_eq!(detect_provider_from_host("api.x.ai"), Some("xai"));
+        assert_eq!(detect_provider_from_host("openrouter.ai"), Some("openrouter"));
+        assert_eq!(detect_provider_from_host("api.together.xyz"), Some("together"));
+        assert_eq!(detect_provider_from_host("api.perplexity.ai"), Some("perplexity"));
+        assert_eq!(detect_provider_from_host("api.deepseek.com"), Some("deepseek"));
+
+        // Unknown hosts
+        assert_eq!(detect_provider_from_host("example.com"), None);
+        assert_eq!(detect_provider_from_host("localhost"), None);
+    }
+
+    #[test]
+    fn test_detect_provider_from_host_case_insensitive() {
+        assert_eq!(detect_provider_from_host("API.OPENAI.COM"), Some("openai"));
+        assert_eq!(detect_provider_from_host("Api.Anthropic.Com"), Some("anthropic"));
     }
 }

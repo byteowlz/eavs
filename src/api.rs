@@ -581,6 +581,7 @@ mod tests {
             policy: Default::default(),
             state: StateConfig::default(),
             keys: KeysConfig::default(),
+            capture: Default::default(),
         };
         AppState::new(config)
     }
@@ -615,6 +616,7 @@ mod tests {
             policy: Default::default(),
             state: StateConfig::default(),
             keys: KeysConfig::default(),
+            capture: Default::default(),
         };
         AppState::new(config)
     }
