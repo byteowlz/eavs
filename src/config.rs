@@ -564,6 +564,8 @@ impl Default for AnalysisPluginConfig {
 pub struct StateConfig {
     /// Enable conversation state storage
     pub enabled: bool,
+    /// Track all conversations (not just those with injections)
+    pub capture_all: bool,
     /// TTL for conversation state in seconds (0 = no expiration)
     pub ttl_secs: u64,
     /// How often to run cleanup in seconds
@@ -576,9 +578,10 @@ impl Default for StateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            ttl_secs: 3600,            // 1 hour default
-            cleanup_interval_secs: 60, // Cleanup every minute
-            max_conversations: 10000,  // Max 10k conversations
+            capture_all: false,         // Only track conversations with injections by default
+            ttl_secs: 3600,             // 1 hour default
+            cleanup_interval_secs: 60,  // Cleanup every minute
+            max_conversations: 10000,   // Max 10k conversations
         }
     }
 }
@@ -630,7 +633,8 @@ impl Default for KeysConfig {
 pub struct CaptureConfig {
     /// Enable automatic mitmproxy capture mode
     pub enabled: bool,
-    /// Path to mitmproxy executable (default: "mitmproxy" - uses PATH)
+    /// Path to mitmdump executable (default: "mitmdump" - uses PATH)
+    /// Note: Use mitmdump (not mitmproxy) for non-interactive/background usage
     pub mitmproxy_path: String,
     /// Capture mode: "local" for all traffic, "local:AppName" for specific app
     pub mode: String,
@@ -648,7 +652,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            mitmproxy_path: "mitmproxy".to_string(),
+            mitmproxy_path: "mitmdump".to_string(),
             mode: "local".to_string(),
             verbose: false,
             api_only: false,

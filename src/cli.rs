@@ -2254,6 +2254,7 @@ pub struct ServiceStatus {
     pub url: String,
     pub uptime_secs: Option<u64>,
     pub providers: Vec<String>,
+    pub capture_enabled: bool,
 }
 
 /// Get the effective port from CLI arg, env, or config file
@@ -2279,6 +2280,14 @@ pub async fn run_service_start(
     config_path: Option<String>,
     wait: bool,
 ) -> Result<(), CliError> {
+    // Load config to check capture settings
+    let config = if let Some(ref path) = config_path {
+        crate::config::AppConfig::load_from(path).ok()
+    } else {
+        crate::config::AppConfig::load().ok()
+    };
+    let capture_enabled = config.as_ref().map(|c| c.capture.enabled).unwrap_or(false);
+
     // Determine the effective port (from CLI, env, or config)
     let effective_port = get_effective_port(port, config_path.as_deref());
     let url = format!("http://127.0.0.1:{}", effective_port);
@@ -2299,6 +2308,9 @@ pub async fn run_service_start(
 
     // Start the server (pass the CLI port only if explicitly set)
     println!("Starting EAVS server on port {}...", effective_port);
+    if capture_enabled {
+        println!("  Transparent capture: enabled (mitmproxy will be started)");
+    }
     let child = start_server_background(port, config_path.as_deref())?;
 
     // Write PID file
@@ -2313,6 +2325,9 @@ pub async fn run_service_start(
             if is_eavs_server_running(&url).await {
                 println!("EAVS server started successfully (PID: {})", child.id());
                 println!("  URL: {}", url);
+                if capture_enabled {
+                    println!("  Capture: mitmproxy running (intercepts LLM traffic)");
+                }
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2326,6 +2341,9 @@ pub async fn run_service_start(
         )));
     } else {
         println!("EAVS server starting in background (PID: {})", child.id());
+        if capture_enabled {
+            println!("  Capture: mitmproxy will intercept LLM traffic");
+        }
     }
 
     Ok(())
@@ -2420,6 +2438,10 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
 
     let running = is_eavs_server_running(&url).await;
 
+    // Load config to check capture settings
+    let config = crate::config::AppConfig::load().ok();
+    let capture_enabled = config.as_ref().map(|c| c.capture.enabled).unwrap_or(false);
+
     // Get additional info if running
     let (uptime, providers) = if running {
         let client = EavsClient::with_url(url.clone());
@@ -2437,6 +2459,7 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
         url: url.clone(),
         uptime_secs: uptime,
         providers: providers.clone(),
+        capture_enabled,
     };
 
     match format {
@@ -2461,10 +2484,16 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
                 if !status.providers.is_empty() {
                     println!("  Providers: {}", status.providers.join(", "));
                 }
+                if capture_enabled {
+                    println!("  Capture:   enabled (mitmproxy)");
+                }
             } else {
                 println!("EAVS Server Status: STOPPED");
                 println!("{}", "=".repeat(40));
                 println!("  Port:      {}", effective_port);
+                if capture_enabled {
+                    println!("  Capture:   enabled in config (will start with server)");
+                }
 
                 // Check if port is in use by something else
                 if !is_port_available(effective_port) {

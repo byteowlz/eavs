@@ -46,8 +46,8 @@
       "properties": {
         "default": {
           "type": "string",
-          "description": "Default logging backend",
-          "enum": ["stdout", "file", "none"],
+          "description": "Default logging backend. Use 'pretty' for human-readable debug output.",
+          "enum": ["stdout", "pretty", "none"],
           "default": "stdout"
         },
         "sink": {
@@ -119,6 +119,11 @@
           "type": "boolean",
           "description": "Enable conversation state storage",
           "default": true
+        },
+        "capture_all": {
+          "type": "boolean",
+          "description": "Track all conversations, not just those with injections",
+          "default": false
         },
         "ttl_secs": {
           "type": "integer",
@@ -202,12 +207,12 @@
         },
         "mitmproxy_path": {
           "type": "string",
-          "description": "Path to mitmproxy executable (default uses PATH)",
-          "default": "mitmproxy",
+          "description": "Path to mitmdump executable (use mitmdump instead of mitmproxy for background/non-interactive usage)",
+          "default": "mitmdump",
           "examples": [
-            "mitmproxy",
-            "/usr/local/bin/mitmproxy",
-            "/opt/homebrew/bin/mitmproxy"
+            "mitmdump",
+            "/usr/local/bin/mitmdump",
+            "/opt/homebrew/bin/mitmdump"
           ]
         },
         "mode": {
