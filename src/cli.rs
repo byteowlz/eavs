@@ -12,6 +12,33 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Parse SSE stream response and extract content from delta chunks.
+/// Returns the accumulated content from all chunks.
+fn parse_sse_stream_content(text: &str) -> String {
+    let mut content = String::new();
+    
+    for line in text.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                break;
+            }
+            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(delta) = chunk
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| d.get("content"))
+                    .and_then(|c| c.as_str())
+                {
+                    content.push_str(delta);
+                }
+            }
+        }
+    }
+    
+    content
+}
+
 /// EAVS - Bidirectional LLM Proxy with Virtual API Keys
 #[derive(Parser)]
 #[command(name = "eavs")]
@@ -622,28 +649,9 @@ impl EavsClient {
         let resp = self.post_chat_completions(&body, provider, api_key).await?;
 
         if stream {
-            // For streaming, collect the full response
+            // For streaming, collect the full response using helper
             let text = resp.text().await.map_err(CliError::Request)?;
-            let mut content = String::new();
-
-            for line in text.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        break;
-                    }
-                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(delta) = chunk
-                            .get("choices")
-                            .and_then(|c| c.get(0))
-                            .and_then(|c| c.get("delta"))
-                            .and_then(|d| d.get("content"))
-                            .and_then(|c| c.as_str())
-                        {
-                            content.push_str(delta);
-                        }
-                    }
-                }
-            }
+            let content = parse_sse_stream_content(&text);
 
             Ok(ChatResponse {
                 content,
@@ -692,7 +700,8 @@ impl EavsClient {
         api_key: Option<&str>,
         stream: bool,
     ) -> Result<ChatResponse, CliError> {
-        let bytes = std::fs::read(image_path).map_err(CliError::Io)?;
+        // Use async file I/O to avoid blocking the tokio runtime
+        let bytes = tokio::fs::read(image_path).await.map_err(CliError::Io)?;
         let mime = guess_image_mime(image_path).ok_or_else(|| {
             CliError::Other("Unsupported image extension (expected png/jpg/jpeg/webp/gif)".to_string())
         })?;
@@ -715,27 +724,9 @@ impl EavsClient {
         let resp = self.post_chat_completions(&body, provider, api_key).await?;
 
         if stream {
+            // For streaming, collect the full response using helper
             let text = resp.text().await.map_err(CliError::Request)?;
-            let mut content = String::new();
-
-            for line in text.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        break;
-                    }
-                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(delta) = chunk
-                            .get("choices")
-                            .and_then(|c| c.get(0))
-                            .and_then(|c| c.get("delta"))
-                            .and_then(|d| d.get("content"))
-                            .and_then(|c| c.as_str())
-                        {
-                            content.push_str(delta);
-                        }
-                    }
-                }
-            }
+            let content = parse_sse_stream_content(&text);
 
             Ok(ChatResponse {
                 content,
@@ -874,6 +865,10 @@ impl EavsClient {
 }
 
 // Request/Response types for CLI
+// Note: These are DTOs (Data Transfer Objects) for HTTP API communication.
+// They differ from internal types (e.g., keys/types.rs) because:
+// - JSON serialization uses Vec instead of HashSet for arrays
+// - Optional fields use skip_serializing_if for cleaner API payloads
 
 #[derive(Debug, Serialize)]
 pub struct CreateKeyCliRequest {
@@ -881,11 +876,13 @@ pub struct CreateKeyCliRequest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    pub permissions: KeyPermissions,
+    pub permissions: KeyPermissionsDto,
 }
 
+/// Key permissions DTO for CLI API requests.
+/// Uses Vec instead of HashSet for JSON serialization compatibility.
 #[derive(Debug, Serialize, Default)]
-pub struct KeyPermissions {
+pub struct KeyPermissionsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1018,7 +1015,7 @@ pub async fn run_key_create(
     let request = CreateKeyCliRequest {
         name,
         expires_at: parse_expiration(&expires),
-        permissions: KeyPermissions {
+        permissions: KeyPermissionsDto {
             allowed_models: if models.is_empty() {
                 None
             } else {

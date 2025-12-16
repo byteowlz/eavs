@@ -92,14 +92,35 @@ pub async fn proxy_handler(
 
     // 2. Read and modify body if needed (Pre-request Injection)
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, usize::MAX)
+    
+    // Use configurable max body size to prevent DoS attacks
+    let max_body_size = if state.config.server.max_body_size > 0 {
+        state.config.server.max_body_size
+    } else {
+        usize::MAX // Unlimited if explicitly set to 0
+    };
+    
+    let bytes = axum::body::to_bytes(body, max_body_size)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new("Failed to read request body", "invalid_request")),
-            )
-                .into_response()
+        .map_err(|e| {
+            // Check if it's a size limit error
+            let error_msg = e.to_string();
+            if error_msg.contains("length limit") || error_msg.contains("too large") {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(ProxyError::new(
+                        format!("Request body too large. Maximum size: {} bytes", max_body_size),
+                        "payload_too_large",
+                    )),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ProxyError::new("Failed to read request body", "invalid_request")),
+                )
+                    .into_response()
+            }
         })?;
 
     let mut json_body: Value = if !bytes.is_empty() {
@@ -475,7 +496,12 @@ pub async fn proxy_handler(
         body: request_body,
     };
 
-    tracing::debug!("Upstream URL: {}", url);
+    // Log upstream URL with optional redaction
+    if state.config.server.log_redact {
+        tracing::debug!("Upstream URL: {}", crate::config::redact_sensitive(&url));
+    } else {
+        tracing::debug!("Upstream URL: {}", url);
+    }
 
     // Handle mock provider - return synthetic responses without network calls
     if provider_type.is_mock() {
@@ -595,11 +621,12 @@ pub async fn proxy_handler(
                 resolved_provider.parse().unwrap(),
             );
 
-            // Schedule usage recording after response completes
+            // Record usage asynchronously when stream completes
+            // Use a lighter-weight approach than spawning a delayed task for every request
             if let Some(tracker) = usage_tracker.clone() {
                 let state_clone = state.clone();
+                // Record immediately - the batched KeyStore will handle SQLite writes efficiently
                 tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     record_usage_from_tracker(&state_clone, &tracker).await;
                 });
             }
@@ -688,6 +715,7 @@ pub async fn proxy_handler(
                     }
                 }
 
+                // Record immediately - the batched KeyStore handles SQLite writes efficiently
                 let state_clone = state.clone();
                 tokio::spawn(async move {
                     record_usage_from_tracker(&state_clone, &tracker).await;
@@ -727,12 +755,10 @@ pub async fn proxy_handler(
             resolved_provider.parse().unwrap(),
         );
 
-        // Schedule usage recording after response completes
+        // Record usage asynchronously - batched KeyStore handles SQLite writes efficiently
         if let Some(tracker) = usage_tracker {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                // Give time for stream to complete and usage to be captured
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 record_usage_from_tracker(&state_clone, &tracker).await;
             });
         }
@@ -1023,6 +1049,46 @@ pub async fn ws_proxy_handler(
         .unwrap_or("default")
         .to_string();
 
+    // Validate virtual API key if present (for rate limiting)
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    if let Some(ref key) = auth_header {
+        if is_virtual_key(key) {
+            if let Some(validator) = state.get_key_validator() {
+                // Use a small token estimate for WebSocket rate limiting
+                let estimated_tokens = 100; // Conservative estimate per WS connection
+                match validator
+                    .validate(key, "websocket", &provider_name, Some(estimated_tokens))
+                    .await
+                {
+                    Ok(_) => {} // Validation passed
+                    Err(e) => {
+                        return (
+                            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+                            Json(ProxyError::new(e.to_string(), "authentication_error")
+                                .with_code(e.error_code())),
+                        )
+                            .into_response();
+                    }
+                }
+            } else {
+                // Keys enabled in request but validator not initialized
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ProxyError::new(
+                        "Virtual API keys are not available",
+                        "service_unavailable",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let provider_lookup = match state.config.resolve_provider(&provider_name) {
         Some(v) => v,
         None => {
@@ -1238,104 +1304,99 @@ fn build_ws_upstream_url(
     }
 }
 
-fn apply_ws_auth_headers(
-    request: &mut http::Request<()>,
-    provider_type: ProviderType,
-    api_key: &str,
-) {
+/// Trait for abstracting over different header map types (HeaderMap vs http::Request<()>).
+/// This allows us to use a single implementation for both HTTP and WebSocket headers.
+trait HeadersExt {
+    fn insert_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
+}
+
+impl HeadersExt for HeaderMap {
+    fn insert_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        let _ = self.insert(name, value);
+    }
+}
+
+impl HeadersExt for http::Request<()> {
+    fn insert_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        let _ = self.headers_mut().insert(name, value);
+    }
+}
+
+/// Apply authentication headers to any header container.
+/// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
+fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType, api_key: &str) {
     if api_key.is_empty() {
         return;
     }
 
     match provider_type.info().auth_style {
         AuthStyle::BearerToken => {
-            let _ = request.headers_mut().insert(
-                http::header::AUTHORIZATION,
-                http::HeaderValue::from_str(&format!("Bearer {}", api_key))
-                    .unwrap_or_else(|_| http::HeaderValue::from_static("")),
-            );
+            if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+                headers.insert_header(http::header::AUTHORIZATION, value);
+            } else {
+                tracing::warn!("Failed to create Authorization header: invalid API key characters");
+            }
         }
         AuthStyle::ApiKeyHeader(name) => {
             let Ok(hname) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+                tracing::warn!("Invalid header name for API key: {}", name);
                 return;
             };
-            let _ = request
-                .headers_mut()
-                .insert(hname, http::HeaderValue::from_str(api_key).unwrap());
+            if let Ok(value) = http::HeaderValue::from_str(api_key) {
+                headers.insert_header(hname, value);
+            } else {
+                tracing::warn!("Failed to create {} header: invalid API key characters", name);
+            }
         }
         AuthStyle::AzureApiKey => {
-            let _ = request.headers_mut().insert(
-                http::header::HeaderName::from_static("api-key"),
-                http::HeaderValue::from_str(api_key).unwrap(),
-            );
+            if let Ok(value) = http::HeaderValue::from_str(api_key) {
+                headers.insert_header(
+                    http::header::HeaderName::from_static("api-key"),
+                    value,
+                );
+            } else {
+                tracing::warn!("Failed to create api-key header: invalid API key characters");
+            }
         }
         AuthStyle::QueryParam(_) | AuthStyle::None => {}
     }
+}
+
+/// Apply provider-specific extra headers to any header container.
+/// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
+fn apply_extra_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType) {
+    match provider_type {
+        ProviderType::Anthropic => {
+            headers.insert_header(
+                http::header::HeaderName::from_static("anthropic-version"),
+                http::HeaderValue::from_static("2023-06-01"),
+            );
+        }
+        ProviderType::OpenRouter => {
+            headers.insert_header(
+                http::header::HeaderName::from_static("http-referer"),
+                http::HeaderValue::from_static("https://github.com/eavs-proxy"),
+            );
+        }
+        _ => {}
+    }
+}
+
+// Backwards-compatible wrappers (can be removed once all call sites are updated)
+fn apply_ws_auth_headers(request: &mut http::Request<()>, provider_type: ProviderType, api_key: &str) {
+    apply_auth_headers(request, provider_type, api_key);
 }
 
 fn apply_ws_extra_headers(request: &mut http::Request<()>, provider_type: ProviderType) {
-    match provider_type {
-        ProviderType::Anthropic => {
-            let _ = request.headers_mut().insert(
-                http::header::HeaderName::from_static("anthropic-version"),
-                http::HeaderValue::from_static("2023-06-01"),
-            );
-        }
-        ProviderType::OpenRouter => {
-            let _ = request.headers_mut().insert(
-                http::header::HeaderName::from_static("http-referer"),
-                http::HeaderValue::from_static("https://github.com/eavs-proxy"),
-            );
-        }
-        _ => {}
-    }
+    apply_extra_headers(request, provider_type);
 }
 
 fn apply_http_auth_headers(headers: &mut HeaderMap, provider_type: ProviderType, api_key: &str) {
-    if api_key.is_empty() {
-        return;
-    }
-
-    match provider_type.info().auth_style {
-        AuthStyle::BearerToken => {
-            let _ = headers.insert(
-                http::header::AUTHORIZATION,
-                http::HeaderValue::from_str(&format!("Bearer {}", api_key))
-                    .unwrap_or_else(|_| http::HeaderValue::from_static("")),
-            );
-        }
-        AuthStyle::ApiKeyHeader(name) => {
-            let Ok(hname) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
-                return;
-            };
-            let _ = headers.insert(hname, http::HeaderValue::from_str(api_key).unwrap());
-        }
-        AuthStyle::AzureApiKey => {
-            let _ = headers.insert(
-                http::header::HeaderName::from_static("api-key"),
-                http::HeaderValue::from_str(api_key).unwrap(),
-            );
-        }
-        AuthStyle::QueryParam(_) | AuthStyle::None => {}
-    }
+    apply_auth_headers(headers, provider_type, api_key);
 }
 
 fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
-    match provider_type {
-        ProviderType::Anthropic => {
-            let _ = headers.insert(
-                http::header::HeaderName::from_static("anthropic-version"),
-                http::HeaderValue::from_static("2023-06-01"),
-            );
-        }
-        ProviderType::OpenRouter => {
-            let _ = headers.insert(
-                http::header::HeaderName::from_static("http-referer"),
-                http::HeaderValue::from_static("https://github.com/eavs-proxy"),
-            );
-        }
-        _ => {}
-    }
+    apply_extra_headers(headers, provider_type);
 }
 
 async fn resolve_image_urls_in_context(

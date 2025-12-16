@@ -102,6 +102,11 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Maximum request body size in bytes. Default: 10 MB.
+    /// Set to 0 for unlimited (not recommended).
+    pub max_body_size: usize,
+    /// Redact sensitive data (API keys, tokens) from logs. Default: true.
+    pub log_redact: bool,
 }
 
 impl Default for ServerConfig {
@@ -109,8 +114,141 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3000,
+            max_body_size: 10 * 1024 * 1024, // 10 MB default
+            log_redact: true,
         }
     }
+}
+
+/// Redact sensitive information from URLs and strings.
+/// 
+/// Redacts:
+/// - API keys in query parameters (api_key=xxx, key=xxx)
+/// - Bearer tokens (keeps prefix for debugging)
+/// - Common API key patterns (sk-, eavs-, etc.)
+pub fn redact_sensitive(input: &str) -> String {
+    let mut result = input.to_string();
+    
+    // Redact query parameters with sensitive names
+    for param_name in &["api_key", "key", "token", "secret", "password", "api-key", "apikey"] {
+        result = redact_query_param(&result, param_name);
+    }
+    
+    // Redact Bearer tokens (keep first 8 chars for debugging)
+    result = redact_bearer_token(&result);
+    
+    // Redact common API key patterns
+    result = redact_api_key_patterns(&result);
+    
+    result
+}
+
+/// Redact a specific query parameter value.
+fn redact_query_param(input: &str, param_name: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+    
+    while let Some(idx) = remaining.find(&format!("{}=", param_name)) {
+        // Check it's actually a parameter (preceded by ? or &)
+        let prefix_ok = idx == 0 || {
+            let prev_char = remaining.chars().nth(idx.saturating_sub(1));
+            prev_char == Some('?') || prev_char == Some('&')
+        };
+        
+        if !prefix_ok {
+            result.push_str(&remaining[..idx + param_name.len() + 1]);
+            remaining = &remaining[idx + param_name.len() + 1..];
+            continue;
+        }
+        
+        // Copy up to and including the =
+        result.push_str(&remaining[..idx + param_name.len() + 1]);
+        result.push_str("[REDACTED]");
+        remaining = &remaining[idx + param_name.len() + 1..];
+        
+        // Skip the actual value
+        if let Some(end_idx) = remaining.find(|c| c == '&' || c == ' ' || c == '\n') {
+            remaining = &remaining[end_idx..];
+        } else {
+            remaining = "";
+        }
+    }
+    
+    result.push_str(remaining);
+    result
+}
+
+/// Redact Bearer token values, keeping prefix for debugging.
+fn redact_bearer_token(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+    
+    while let Some(idx) = remaining.to_lowercase().find("bearer ") {
+        // Copy up to and including "Bearer "
+        result.push_str(&remaining[..idx + 7]);
+        remaining = &remaining[idx + 7..];
+        
+        // Keep first 8 chars of the token for debugging, redact rest
+        let token_end = remaining.find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(remaining.len());
+        let token = &remaining[..token_end];
+        
+        if token.len() > 8 {
+            result.push_str(&token[..8]);
+            result.push_str("[REDACTED]");
+        } else {
+            result.push_str(token);
+        }
+        
+        remaining = &remaining[token_end..];
+    }
+    
+    result.push_str(remaining);
+    result
+}
+
+/// Redact common API key patterns like sk-xxx, eavs-xxx.
+fn redact_api_key_patterns(input: &str) -> String {
+    let prefixes = ["sk-", "eavs-", "api-", "key-", "pk-", "rk-"];
+    let mut result = input.to_string();
+    
+    for prefix in prefixes {
+        result = redact_prefixed_key(&result, prefix);
+    }
+    
+    result
+}
+
+/// Redact keys with a specific prefix.
+fn redact_prefixed_key(input: &str, prefix: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+    
+    while let Some(idx) = remaining.find(prefix) {
+        // Copy up to and including the prefix
+        result.push_str(&remaining[..idx + prefix.len()]);
+        remaining = &remaining[idx + prefix.len()..];
+        
+        // Find the end of the key (alphanumeric chars)
+        let key_len = remaining.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .count();
+        
+        if key_len > 8 {
+            // Keep first 8 chars, redact rest
+            let key = &remaining[..key_len];
+            result.push_str(&key[..8.min(key.len())]);
+            result.push_str("[REDACTED]");
+            remaining = &remaining[key_len..];
+        } else {
+            // Short key, keep as-is
+            result.push_str(&remaining[..key_len]);
+            remaining = &remaining[key_len..];
+        }
+    }
+    
+    result.push_str(remaining);
+    result
 }
 
 #[derive(Debug, Deserialize, Clone)]
