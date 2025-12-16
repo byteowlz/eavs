@@ -174,7 +174,20 @@ impl KeyApiError {
     }
 }
 
-/// Check master key authorization.
+/// Constant-time byte comparison to prevent timing attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Check master key authorization using constant-time comparison.
 fn check_master_key(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, Json<KeyApiError>)> {
     let master_key = state.config.keys.resolved_master_key();
     
@@ -196,7 +209,8 @@ fn check_master_key(headers: &HeaderMap, state: &AppState) -> Result<(), (Status
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match auth_header {
-        Some(key) if key == expected_key => Ok(()),
+        // Use constant-time comparison to prevent timing attacks
+        Some(key) if constant_time_eq(key.as_bytes(), expected_key.as_bytes()) => Ok(()),
         _ => Err((
             StatusCode::UNAUTHORIZED,
             Json(KeyApiError::new("Invalid master key", "unauthorized")),
@@ -677,5 +691,40 @@ mod tests {
         let entry = state.conversations.get("conv-1").unwrap();
         assert_eq!(entry.metadata.provider, Some("anthropic".to_string()));
         assert!(entry.metadata.tags.contains(&"test".to_string()));
+    }
+
+    // ============================================================================
+    // Security Tests
+    // ============================================================================
+
+    #[test]
+    fn test_constant_time_eq_same_length() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"x", b"x"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_content() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hellx"));
+        assert!(!constant_time_eq(b"a", b"b"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_length() {
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(!constant_time_eq(b"short", b"much longer string"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_binary_data() {
+        let a = vec![0u8, 255, 128, 64, 32];
+        let b = vec![0u8, 255, 128, 64, 32];
+        let c = vec![0u8, 255, 128, 64, 31];
+        
+        assert!(constant_time_eq(&a, &b));
+        assert!(!constant_time_eq(&a, &c));
     }
 }
