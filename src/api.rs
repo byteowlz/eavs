@@ -12,12 +12,46 @@ use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
+/// Maximum content length for injected messages (1 MB)
+const MAX_INJECTION_CONTENT_LENGTH: usize = 1024 * 1024;
+
+/// Maximum number of messages per injection request
+const MAX_INJECTION_MESSAGES: usize = 100;
+
+/// Valid roles for injected messages
+const VALID_INJECTION_ROLES: &[&str] = &["system", "user", "assistant"];
+
+/// Validate injection payload to prevent abuse.
+fn validate_injection_payload(payload: &InjectionPayload) -> Result<(), (StatusCode, &'static str)> {
+    // Check total number of messages
+    if payload.messages.len() > MAX_INJECTION_MESSAGES {
+        return Err((StatusCode::BAD_REQUEST, "Too many messages in injection payload"));
+    }
+    
+    for injection in &payload.messages {
+        // Validate role is one of the allowed values
+        if !VALID_INJECTION_ROLES.contains(&injection.role.as_str()) {
+            return Err((StatusCode::BAD_REQUEST, "Invalid role in injection. Allowed: system, user, assistant"));
+        }
+        
+        // Validate content length
+        if injection.content.len() > MAX_INJECTION_CONTENT_LENGTH {
+            return Err((StatusCode::BAD_REQUEST, "Injection content too large"));
+        }
+    }
+    
+    Ok(())
+}
+
 /// Inject messages into a conversation.
 pub async fn inject_handler(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
     Json(payload): Json<InjectionPayload>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    // Validate the injection payload
+    validate_injection_payload(&payload)?;
+    
     // If a WS session is active for this conversation, deliver immediately (mid-stream).
     // Otherwise, queue for the next HTTP request (pre-request injection).
     let delivered = state
@@ -27,7 +61,7 @@ pub async fn inject_handler(
     if !delivered {
         state.conversations.add_injections(&conversation_id, payload.messages);
     }
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 /// Clear a conversation's pending injections.
@@ -718,6 +752,64 @@ mod tests {
         assert!(!constant_time_eq(b"hello", b"hell"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(!constant_time_eq(b"short", b"much longer string"));
+    }
+
+    // ============================================================================
+    // Injection Validation Tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_injection_valid_roles() {
+        let payload = InjectionPayload {
+            messages: vec![
+                Injection { role: "system".to_string(), content: "Be helpful".to_string() },
+                Injection { role: "user".to_string(), content: "Hello".to_string() },
+                Injection { role: "assistant".to_string(), content: "Hi there".to_string() },
+            ],
+        };
+        assert!(validate_injection_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn test_validate_injection_invalid_role() {
+        let payload = InjectionPayload {
+            messages: vec![
+                Injection { role: "tool".to_string(), content: "Bad role".to_string() },
+            ],
+        };
+        let result = validate_injection_payload(&payload);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().1, "Invalid role in injection. Allowed: system, user, assistant");
+    }
+
+    #[test]
+    fn test_validate_injection_too_many_messages() {
+        let messages: Vec<Injection> = (0..101)
+            .map(|i| Injection { role: "user".to_string(), content: format!("Message {}", i) })
+            .collect();
+        let payload = InjectionPayload { messages };
+        let result = validate_injection_payload(&payload);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().1, "Too many messages in injection payload");
+    }
+
+    #[test]
+    fn test_validate_injection_content_too_large() {
+        let large_content = "x".repeat(MAX_INJECTION_CONTENT_LENGTH + 1);
+        let payload = InjectionPayload {
+            messages: vec![
+                Injection { role: "user".to_string(), content: large_content },
+            ],
+        };
+        let result = validate_injection_payload(&payload);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().1, "Injection content too large");
+    }
+
+    #[test]
+    fn test_validate_injection_empty_payload_ok() {
+        let payload = InjectionPayload { messages: vec![] };
+        assert!(validate_injection_payload(&payload).is_ok());
     }
 
     #[test]

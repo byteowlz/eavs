@@ -229,8 +229,25 @@ impl TokenBucketLimiter {
 
     fn consume(&self, tokens: u32) {
         self.refill_if_needed();
-        self.tokens
-            .fetch_sub(tokens.min(self.available()), std::sync::atomic::Ordering::Relaxed);
+        
+        // Use compare_exchange in a loop to safely consume tokens without underflow.
+        // This fixes the race condition where available() could return a value
+        // that's stale by the time fetch_sub executes.
+        loop {
+            let current = self.tokens.load(std::sync::atomic::Ordering::Acquire);
+            let to_consume = tokens.min(current);
+            let new_value = current.saturating_sub(to_consume);
+            
+            match self.tokens.compare_exchange(
+                current,
+                new_value,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,  // Successfully consumed
+                Err(_) => continue,  // Another thread modified tokens, retry
+            }
+        }
     }
 
     fn available(&self) -> u32 {
@@ -286,16 +303,26 @@ impl DailyLimiter {
 
     fn check(&self) -> bool {
         self.reset_if_new_day();
-        let current = self
-            .count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if current >= self.limit {
-            // Undo the increment
-            self.count
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            false
-        } else {
-            true
+        
+        // Use compare_exchange in a loop to atomically check and increment
+        // This prevents race conditions where two threads could see the same
+        // count and both succeed even when only one slot remains.
+        loop {
+            let current = self.count.load(std::sync::atomic::Ordering::Acquire);
+            if current >= self.limit {
+                return false;
+            }
+            
+            // Try to atomically increment from current to current + 1
+            match self.count.compare_exchange(
+                current,
+                current + 1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return true,  // Successfully incremented
+                Err(_) => continue,    // Another thread modified count, retry
+            }
         }
     }
 
@@ -355,6 +382,8 @@ pub struct RateLimitUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_rpm_limiting() {
@@ -412,5 +441,116 @@ mod tests {
 
         // Should allow again
         assert!(limiter.check_request(key, Some(5), None).is_ok());
+    }
+
+    #[test]
+    fn test_daily_limiter_concurrent_access() {
+        // Test that the DailyLimiter handles concurrent access correctly
+        // and does not allow more requests than the limit.
+        let limiter = Arc::new(DailyLimiter::new(100));
+        let mut handles = vec![];
+        
+        // Spawn 50 threads, each trying to make 5 requests
+        for _ in 0..50 {
+            let limiter = Arc::clone(&limiter);
+            handles.push(thread::spawn(move || {
+                let mut successes = 0;
+                for _ in 0..5 {
+                    if limiter.check() {
+                        successes += 1;
+                    }
+                }
+                successes
+            }));
+        }
+        
+        let total_successes: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        
+        // Should not exceed the limit of 100
+        assert!(total_successes <= 100, "Expected at most 100 successes, got {}", total_successes);
+        // With 50 threads * 5 requests = 250 attempts, we should hit the limit
+        assert_eq!(total_successes, 100, "Expected exactly 100 successes, got {}", total_successes);
+    }
+
+    #[test]
+    fn test_token_bucket_concurrent_consume() {
+        // Test that TokenBucketLimiter handles concurrent consume correctly
+        // and does not go negative.
+        let limiter = Arc::new(TokenBucketLimiter::new(1000));
+        let mut handles = vec![];
+        
+        // Spawn 10 threads, each consuming 200 tokens
+        for _ in 0..10 {
+            let limiter = Arc::clone(&limiter);
+            handles.push(thread::spawn(move || {
+                limiter.consume(200);
+            }));
+        }
+        
+        for h in handles {
+            h.join().unwrap();
+        }
+        
+        // Available tokens should be 0, not negative
+        let available = limiter.available();
+        assert!(available <= 1000, "Available tokens should not exceed limit");
+        // With 2000 tokens consumed from 1000, we should be at 0
+        assert_eq!(available, 0, "Expected 0 available tokens, got {}", available);
+    }
+
+    #[test]
+    fn test_token_bucket_check_and_consume_race() {
+        // Test the race between check() and consume()
+        let limiter = Arc::new(TokenBucketLimiter::new(100));
+        let mut handles = vec![];
+        
+        // Multiple threads checking and consuming
+        for _ in 0..20 {
+            let limiter = Arc::clone(&limiter);
+            handles.push(thread::spawn(move || {
+                let mut consumed = 0u32;
+                for _ in 0..10 {
+                    if limiter.check(10) {
+                        limiter.consume(10);
+                        consumed += 10;
+                    }
+                }
+                consumed
+            }));
+        }
+        
+        let total_consumed: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        
+        // Total consumed should be at most the limit
+        assert!(total_consumed <= 100, "Total consumed should not exceed 100, got {}", total_consumed);
+    }
+
+    #[test]
+    fn test_rate_limiter_concurrent_rpd() {
+        // Test the RateLimiter with concurrent RPD checks
+        let limiter = Arc::new(RateLimiter::new());
+        let key = "concurrent-rpd-test";
+        let mut handles = vec![];
+        
+        // Spawn 20 threads, each making 10 requests
+        for _ in 0..20 {
+            let limiter = Arc::clone(&limiter);
+            let key = key.to_string();
+            handles.push(thread::spawn(move || {
+                let mut successes = 0;
+                for _ in 0..10 {
+                    if limiter.check_request(&key, None, Some(50)).is_ok() {
+                        successes += 1;
+                    }
+                }
+                successes
+            }));
+        }
+        
+        let total_successes: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        
+        // Should not exceed the daily limit of 50
+        assert!(total_successes <= 50, "Expected at most 50 successes, got {}", total_successes);
+        assert_eq!(total_successes, 50, "Expected exactly 50 successes, got {}", total_successes);
     }
 }

@@ -35,6 +35,8 @@ pub struct KeyStore {
     pool: Pool<Sqlite>,
     /// In-memory cache for fast lookups (key_hash -> VirtualKey)
     cache: Arc<DashMap<String, VirtualKey>>,
+    /// Secondary index for O(1) lookup by human ID (key_id -> key_hash)
+    human_id_index: Arc<DashMap<String, String>>,
     /// Pending usage updates counter (for batch syncing)
     pending_updates: Arc<AtomicU64>,
     /// Channel to send sync requests to background task
@@ -63,6 +65,7 @@ impl KeyStore {
         Self::run_migrations(&pool).await?;
 
         let cache = Arc::new(DashMap::new());
+        let human_id_index = Arc::new(DashMap::new());
         let pending_updates = Arc::new(AtomicU64::new(0));
         
         // Start background sync task
@@ -78,6 +81,7 @@ impl KeyStore {
         let store = Self {
             pool,
             cache,
+            human_id_index,
             pending_updates,
             sync_tx: Some(sync_tx),
         };
@@ -102,6 +106,7 @@ impl KeyStore {
         Ok(Self {
             pool,
             cache: Arc::new(DashMap::new()),
+            human_id_index: Arc::new(DashMap::new()),
             pending_updates: Arc::new(AtomicU64::new(0)),
             sync_tx: None, // No background task for tests (sync is immediate)
         })
@@ -243,8 +248,11 @@ impl KeyStore {
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         self.cache.clear();
+        self.human_id_index.clear();
         for row in rows {
             if let Ok(key) = row.to_virtual_key() {
+                // Update secondary index for O(1) human ID lookups
+                self.human_id_index.insert(key.key_id.clone(), key.key_hash.clone());
                 self.cache.insert(key.key_hash.clone(), key);
             }
         }
@@ -306,7 +314,8 @@ impl KeyStore {
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
-        // Add to cache
+        // Add to cache and secondary index
+        self.human_id_index.insert(key_id.clone(), key_hash.clone());
         self.cache.insert(key_hash.clone(), virtual_key.clone());
 
         Ok(CreateKeyResponse {
@@ -370,11 +379,13 @@ impl KeyStore {
     }
 
     /// Look up a key by its human-readable ID (e.g., "cold-lamp").
+    /// 
+    /// Uses a secondary index for O(1) lookup instead of O(n) iteration.
     pub fn get_by_human_id(&self, key_id: &str) -> Option<VirtualKey> {
-        self.cache
-            .iter()
-            .find(|entry| entry.value().key_id == key_id)
-            .map(|entry| entry.value().clone())
+        // First look up the key_hash via secondary index
+        let key_hash = self.human_id_index.get(key_id)?;
+        // Then look up the full key via primary cache
+        self.cache.get(key_hash.value()).map(|v| v.clone())
     }
 
     /// List all keys (returns masked info, not actual keys).
@@ -404,7 +415,10 @@ impl KeyStore {
             .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         if result.rows_affected() > 0 {
-            self.cache.remove(key_hash);
+            // Remove from cache and secondary index
+            if let Some((_, key)) = self.cache.remove(key_hash) {
+                self.human_id_index.remove(&key.key_id);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -429,7 +443,10 @@ impl KeyStore {
             .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         if result.rows_affected() > 0 {
-            self.cache.remove(key_hash);
+            // Remove from cache and secondary index
+            if let Some((_, key)) = self.cache.remove(key_hash) {
+                self.human_id_index.remove(&key.key_id);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -462,18 +479,33 @@ impl KeyStore {
             key.usage.last_request_at = Some(Utc::now());
             
             // Check if we need to reset the window
+            // Use UTC timestamps consistently to avoid timezone edge cases
             if let Some(window) = &key.permissions.budget_window {
+                let now = Utc::now();
                 let should_reset = match (&key.usage.window_start, window) {
                     (Some(start), BudgetWindow::Daily) => {
-                        Utc::now().date_naive() > start.date_naive()
+                        // Compare UTC days using duration-based comparison
+                        // This handles year boundaries correctly
+                        let start_utc_day = start.timestamp() / 86400;
+                        let now_utc_day = now.timestamp() / 86400;
+                        now_utc_day > start_utc_day
                     }
                     (Some(start), BudgetWindow::Weekly) => {
-                        let days = (Utc::now() - *start).num_days();
-                        days >= 7
+                        let duration = now.signed_duration_since(*start);
+                        duration.num_days() >= 7
                     }
                     (Some(start), BudgetWindow::Monthly) => {
-                        Utc::now().date_naive().month() > start.date_naive().month()
-                            || Utc::now().date_naive().year() > start.date_naive().year()
+                        // For monthly, compare year and month using signed duration
+                        // If it's been at least 28 days, check if we've crossed a month boundary
+                        let duration = now.signed_duration_since(*start);
+                        if duration.num_days() >= 28 {
+                            // Use year*12+month to handle year boundaries correctly
+                            let start_ym = start.year() * 12 + start.month() as i32;
+                            let now_ym = now.year() * 12 + now.month() as i32;
+                            now_ym > start_ym
+                        } else {
+                            false
+                        }
                     }
                     (None, _) => true,
                     (_, BudgetWindow::Total) => false,
@@ -481,7 +513,7 @@ impl KeyStore {
 
                 if should_reset {
                     key.usage.window_spend_usd = cost_usd;
-                    key.usage.window_start = Some(Utc::now());
+                    key.usage.window_start = Some(now);
                 }
             }
         }

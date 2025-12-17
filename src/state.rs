@@ -508,6 +508,7 @@ mod tests {
     fn mock_state_config() -> StateConfig {
         StateConfig {
             enabled: true,
+            capture_all: false,
             ttl_secs: 1, // 1 second for testing
             cleanup_interval_secs: 1,
             max_conversations: 3,
@@ -584,6 +585,7 @@ mod tests {
     fn test_conversation_store_ttl_cleanup() {
         let store = ConversationStore::new(StateConfig {
             enabled: true,
+            capture_all: false,
             ttl_secs: 1,
             cleanup_interval_secs: 1,
             max_conversations: 100,
@@ -613,6 +615,7 @@ mod tests {
     fn test_conversation_store_eviction() {
         let store = ConversationStore::new(StateConfig {
             enabled: true,
+            capture_all: false,
             ttl_secs: 0, // No TTL
             cleanup_interval_secs: 0,
             max_conversations: 2,
