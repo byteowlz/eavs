@@ -6,7 +6,7 @@ use crate::transform::{
     build_openai_sse_response, parse_incoming_request, ProviderTransformer, TransformError,
 };
 use crate::types::{ContentBlock, Context, ImageContent, Message, StreamState};
-use crate::upstream::{Upstream, UpstreamRequest};
+use crate::upstream::{Upstream, UpstreamRequest, UpstreamResponse};
 use axum::{
     body::Body,
     extract::{
@@ -97,14 +97,15 @@ pub async fn proxy_handler(
         .map(|s| s.to_string());
     
     let provider_name = explicit_provider
-        .clone()
+        .as_ref()
+        .map(|s| s.as_str())
         .or_else(|| {
             // Try to detect provider from X-Original-Host (mitmproxy capture mode)
             original_host.as_deref()
                 .and_then(detect_provider_from_host)
-                .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or("default")
+        .to_string();
 
     // Log when using mitmproxy capture mode
     if explicit_provider.is_none() && original_host.is_some() {
@@ -563,9 +564,8 @@ pub async fn proxy_handler(
     })?;
 
     // 5. Stream Response with optional transformation
-    let status = upstream_res.status;
-    let headers = upstream_res.headers.clone();
-    let stream = upstream_res.body;
+    // Destructure to take ownership without cloning
+    let UpstreamResponse { status, headers, body: stream } = upstream_res;
 
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
@@ -1051,18 +1051,30 @@ fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
         .get_mut("messages")
         .and_then(|m| m.as_array_mut())
     {
-        // Insert system messages at the beginning, others at end
+        // Collect system and non-system injections separately to maintain order
+        let mut system_injections: Vec<Value> = Vec::new();
+        let mut other_injections: Vec<Value> = Vec::new();
+        
         for injection in injections {
             let obj = serde_json::json!({
                 "role": injection.role,
                 "content": injection.content
             });
             if injection.role == "system" {
-                messages.insert(0, obj);
+                system_injections.push(obj);
             } else {
-                messages.push(obj);
+                other_injections.push(obj);
             }
         }
+        
+        // Insert all system messages at the beginning in their original order
+        // by using splice to insert all at once
+        if !system_injections.is_empty() {
+            messages.splice(0..0, system_injections);
+        }
+        
+        // Append non-system messages at the end
+        messages.extend(other_injections);
     }
 }
 
@@ -1496,6 +1508,64 @@ async fn resolve_image_urls_in_context(
     Ok(())
 }
 
+/// Validate that a URL does not target internal/private network resources.
+/// This prevents SSRF (Server-Side Request Forgery) attacks.
+fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
+    let host_str = url.host_str().ok_or("URL has no host")?;
+    
+    // Strip brackets from IPv6 addresses for consistent handling
+    // url::Url.host_str() returns IPv6 addresses with brackets like "[::1]"
+    let host = host_str.trim_start_matches('[').trim_end_matches(']');
+    
+    // Block localhost and loopback
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return Err(format!("blocked internal URL: {}", host));
+    }
+    
+    // Block common internal hostnames
+    let blocked_hostnames = [
+        "metadata", "metadata.google.internal", "instance-data",
+        "169.254.169.254", // AWS/GCP/Azure metadata service
+        "fd00:ec2::254",   // AWS IMDSv2 IPv6
+    ];
+    if blocked_hostnames.contains(&host) {
+        return Err(format!("blocked internal URL: {}", host));
+    }
+    
+    // Parse IP address if host is an IP
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        // Block private IP ranges (RFC 1918)
+        let is_private = match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                ipv4.is_private()           // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || ipv4.is_loopback()       // 127.0.0.0/8
+                || ipv4.is_link_local()     // 169.254.0.0/16 (includes metadata endpoint)
+                || ipv4.is_broadcast()      // 255.255.255.255
+                || ipv4.is_unspecified()    // 0.0.0.0
+                || ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()          // ::1
+                || ipv6.is_unspecified()    // ::
+                // Check for private/link-local IPv6 ranges
+                || {
+                    let segments = ipv6.segments();
+                    // fc00::/7 (unique local)
+                    (segments[0] & 0xfe00) == 0xfc00
+                    // fe80::/10 (link-local)
+                    || (segments[0] & 0xffc0) == 0xfe80
+                }
+            }
+        };
+        
+        if is_private {
+            return Err(format!("blocked private/internal IP address: {}", ip));
+        }
+    }
+    
+    Ok(())
+}
+
 async fn fetch_image_to_base64(
     upstream: &dyn Upstream,
     url: &str,
@@ -1508,6 +1578,9 @@ async fn fetch_image_to_base64(
         "http" | "https" => {}
         _ => return Err(format!("unsupported image url scheme: {}", parsed.scheme())),
     }
+    
+    // SSRF protection: block internal/private network URLs
+    validate_url_not_internal(&parsed)?;
 
     let (headers, body) = upstream
         .get_bytes(
@@ -1650,9 +1723,11 @@ mod tests {
         // Should have 3 messages
         assert_eq!(messages.len(), 3);
 
-        // Both system messages should be at the beginning
+        // Both system messages should be at the beginning, in original order
         assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "First system");
         assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[1]["content"], "Second system");
         assert_eq!(messages[2]["role"], "user");
     }
 
@@ -1794,6 +1869,84 @@ mod tests {
         apply_injections(&mut body, &injections);
 
         assert!(body.is_null());
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_localhost() {
+        let url = url::Url::parse("http://localhost/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked internal URL"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_loopback() {
+        let url = url::Url::parse("http://127.0.0.1/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked internal URL"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_metadata_endpoint() {
+        let url = url::Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked internal URL"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_private_ip_10() {
+        let url = url::Url::parse("http://10.0.0.1/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_private_ip_172() {
+        let url = url::Url::parse("http://172.16.0.1/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_private_ip_192() {
+        let url = url::Url::parse("http://192.168.1.1/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_ipv6_loopback() {
+        let url = url::Url::parse("http://[::1]/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked internal URL"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_ipv6_link_local() {
+        let url = url::Url::parse("http://[fe80::1]/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+    }
+
+    #[test]
+    fn test_ssrf_protection_allows_public_ip() {
+        let url = url::Url::parse("https://example.com/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_protection_allows_public_ip_address() {
+        let url = url::Url::parse("https://8.8.8.8/image.png").unwrap();
+        let result = super::validate_url_not_internal(&url);
+        assert!(result.is_ok());
     }
 
     #[derive(Clone)]
