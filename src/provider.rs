@@ -266,6 +266,110 @@ pub fn detect_provider_from_host(host: &str) -> Option<&'static str> {
     None
 }
 
+/// Detect provider from model name patterns.
+///
+/// Used for auto-routing when a request comes through the generic /v1/ endpoint
+/// without an explicit provider. Returns a provider name if the model name
+/// matches known patterns.
+///
+/// # Examples
+/// - `claude-3-opus` -> Some("anthropic")
+/// - `gpt-4` -> Some("openai")
+/// - `gemini-pro` -> Some("google")
+/// - `mistral-large` -> Some("mistral")
+/// - `custom-model` -> None (unknown pattern)
+pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
+    let model_lower = model.to_lowercase();
+
+    // Anthropic Claude models
+    if model_lower.starts_with("claude") {
+        return Some("anthropic");
+    }
+
+    // OpenAI models (GPT, o1, o3, etc.)
+    if model_lower.starts_with("gpt-")
+        || model_lower.starts_with("o1")
+        || model_lower.starts_with("o3")
+        || model_lower.starts_with("o4")
+        || model_lower.starts_with("chatgpt")
+        || model_lower.starts_with("text-embedding")
+        || model_lower.starts_with("text-davinci")
+        || model_lower.starts_with("davinci")
+        || model_lower.starts_with("dall-e")
+        || model_lower.starts_with("whisper")
+        || model_lower.starts_with("tts-")
+    {
+        return Some("openai");
+    }
+
+    // Google Gemini models
+    if model_lower.starts_with("gemini") || model_lower.starts_with("models/gemini") {
+        return Some("google");
+    }
+
+    // Mistral models
+    if model_lower.starts_with("mistral")
+        || model_lower.starts_with("codestral")
+        || model_lower.starts_with("pixtral")
+        || model_lower.starts_with("ministral")
+    {
+        return Some("mistral");
+    }
+
+    // Groq-specific model identifiers (often uses llama/mixtral but via groq)
+    // Note: Groq also serves other models, so this is tricky
+    // We only match explicit groq prefixes
+    if model_lower.starts_with("groq/") {
+        return Some("groq");
+    }
+
+    // xAI Grok models
+    if model_lower.starts_with("grok") {
+        return Some("xai");
+    }
+
+    // Cohere models
+    if model_lower.starts_with("command") || model_lower.starts_with("cohere/") {
+        return Some("cohere");
+    }
+
+    // Meta Llama models (when not via specific provider)
+    // Note: These are often served by multiple providers, so we don't auto-route
+    // unless there's a provider prefix
+    if model_lower.starts_with("meta/") || model_lower.starts_with("llama-") {
+        // Could be Groq, Together, Fireworks, etc. - don't auto-route
+        return None;
+    }
+
+    // AWS Bedrock model patterns (anthropic.claude-*, amazon.titan-*, etc.)
+    if model_lower.contains("anthropic.claude")
+        || model_lower.contains("amazon.titan")
+        || model_lower.contains("ai21.j2")
+        || model_lower.contains("cohere.command")
+        || model_lower.contains("meta.llama")
+        || model_lower.contains("stability.")
+    {
+        return Some("bedrock");
+    }
+
+    // OpenRouter prefixed models
+    if model_lower.starts_with("openrouter/") {
+        return Some("openrouter");
+    }
+
+    // Perplexity models
+    if model_lower.starts_with("pplx-") || model_lower.starts_with("sonar") {
+        return Some("perplexity");
+    }
+
+    // DeepSeek models
+    if model_lower.starts_with("deepseek") {
+        return Some("deepseek");
+    }
+
+    None
+}
+
 /// Configuration for compatibility settings with OpenAI-compatible APIs.
 /// Some providers have slight differences from the OpenAI API.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -485,5 +589,83 @@ mod tests {
     fn test_detect_provider_from_host_case_insensitive() {
         assert_eq!(detect_provider_from_host("API.OPENAI.COM"), Some("openai"));
         assert_eq!(detect_provider_from_host("Api.Anthropic.Com"), Some("anthropic"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_anthropic() {
+        assert_eq!(detect_provider_from_model("claude-3-opus"), Some("anthropic"));
+        assert_eq!(detect_provider_from_model("claude-3-5-sonnet-20240620"), Some("anthropic"));
+        assert_eq!(detect_provider_from_model("claude-sonnet-4-20250514"), Some("anthropic"));
+        assert_eq!(detect_provider_from_model("Claude-3-Haiku"), Some("anthropic"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_openai() {
+        assert_eq!(detect_provider_from_model("gpt-4"), Some("openai"));
+        assert_eq!(detect_provider_from_model("gpt-4-turbo"), Some("openai"));
+        assert_eq!(detect_provider_from_model("gpt-4o"), Some("openai"));
+        assert_eq!(detect_provider_from_model("gpt-5.2"), Some("openai"));
+        assert_eq!(detect_provider_from_model("o1-preview"), Some("openai"));
+        assert_eq!(detect_provider_from_model("o3-mini"), Some("openai"));
+        assert_eq!(detect_provider_from_model("text-embedding-3-small"), Some("openai"));
+        assert_eq!(detect_provider_from_model("dall-e-3"), Some("openai"));
+        assert_eq!(detect_provider_from_model("whisper-1"), Some("openai"));
+        assert_eq!(detect_provider_from_model("tts-1-hd"), Some("openai"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_google() {
+        assert_eq!(detect_provider_from_model("gemini-pro"), Some("google"));
+        assert_eq!(detect_provider_from_model("gemini-1.5-flash"), Some("google"));
+        assert_eq!(detect_provider_from_model("models/gemini-pro"), Some("google"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_mistral() {
+        assert_eq!(detect_provider_from_model("mistral-large"), Some("mistral"));
+        assert_eq!(detect_provider_from_model("mistral-small-latest"), Some("mistral"));
+        assert_eq!(detect_provider_from_model("codestral-latest"), Some("mistral"));
+        assert_eq!(detect_provider_from_model("pixtral-12b"), Some("mistral"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_xai() {
+        assert_eq!(detect_provider_from_model("grok-2"), Some("xai"));
+        assert_eq!(detect_provider_from_model("grok-beta"), Some("xai"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_bedrock() {
+        assert_eq!(detect_provider_from_model("anthropic.claude-3-sonnet"), Some("bedrock"));
+        assert_eq!(detect_provider_from_model("amazon.titan-text-express-v1"), Some("bedrock"));
+        assert_eq!(detect_provider_from_model("meta.llama3-70b-instruct-v1"), Some("bedrock"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_perplexity() {
+        assert_eq!(detect_provider_from_model("pplx-70b-online"), Some("perplexity"));
+        assert_eq!(detect_provider_from_model("sonar-small-online"), Some("perplexity"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_deepseek() {
+        assert_eq!(detect_provider_from_model("deepseek-coder"), Some("deepseek"));
+        assert_eq!(detect_provider_from_model("deepseek-chat"), Some("deepseek"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_unknown() {
+        // Generic models that could be served by multiple providers
+        assert_eq!(detect_provider_from_model("llama-3-70b"), None);
+        assert_eq!(detect_provider_from_model("mixtral-8x7b"), None);
+        assert_eq!(detect_provider_from_model("custom-finetuned-model"), None);
+        assert_eq!(detect_provider_from_model("my-local-model"), None);
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_case_insensitive() {
+        assert_eq!(detect_provider_from_model("CLAUDE-3-OPUS"), Some("anthropic"));
+        assert_eq!(detect_provider_from_model("GPT-4"), Some("openai"));
+        assert_eq!(detect_provider_from_model("Gemini-Pro"), Some("google"));
     }
 }

@@ -1,6 +1,6 @@
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
-use crate::provider::{detect_provider_from_host, AuthStyle, ProviderType};
+use crate::provider::{detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType};
 use crate::state::{AnalysisEvent, AppState, Injection};
 use crate::transform::{
     build_openai_sse_response, parse_incoming_request, ProviderTransformer, TransformError,
@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message as AxumWsMessage, WebSocketUpgrade},
-        OriginalUri, Request, State,
+        OriginalUri, Path, Request, State,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -59,9 +59,39 @@ impl ProxyError {
     }
 }
 
+/// Handler for provider-prefixed routes: /{provider}/v1/*
+/// 
+/// This allows clients to explicitly select a provider via the URL path:
+/// - POST /openai/v1/chat/completions
+/// - POST /anthropic/v1/chat/completions
+/// - POST /azure/v1/chat/completions
+pub async fn provider_proxy_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    req: Request<Body>,
+) -> Result<Response, Response> {
+    proxy_handler_inner(state, req, Some(provider)).await
+}
+
+/// Handler for the default /v1/* route.
+/// 
+/// Provider selection priority:
+/// 1. X-Provider header
+/// 2. X-Original-Host header (mitmproxy capture mode)
+/// 3. Auto-detect from model name (if configured)
+/// 4. Falls back to "default" provider
 pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
+) -> Result<Response, Response> {
+    proxy_handler_inner(state, req, None).await
+}
+
+/// Inner implementation shared by both proxy handlers.
+async fn proxy_handler_inner(
+    state: AppState,
+    req: Request<Body>,
+    path_provider: Option<String>,
 ) -> Result<Response, Response> {
     // 1. Generate Correlation ID
     let correlation_id = Uuid::new_v4().to_string();
@@ -82,9 +112,12 @@ pub async fn proxy_handler(
         .map(|s| s.to_string())
         .unwrap_or_else(|| "default".to_string());
 
-    // Allow selecting provider via header (e.g., X-Provider: anthropic)
-    // Fallback: detect from X-Original-Host (for mitmproxy integration)
-    let explicit_provider = req
+    // Provider selection priority (pre-body):
+    // 1. Path parameter (/{provider}/v1/...)
+    // 2. X-Provider header
+    // 3. X-Original-Host header (mitmproxy capture mode)
+    // Model-based detection happens after body parsing
+    let header_provider = req
         .headers()
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
@@ -96,25 +129,16 @@ pub async fn proxy_handler(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
     
-    let provider_name = explicit_provider
+    // Initial provider from path/header/host (model-based comes later)
+    let pre_body_provider = path_provider
         .as_ref()
         .map(|s| s.as_str())
+        .or_else(|| header_provider.as_deref())
         .or_else(|| {
             // Try to detect provider from X-Original-Host (mitmproxy capture mode)
             original_host.as_deref()
                 .and_then(detect_provider_from_host)
-        })
-        .unwrap_or("default")
-        .to_string();
-
-    // Log when using mitmproxy capture mode
-    if explicit_provider.is_none() && original_host.is_some() {
-        tracing::debug!(
-            original_host = %original_host.as_deref().unwrap_or(""),
-            detected_provider = %provider_name,
-            "Request intercepted via mitmproxy capture mode"
-        );
-    }
+        });
 
     // 2. Read and modify body if needed (Pre-request Injection)
     let (parts, body) = req.into_parts();
@@ -161,6 +185,44 @@ pub async fn proxy_handler(
         .and_then(|m| m.as_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Final provider resolution:
+    // 1. Path parameter (/{provider}/v1/...)
+    // 2. X-Provider header
+    // 3. X-Original-Host header (mitmproxy capture mode)
+    // 4. Auto-detect from model name
+    // 5. Falls back to "default"
+    let model_detected_provider = detect_provider_from_model(&model);
+    
+    let provider_name = pre_body_provider
+        .or(model_detected_provider)
+        .unwrap_or("default")
+        .to_string();
+
+    // Log provider routing for debugging
+    if path_provider.is_some() {
+        tracing::debug!(
+            provider = %provider_name,
+            "Request routed via provider-prefixed path"
+        );
+    } else if header_provider.is_some() {
+        tracing::debug!(
+            provider = %provider_name,
+            "Request routed via X-Provider header"
+        );
+    } else if original_host.is_some() && pre_body_provider.is_some() {
+        tracing::debug!(
+            original_host = %original_host.as_deref().unwrap_or(""),
+            detected_provider = %provider_name,
+            "Request intercepted via mitmproxy capture mode"
+        );
+    } else if model_detected_provider.is_some() {
+        tracing::debug!(
+            model = %model,
+            detected_provider = %provider_name,
+            "Provider auto-detected from model name"
+        );
+    }
 
     // 3. Validate virtual API key if present
     // Note: validated_key is used for tracking usage after response completes
@@ -1078,11 +1140,34 @@ fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
     }
 }
 
+/// Handler for provider-prefixed WebSocket routes: /{provider}/v1/realtime
+pub async fn provider_ws_proxy_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    ws_proxy_handler_inner(state, ws, headers, uri, Some(provider)).await
+}
+
+/// Handler for the default WebSocket route: /v1/realtime
 pub async fn ws_proxy_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
+) -> Response {
+    ws_proxy_handler_inner(state, ws, headers, uri, None).await
+}
+
+/// Inner implementation for WebSocket proxy handlers.
+async fn ws_proxy_handler_inner(
+    state: AppState,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    uri: http::Uri,
+    path_provider: Option<String>,
 ) -> Response {
     let conversation_id = headers
         .get("X-Conversation-ID")
@@ -1090,11 +1175,15 @@ pub async fn ws_proxy_handler(
         .unwrap_or("default")
         .to_string();
 
-    let provider_name = headers
+    // Provider selection: path > header > default
+    let header_provider = headers
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("default")
-        .to_string();
+        .map(|s| s.to_string());
+    
+    let provider_name = path_provider
+        .or(header_provider)
+        .unwrap_or_else(|| "default".to_string());
 
     // Validate virtual API key if present (for rate limiting)
     let auth_header = headers
