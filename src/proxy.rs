@@ -21,8 +21,9 @@ use base64::Engine;
 use bytes::Bytes;
 use futures::{stream::StreamExt, SinkExt};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+use std::collections::BTreeSet;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
@@ -194,7 +195,7 @@ async fn proxy_handler_inner(
     // 5. Falls back to "default"
     let model_detected_provider = detect_provider_from_model(&model);
     
-    let provider_name = pre_body_provider
+    let provider_name_requested = pre_body_provider
         .or(model_detected_provider)
         .unwrap_or("default")
         .to_string();
@@ -202,25 +203,73 @@ async fn proxy_handler_inner(
     // Log provider routing for debugging
     if path_provider.is_some() {
         tracing::debug!(
-            provider = %provider_name,
+            provider = %provider_name_requested,
             "Request routed via provider-prefixed path"
         );
     } else if header_provider.is_some() {
         tracing::debug!(
-            provider = %provider_name,
+            provider = %provider_name_requested,
             "Request routed via X-Provider header"
         );
     } else if original_host.is_some() && pre_body_provider.is_some() {
         tracing::debug!(
             original_host = %original_host.as_deref().unwrap_or(""),
-            detected_provider = %provider_name,
+            detected_provider = %provider_name_requested,
             "Request intercepted via mitmproxy capture mode"
         );
     } else if model_detected_provider.is_some() {
         tracing::debug!(
             model = %model,
-            detected_provider = %provider_name,
+            detected_provider = %provider_name_requested,
             "Provider auto-detected from model name"
+        );
+    }
+
+    // Resolve provider config.
+    //
+    // If the provider was auto-detected from the model but isn't configured, fall back to
+    // the configured "default" provider (backwards compatible with older configs).
+    let provider_selected_by_model = pre_body_provider.is_none() && model_detected_provider.is_some();
+    let provider_lookup = state
+        .config
+        .resolve_provider(&provider_name_requested)
+        .or_else(|| {
+            if provider_selected_by_model {
+                state.config.resolve_provider("default")
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            let available = state.config.provider_names();
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    format!(
+                        "Unknown provider '{}'. Available providers: {:?}",
+                        provider_name_requested, available
+                    ),
+                    "invalid_provider",
+                )),
+            )
+                .into_response()
+        })?;
+
+    let provider_config = provider_lookup.config;
+    let resolved_provider = provider_lookup.resolved_name.clone();
+    let provider_name = resolved_provider.clone();
+
+    if provider_selected_by_model && provider_name_requested != provider_name {
+        tracing::debug!(
+            requested = %provider_name_requested,
+            resolved = %provider_name,
+            "Auto-detected provider not configured; using default"
+        );
+    } else if provider_name_requested != provider_name {
+        tracing::debug!(
+            requested = %provider_name_requested,
+            resolved = %provider_name,
+            "Provider name normalized"
         );
     }
 
@@ -335,43 +384,6 @@ async fn proxy_handler_inner(
         body: json_body.clone(),
     });
 
-    // 4. Get provider configuration
-    let provider_lookup = state
-        .config
-        .resolve_provider(&provider_name)
-        .ok_or_else(|| {
-            let available = state.config.provider_names();
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(
-                    format!(
-                        "Unknown provider '{}'. Available providers: {:?}",
-                        provider_name, available
-                    ),
-                    "invalid_provider",
-                )),
-            )
-                .into_response()
-        })?;
-
-    let provider_config = provider_lookup.config;
-    let resolved_provider = provider_lookup.resolved_name.clone();
-    
-    // Log if provider name was normalized or fell back
-    if provider_lookup.was_fallback {
-        tracing::info!(
-            requested = %provider_name,
-            resolved = %resolved_provider,
-            "Provider name was empty, using default"
-        );
-    } else if provider_name != resolved_provider {
-        tracing::debug!(
-            requested = %provider_name,
-            resolved = %resolved_provider,
-            "Provider name normalized"
-        );
-    }
-
     // Use real API key from provider config (virtual key was just for auth)
     let api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
@@ -434,6 +446,8 @@ async fn proxy_handler_inner(
     // 4. Build request body - transform if needed
     let mut transformed_endpoint_path: Option<String> = None;
     let mut request_stream = false;
+    let mut fake_streaming = false;
+    let mut beta_scan_body: Option<Value> = None;
     let (request_body, model_name) = if needs_transform {
         // Parse incoming OpenAI-format request to canonical Context
         let mut context = parse_incoming_request(&json_body).map_err(|e| {
@@ -445,7 +459,14 @@ async fn proxy_handler_inner(
                 .into_response()
         })?;
 
-        request_stream = context.stream;
+        let requested_stream = context.stream;
+        request_stream = requested_stream;
+
+        // Fake streaming for providers without native streaming support.
+        if provider_type == ProviderType::Bedrock && requested_stream {
+            fake_streaming = true;
+            context.stream = false;
+        }
 
         // Resolve URL images for providers that require inline/base64 image data.
         if matches!(
@@ -485,6 +506,8 @@ async fn proxy_handler_inner(
             tracing::error!("Failed to transform request: {}", e);
             (status, Json(ProxyError::new(format!("{}", e), error_type))).into_response()
         })?;
+
+        beta_scan_body = Some(transformed.clone());
         
         let body = serde_json::to_vec(&transformed).map_err(|e| {
             (
@@ -496,6 +519,20 @@ async fn proxy_handler_inner(
         (body, model)
     } else {
         // Pass through for OpenAI-compatible providers
+        if provider_type == ProviderType::Mistral && api_path == "/v1/chat/completions" {
+            crate::transform::mistral::transform_openai_request_for_mistral(&mut json_body).map_err(|e| {
+                tracing::error!("Failed to apply Mistral request quirks: {}", e);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ProxyError::new(
+                        format!("Failed to transform request for Mistral: {}", e),
+                        "invalid_request",
+                    )),
+                )
+                    .into_response()
+            })?;
+        }
+
         let model = json_body["model"].as_str().unwrap_or("unknown").to_string();
         let body = serde_json::to_vec(&json_body).map_err(|e| {
             (
@@ -590,6 +627,13 @@ async fn proxy_handler_inner(
 
     // Add custom headers from provider config
     for (key, value) in &provider_config.headers {
+        if provider_type == ProviderType::Bedrock
+            && key.to_ascii_lowercase().starts_with("anthropic-")
+            && !bedrock_is_claude_model(&model_name)
+        {
+            continue;
+        }
+
         let resolved_value = if let Some(var_name) = value.strip_prefix("env:") {
             std::env::var(var_name).unwrap_or_default()
         } else {
@@ -601,6 +645,20 @@ async fn proxy_handler_inner(
         ) {
             upstream_headers.insert(name, val);
         }
+    }
+
+    // Auto-detect Anthropic beta headers based on request content.
+    //
+    // - Anthropic direct: apply to all requests when needed.
+    // - Bedrock: only apply for Claude models (anthropic.*), never for other families.
+    if should_apply_anthropic_beta_headers(provider_type, &model_name) {
+        let scan = beta_scan_body.as_ref().unwrap_or(&json_body);
+        let betas = anthropic_beta_tokens_for_request(scan);
+        upsert_csv_header(
+            &mut upstream_headers,
+            http::header::HeaderName::from_static("anthropic-beta"),
+            betas,
+        );
     }
 
     if provider_type == ProviderType::Bedrock {
@@ -616,40 +674,16 @@ async fn proxy_handler_inner(
                 )
                     .into_response()
             })?;
-
-        let access_key_id = provider_config
-            .resolved_aws_access_key_id()
-            .ok_or_else(|| {
+        
+        let creds = resolve_bedrock_aws_credentials(state.upstream.as_ref(), provider_config)
+            .await
+            .map_err(|msg| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(ProxyError::new(
-                        "Bedrock provider requires aws_access_key_id (or AWS_ACCESS_KEY_ID)"
-                            .to_string(),
-                        "invalid_request",
-                    )),
+                    Json(ProxyError::new(msg, "invalid_request")),
                 )
                     .into_response()
             })?;
-
-        let secret_access_key = provider_config
-            .resolved_aws_secret_access_key()
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ProxyError::new(
-                        "Bedrock provider requires aws_secret_access_key (or AWS_SECRET_ACCESS_KEY)"
-                            .to_string(),
-                        "invalid_request",
-                    )),
-                )
-                    .into_response()
-            })?;
-
-        let creds = AwsCredentials {
-            access_key_id,
-            secret_access_key,
-            session_token: provider_config.resolved_aws_session_token(),
-        };
 
         let service = provider_config.resolved_aws_service();
 
@@ -720,6 +754,48 @@ async fn proxy_handler_inner(
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 
+    // Normalize non-success upstream errors to OpenAI-compatible error format.
+    if !status.is_success() {
+        let body_bytes = collect_stream_bytes(stream).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&body_bytes).to_string();
+
+        let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            id: correlation_id_clone.clone(),
+            chunk: text.clone(),
+        });
+
+        let (message, error_type, code) =
+            normalize_upstream_error(provider_type, status, &text, &body_bytes);
+
+        let err = json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": null,
+                "code": code
+            }
+        });
+
+        let bytes = serde_json::to_vec(&err).unwrap_or_default();
+        let mut response = Response::new(Body::from(bytes));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        if let Some(v) = headers.get(http::header::RETRY_AFTER).cloned() {
+            response
+                .headers_mut()
+                .insert(http::header::RETRY_AFTER, v);
+        }
+        response.headers_mut().insert(
+            "x-eavs-provider",
+            resolved_provider.parse().unwrap(),
+        );
+        return Ok(response);
+    }
+
     // Prepare usage tracking state for virtual keys
     let usage_tracker: Option<UsageTracker> = validated_key.as_ref().map(|vk| UsageTracker {
         key_hash: vk.key_hash.clone(),
@@ -732,7 +808,7 @@ async fn proxy_handler_inner(
 
     if needs_transform {
         // Transform response from provider format back to OpenAI format
-        if request_stream {
+        if request_stream && !fake_streaming {
             let stream_state = Arc::new(Mutex::new(StreamState::default()));
             let transformer = Arc::new(ProviderTransformer::for_provider(provider_type));
             let model_for_stream = model_name.clone();
@@ -811,6 +887,95 @@ async fn proxy_handler_inner(
             if let Some(tracker) = usage_tracker.clone() {
                 let state_clone = state.clone();
                 // Record immediately - the batched KeyStore will handle SQLite writes efficiently
+                tokio::spawn(async move {
+                    record_usage_from_tracker(&state_clone, &tracker).await;
+                });
+            }
+
+            Ok(response)
+        } else if request_stream && fake_streaming {
+            // Fake streaming: buffer full upstream response, transform to canonical events,
+            // then emit OpenAI-compatible SSE chunks.
+            let body_bytes = collect_stream_bytes(stream).await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        format!("Failed to read upstream response: {}", e),
+                        "upstream_error",
+                    )),
+                )
+                    .into_response()
+            })?;
+
+            let text = String::from_utf8_lossy(&body_bytes).to_string();
+            let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                id: correlation_id_clone.clone(),
+                chunk: text,
+            });
+
+            let json_body: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        format!("Invalid upstream JSON: {}", e),
+                        "upstream_error",
+                    )),
+                )
+                    .into_response()
+            })?;
+
+            let transformer = ProviderTransformer::for_provider(provider_type);
+            let events = transformer.parse_response(&json_body).map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        format!("Failed to parse upstream response: {}", e),
+                        "upstream_error",
+                    )),
+                )
+                    .into_response()
+            })?;
+
+            // Track usage from final Done event.
+            if let Some(tracker) = usage_tracker.clone() {
+                if let Some(done) = events.iter().find_map(|e| match e {
+                    crate::types::StreamEvent::Done { message, .. } => Some(message),
+                    _ => None,
+                }) {
+                    tracker.input_tokens.store(
+                        done.usage.prompt_tokens,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracker.output_tokens.store(
+                        done.usage.completion_tokens,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracker.cached_tokens.store(
+                        done.usage.cache_read_input_tokens.unwrap_or(0),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+            }
+
+            let chunks = build_fake_openai_sse_from_events(&events, &correlation_id, &model_name);
+            let stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>));
+
+            let mut response = Response::new(Body::from_stream(stream));
+            *response.status_mut() = status;
+            response
+                .headers_mut()
+                .insert("content-type", "text/event-stream".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("cache-control", "no-cache".parse().unwrap());
+            response.headers_mut().insert(
+                "x-eavs-provider",
+                resolved_provider.parse().unwrap(),
+            );
+
+            if let Some(tracker) = usage_tracker.clone() {
+                let state_clone = state.clone();
                 tokio::spawn(async move {
                     record_usage_from_tracker(&state_clone, &tracker).await;
                 });
@@ -1194,6 +1359,84 @@ fn build_openai_chat_completion_from_events(events: &[crate::types::StreamEvent]
             "total_tokens": assistant.usage.total_tokens
         }
     })
+}
+
+fn build_fake_openai_sse_from_events(
+    events: &[crate::types::StreamEvent],
+    request_id: &str,
+    model: &str,
+) -> Vec<Bytes> {
+    use crate::types::{AssistantMessage, StreamEvent};
+
+    let mut done: Option<(crate::types::StopReason, AssistantMessage)> = None;
+    for e in events {
+        match e {
+            StreamEvent::Done { reason, message } => {
+                done = Some((reason.clone(), message.clone()));
+            }
+            StreamEvent::Error { reason, message } => {
+                done = Some((reason.clone(), message.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    let (stop_reason, message) = done.unwrap_or_else(|| (crate::types::StopReason::Other, AssistantMessage::default()));
+
+    let mut out_events: Vec<StreamEvent> = Vec::new();
+    out_events.push(StreamEvent::Start {
+        partial: AssistantMessage {
+            model: model.to_string(),
+            ..Default::default()
+        },
+    });
+
+    let mut tool_index = 0usize;
+    for block in &message.content {
+        match block {
+            ContentBlock::Text(t) => {
+                if !t.text.is_empty() {
+                    out_events.push(StreamEvent::TextDelta {
+                        content_index: 0,
+                        delta: t.text.clone(),
+                    });
+                }
+            }
+            ContentBlock::Thinking(t) => {
+                if !t.thinking.is_empty() {
+                    out_events.push(StreamEvent::ThinkingDelta {
+                        content_index: 0,
+                        delta: t.thinking.clone(),
+                    });
+                }
+            }
+            ContentBlock::ToolCall(tc) => {
+                out_events.push(StreamEvent::ToolCallStart {
+                    content_index: tool_index,
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
+                let args = serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".to_string());
+                out_events.push(StreamEvent::ToolCallDelta {
+                    content_index: tool_index,
+                    delta: args,
+                });
+                tool_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    out_events.push(StreamEvent::Usage { usage: message.usage.clone() });
+    out_events.push(StreamEvent::Done {
+        reason: stop_reason,
+        message,
+    });
+
+    out_events
+        .iter()
+        .map(|e| Bytes::from(build_openai_sse_response(e, request_id, model)))
+        .collect()
 }
 
 fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
@@ -1654,6 +1897,255 @@ fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType
     apply_extra_headers(headers, provider_type);
 }
 
+async fn resolve_bedrock_aws_credentials(
+    upstream: &dyn Upstream,
+    provider_config: &crate::config::ProviderConfig,
+) -> Result<AwsCredentials, String> {
+    // 1) Explicit keys (flags/config/env) take precedence.
+    if let (Some(access_key_id), Some(secret_access_key)) = (
+        provider_config.resolved_aws_access_key_id(),
+        provider_config.resolved_aws_secret_access_key(),
+    ) {
+        return Ok(AwsCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token: provider_config.resolved_aws_session_token(),
+        });
+    }
+
+    // 2) Web identity (IRSA / OIDC).
+    if let (Ok(token_file), Ok(role_arn)) = (
+        std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE"),
+        std::env::var("AWS_ROLE_ARN"),
+    ) {
+        let token_file = token_file.trim().to_string();
+        let role_arn = role_arn.trim().to_string();
+        if !token_file.is_empty() && !role_arn.is_empty() {
+            let token = std::fs::read_to_string(&token_file)
+                .map_err(|e| format!("Failed to read AWS web identity token file: {}", e))?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Err("AWS web identity token file is empty".to_string());
+            }
+
+            let session_name = std::env::var("AWS_ROLE_SESSION_NAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "eavs".to_string());
+
+            let assumed = crate::aws_credentials::assume_role_with_web_identity(
+                upstream,
+                &role_arn,
+                token,
+                &session_name,
+            )
+            .await?;
+            return Ok(assumed.creds);
+        }
+    }
+
+    // 3) Shared credentials file + profile.
+    let profile = crate::aws_credentials::aws_profile();
+    if let Some(path) = crate::aws_credentials::default_shared_credentials_path() {
+        if let Some(creds) = crate::aws_credentials::load_shared_credentials(&profile, &path) {
+            return Ok(creds);
+        }
+    }
+
+    Err("Bedrock provider requires AWS credentials. Provide aws_access_key_id/aws_secret_access_key, set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, set AWS_PROFILE with ~/.aws/credentials, or use AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE.".to_string())
+}
+
+fn bedrock_is_claude_model(model_id: &str) -> bool {
+    let stripped = model_id
+        .strip_prefix("us.")
+        .or_else(|| model_id.strip_prefix("eu."))
+        .or_else(|| model_id.strip_prefix("apac."))
+        .unwrap_or(model_id);
+    stripped.starts_with("anthropic.")
+}
+
+fn should_apply_anthropic_beta_headers(provider_type: ProviderType, model_id: &str) -> bool {
+    match provider_type {
+        ProviderType::Anthropic => true,
+        ProviderType::Bedrock => bedrock_is_claude_model(model_id),
+        _ => false,
+    }
+}
+
+fn anthropic_beta_tokens_for_request(body: &Value) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    anthropic_beta_scan_value(body, &mut out);
+    out.into_iter().collect()
+}
+
+fn anthropic_beta_scan_value(v: &Value, out: &mut BTreeSet<String>) {
+    match v {
+        Value::Object(map) => {
+            // Prompt caching (cache_control blocks).
+            if map.contains_key("cache_control") {
+                out.insert("prompt-caching-2024-07-31".to_string());
+            }
+
+            // PDFs: look for media_type application/pdf or document blocks.
+            if map
+                .get("media_type")
+                .and_then(|m| m.as_str())
+                .map(|m| m.eq_ignore_ascii_case("application/pdf"))
+                .unwrap_or(false)
+            {
+                out.insert("pdfs-2024-09-25".to_string());
+            }
+            if map
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t.eq_ignore_ascii_case("document"))
+                .unwrap_or(false)
+            {
+                out.insert("pdfs-2024-09-25".to_string());
+            }
+
+            // Computer use: look for common markers (tool name / type).
+            if map
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t.eq_ignore_ascii_case("computer_use") || t.eq_ignore_ascii_case("computer"))
+                .unwrap_or(false)
+            {
+                out.insert("computer-use-2024-10-22".to_string());
+            }
+            if map
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.eq_ignore_ascii_case("computer"))
+                .unwrap_or(false)
+            {
+                out.insert("computer-use-2024-10-22".to_string());
+            }
+
+            // Files API: detect file_id/file_ids fields.
+            if map.contains_key("file_id") || map.contains_key("file_ids") {
+                out.insert("files-api-2025-04-14".to_string());
+            }
+
+            // MCP: detect mcp servers fields.
+            if map.contains_key("mcp_servers")
+                || map.contains_key("mcpServers")
+                || map.contains_key("mcp")
+            {
+                out.insert("mcp-client-2025-04-04".to_string());
+            }
+
+            for (_, child) in map {
+                anthropic_beta_scan_value(child, out);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                anthropic_beta_scan_value(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn upsert_csv_header(
+    headers: &mut HeaderMap,
+    name: http::header::HeaderName,
+    values: Vec<String>,
+) {
+    if values.is_empty() {
+        return;
+    }
+
+    let mut set: BTreeSet<String> = values.into_iter().collect();
+
+    if let Some(existing) = headers.get(&name).and_then(|h| h.to_str().ok()) {
+        for part in existing.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_string());
+            }
+        }
+    }
+
+    let joined = set.into_iter().collect::<Vec<_>>().join(", ");
+    if let Ok(value) = http::HeaderValue::from_str(&joined) {
+        headers.insert(name, value);
+    }
+}
+
+fn normalize_upstream_error(
+    provider_type: ProviderType,
+    status: StatusCode,
+    body_text: &str,
+    body_bytes: &[u8],
+) -> (String, &'static str, Option<String>) {
+    let mut message: Option<String> = None;
+    let mut code: Option<String> = None;
+
+    if let Ok(v) = serde_json::from_slice::<Value>(body_bytes) {
+        let candidates = [
+            v.pointer("/error/message").and_then(|v| v.as_str()),
+            v.pointer("/error/error/message").and_then(|v| v.as_str()),
+            v.pointer("/message").and_then(|v| v.as_str()),
+            v.pointer("/error").and_then(|v| v.as_str()),
+            v.pointer("/Message").and_then(|v| v.as_str()),
+        ];
+        message = candidates.into_iter().flatten().next().map(|s| s.to_string());
+
+        let code_candidates = [
+            v.pointer("/error/code").and_then(|v| v.as_str()),
+            v.pointer("/code").and_then(|v| v.as_str()),
+            v.pointer("/error/type").and_then(|v| v.as_str()),
+            v.pointer("/__type").and_then(|v| v.as_str()),
+        ];
+        code = code_candidates.into_iter().flatten().next().map(|s| s.to_string());
+    }
+
+    if message
+        .as_ref()
+        .map(|m| m.trim().is_empty())
+        .unwrap_or(true)
+        && !body_text.trim().is_empty()
+    {
+        message = Some(body_text.trim().to_string());
+    }
+
+    let mut error_type = openai_error_type_for_status(status);
+
+    if let Some(ref msg) = message {
+        let lower = msg.to_lowercase();
+        if lower.contains("context_length")
+            || lower.contains("context length")
+            || lower.contains("maximum context")
+            || lower.contains("max context")
+        {
+            error_type = "context_length_exceeded";
+        } else if lower.contains("content policy") || lower.contains("safety") || lower.contains("policy") {
+            error_type = "content_policy_violation";
+        }
+    }
+
+    // Provider-specific refinements.
+    let _ = provider_type;
+
+    (
+        message.unwrap_or_else(|| status.to_string()),
+        error_type,
+        code,
+    )
+}
+
+fn openai_error_type_for_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 | 404 | 409 | 413 | 422 => "invalid_request_error",
+        401 | 403 => "authentication_error",
+        429 => "rate_limit_error",
+        500..=599 => "server_error",
+        _ => "api_error",
+    }
+}
+
 async fn resolve_image_urls_in_context(
     upstream: &dyn Upstream,
     context: &mut Context,
@@ -1927,6 +2419,56 @@ mod tests {
         assert_eq!(messages[1]["role"], "system");
         assert_eq!(messages[1]["content"], "Second system");
         assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_bedrock_is_claude_model_with_regional_prefix() {
+        assert!(bedrock_is_claude_model("anthropic.claude-3-opus-20240229-v1:0"));
+        assert!(bedrock_is_claude_model("us.anthropic.claude-3-opus-20240229-v1:0"));
+        assert!(bedrock_is_claude_model("eu.anthropic.claude-3-opus-20240229-v1:0"));
+        assert!(bedrock_is_claude_model("apac.anthropic.claude-3-opus-20240229-v1:0"));
+        assert!(!bedrock_is_claude_model("meta.llama3-70b-instruct-v1:0"));
+    }
+
+    #[test]
+    fn test_upsert_csv_header_merges_and_dedupes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_static("anthropic-beta"),
+            http::HeaderValue::from_static("prompt-caching-2024-07-31"),
+        );
+
+        upsert_csv_header(
+            &mut headers,
+            http::header::HeaderName::from_static("anthropic-beta"),
+            vec![
+                "prompt-caching-2024-07-31".to_string(),
+                "pdfs-2024-09-25".to_string(),
+            ],
+        );
+
+        let val = headers
+            .get("anthropic-beta")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(val.contains("prompt-caching-2024-07-31"));
+        assert!(val.contains("pdfs-2024-09-25"));
+    }
+
+    #[test]
+    fn test_normalize_upstream_error_rate_limit() {
+        let body = br#"{"error":{"message":"rate limited","type":"rate_limit_error"}}"#;
+        let (msg, ty, code) = normalize_upstream_error(
+            ProviderType::OpenAI,
+            StatusCode::TOO_MANY_REQUESTS,
+            std::str::from_utf8(body).unwrap(),
+            body,
+        );
+        assert_eq!(msg, "rate limited");
+        assert_eq!(ty, "rate_limit_error");
+        assert!(code.is_some());
     }
 
     #[test]
@@ -2466,6 +3008,66 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("rate limited"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_fake_streaming_emits_sse() {
+        let bedrock_body = json!({
+            "id": "msg_1",
+            "model": "anthropic.claude-3-opus-20240229-v1:0",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(serde_json::to_vec(&bedrock_body).unwrap())],
+        }]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "bedrock".to_string(),
+                aws_region: "us-east-1".to_string(),
+                aws_access_key_id: "AKIA_TEST".to_string(),
+                aws_secret_access_key: "SECRET_TEST".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        let req_body = json!({
+            "model":"anthropic.claude-3-opus-20240229-v1:0",
+            "messages":[{"role":"user","content":"hi"}],
+            "stream": true,
+            "max_tokens": 16
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+            "text/event-stream"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("[DONE]"));
+        assert!(text.contains("\"ok\""));
     }
 
     #[tokio::test]

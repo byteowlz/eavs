@@ -9,6 +9,7 @@
 use crate::transform::{RequestTransformer, ResponseTransformer, TransformError};
 use crate::types::{AssistantMessage, ContentBlock, Context, Message, StreamEvent, StreamState};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 // Re-use OpenAI parsing for responses
 use super::openai::OpenAITransformer;
@@ -75,6 +76,10 @@ impl MistralTransformer {
                     }));
                 }
                 Message::Assistant(assistant) => {
+                    // Mistral rejects empty assistant messages; drop them.
+                    if assistant.content.is_empty() {
+                        continue;
+                    }
                     let msg_obj = build_mistral_assistant_message(assistant);
                     messages.push(msg_obj);
                 }
@@ -104,6 +109,153 @@ impl MistralTransformer {
 
         messages
     }
+}
+
+/// Apply Mistral-specific request quirks to an OpenAI-compatible `/v1/chat/completions` request.
+///
+/// This mutates `body` in place, preserving unknown fields.
+pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), TransformError> {
+    // Translate tool_choice required -> any.
+    if let Some(tool_choice) = body.get_mut("tool_choice") {
+        mistral_translate_tool_choice_required_to_any(tool_choice);
+    }
+
+    // Clean tool schemas for Mistral restrictions.
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools.iter_mut() {
+            if let Some(params) = tool
+                .get_mut("function")
+                .and_then(|f| f.get_mut("parameters"))
+            {
+                mistral_clean_schema_in_place(params);
+            }
+        }
+    }
+
+    let messages = body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| TransformError::MissingField("messages".to_string()))?;
+
+    // First pass: remove illegal name fields, fix tool_call IDs, and build (id -> name) map.
+    let mut original_to_fixed_id: HashMap<String, String> = HashMap::new();
+    let mut tool_name_by_fixed_id: HashMap<String, String> = HashMap::new();
+
+    for msg in messages.iter_mut() {
+        let role = msg
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Mistral only supports `name` on tool messages.
+        if role != "tool" {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.remove("name");
+            }
+        }
+
+        if role != "assistant" {
+            continue;
+        }
+
+        let Some(tool_calls) = msg.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        for tc in tool_calls.iter_mut() {
+            let Some(id) = tc.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let fixed = MistralTransformer::fix_tool_id(id);
+            if fixed != id {
+                original_to_fixed_id.insert(id.to_string(), fixed.clone());
+            }
+            tc["id"] = Value::String(fixed.clone());
+
+            if let Some(name) = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                tool_name_by_fixed_id.insert(fixed, name.to_string());
+            }
+        }
+    }
+
+    // Second pass: filter empty assistant messages; normalize tool messages.
+    let mut updated = Vec::with_capacity(messages.len());
+    for mut msg in messages.drain(..) {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        match role {
+            "assistant" => {
+                let has_tool_calls = msg
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+
+                let content_blank = msg
+                    .get("content")
+                    .map(mistral_value_is_blank_string_or_null)
+                    .unwrap_or(true);
+
+                // Filter empty assistant messages unless they contain tool calls.
+                if !has_tool_calls && content_blank {
+                    continue;
+                }
+
+                // Mistral rejects null content; when tool calls are present, use a placeholder.
+                if has_tool_calls && content_blank {
+                    msg["content"] = Value::String(" ".to_string());
+                }
+            }
+            "tool" => {
+                // Fix tool_call_id to 9 alphanumeric chars (consistent with assistant tool_calls).
+                if let Some(original_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    let fixed = original_to_fixed_id
+                        .get(original_id)
+                        .cloned()
+                        .unwrap_or_else(|| MistralTransformer::fix_tool_id(original_id));
+                    msg["tool_call_id"] = Value::String(fixed.clone());
+
+                    // Ensure name is present for tool messages (required by Mistral).
+                    let name_missing = msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true);
+                    if name_missing {
+                        if let Some(name) = tool_name_by_fixed_id.get(&fixed) {
+                            msg["name"] = Value::String(name.clone());
+                        }
+                    }
+                }
+
+                // Ensure tool message content is a non-empty string.
+                let content_blank = msg
+                    .get("content")
+                    .map(mistral_value_is_blank_string_or_null)
+                    .unwrap_or(true);
+                if content_blank {
+                    msg["content"] = Value::String(" ".to_string());
+                }
+            }
+            _ => {
+                // For other message types, ensure content isn't null.
+                if let Some(content) = msg.get_mut("content") {
+                    if content.is_null() {
+                        *content = Value::String(" ".to_string());
+                    }
+                }
+            }
+        }
+
+        updated.push(msg);
+    }
+    messages.extend(updated);
+
+    Ok(())
 }
 
 impl RequestTransformer for MistralTransformer {
@@ -139,17 +291,28 @@ impl RequestTransformer for MistralTransformer {
             let mistral_tools: Vec<Value> = tools
                 .iter()
                 .map(|tool| {
+                    let mut params = tool.parameters.clone();
+                    mistral_clean_schema_in_place(&mut params);
                     json!({
                         "type": "function",
                         "function": {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": tool.parameters
+                            "parameters": params
                         }
                     })
                 })
                 .collect();
             request["tools"] = Value::Array(mistral_tools);
+        }
+
+        // Pass through tool_choice, translating OpenAI "required" -> Mistral "any".
+        if let Some(orig) = context.original_request.as_ref() {
+            if let Some(choice) = orig.get("tool_choice") {
+                let mut tc = choice.clone();
+                mistral_translate_tool_choice_required_to_any(&mut tc);
+                request["tool_choice"] = tc;
+            }
         }
 
         Ok(request)
@@ -200,6 +363,47 @@ fn base36_encode(mut n: u64) -> String {
     }
     result.reverse();
     result.into_iter().collect()
+}
+
+fn mistral_translate_tool_choice_required_to_any(choice: &mut Value) {
+    match choice {
+        Value::String(s) if s == "required" => {
+            *choice = Value::String("any".to_string());
+        }
+        Value::Object(obj) => {
+            if obj.get("type").and_then(|t| t.as_str()) == Some("required") {
+                obj.insert("type".to_string(), Value::String("any".to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mistral_clean_schema_in_place(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("$id");
+            map.remove("$schema");
+            map.remove("additionalProperties");
+            for (_, v) in map.iter_mut() {
+                mistral_clean_schema_in_place(v);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                mistral_clean_schema_in_place(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mistral_value_is_blank_string_or_null(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        _ => false,
+    }
 }
 
 fn build_mistral_content(blocks: &[ContentBlock]) -> Value {
@@ -475,5 +679,93 @@ mod tests {
         assert_eq!(base36_encode(35), "z");
         assert_eq!(base36_encode(36), "10");
         assert_eq!(base36_encode(1296), "100");
+    }
+
+    #[test]
+    fn mistral_in_place_transforms_tool_choice_required_to_any() {
+        let mut body = json!({
+            "model": "mistral-large",
+            "messages": [{"role":"user","content":"hi"}],
+            "tool_choice": "required"
+        });
+        transform_openai_request_for_mistral(&mut body).unwrap();
+        assert_eq!(body["tool_choice"], "any");
+    }
+
+    #[test]
+    fn mistral_in_place_removes_name_from_non_tool_messages() {
+        let mut body = json!({
+            "model": "mistral-large",
+            "messages": [
+                {"role":"user","name":"alice","content":"hi"},
+                {"role":"tool","name":"t","tool_call_id":"call_123","content":"ok"}
+            ]
+        });
+        transform_openai_request_for_mistral(&mut body).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(msgs[0].get("name").is_none());
+        assert_eq!(msgs[1]["name"], "t");
+    }
+
+    #[test]
+    fn mistral_in_place_filters_empty_assistant_messages() {
+        let mut body = json!({
+            "model": "mistral-large",
+            "messages": [
+                {"role":"assistant","content":""},
+                {"role":"user","content":"hi"}
+            ]
+        });
+        transform_openai_request_for_mistral(&mut body).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn mistral_in_place_fixes_tool_call_ids_and_infers_tool_name() {
+        let mut body = json!({
+            "model": "mistral-large",
+            "messages": [
+                {"role":"assistant","content":"", "tool_calls":[{"id":"call_very_long_id_12345","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"call_very_long_id_12345","content":"ok"}
+            ]
+        });
+        transform_openai_request_for_mistral(&mut body).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        let fixed_id = msgs[0]["tool_calls"][0]["id"].as_str().unwrap();
+        assert_eq!(fixed_id.len(), 9);
+        assert_eq!(msgs[1]["tool_call_id"], fixed_id);
+        assert_eq!(msgs[1]["name"], "get_weather");
+    }
+
+    #[test]
+    fn mistral_in_place_cleans_tool_schema_restrictions() {
+        let mut body = json!({
+            "model": "mistral-large",
+            "messages": [{"role":"user","content":"hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "t",
+                    "description": "d",
+                    "parameters": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "$id": "https://example.com/s",
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "x": {"type":"string", "additionalProperties": false}
+                        }
+                    }
+                }
+            }]
+        });
+        transform_openai_request_for_mistral(&mut body).unwrap();
+        let params = &body["tools"][0]["function"]["parameters"];
+        assert!(params.get("$schema").is_none());
+        assert!(params.get("$id").is_none());
+        assert!(params.get("additionalProperties").is_none());
+        assert!(params["properties"]["x"].get("additionalProperties").is_none());
     }
 }

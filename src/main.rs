@@ -1,4 +1,5 @@
 mod api;
+mod aws_credentials;
 mod aws_sigv4;
 mod capture;
 mod cli;

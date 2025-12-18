@@ -86,6 +86,24 @@ impl RequestTransformer for AnthropicTransformer {
             request["tools"] = Value::Array(anthropic_tools);
         }
 
+        // Translate OpenAI-style tool_choice to Anthropic.
+        if let Some(orig) = context.original_request.as_ref() {
+            if let Some(tool_choice) = orig.get("tool_choice") {
+                match anthropic_tool_choice_from_openai(tool_choice) {
+                    AnthropicToolChoiceDecision::OmitTools => {
+                        // Anthropic doesn't support tool_choice="none"; omit tools entirely.
+                        if let Some(obj) = request.as_object_mut() {
+                            obj.remove("tools");
+                        }
+                    }
+                    AnthropicToolChoiceDecision::Set(tc) => {
+                        request["tool_choice"] = tc;
+                    }
+                    AnthropicToolChoiceDecision::Ignore => {}
+                }
+            }
+        }
+
         Ok(request)
     }
 
@@ -626,10 +644,12 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec
     let mut messages = Vec::new();
     let mut last_user_idx = None;
 
-    // Find last user message index for cache control
+    // Find last non-empty user message index for cache control
     for (idx, msg) in context.messages.iter().enumerate() {
-        if matches!(msg, Message::User(_)) {
-            last_user_idx = Some(idx);
+        if let Message::User(user) = msg {
+            if anthropic_message_has_any_content(&user.content) {
+                last_user_idx = Some(idx);
+            }
         }
     }
 
@@ -637,6 +657,10 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec
         match msg {
             Message::User(user) => {
                 let content = build_anthropic_content(&user.content)?;
+                if content.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                    // Anthropic rejects empty content blocks; drop empty messages.
+                    continue;
+                }
                 let is_last_user = last_user_idx == Some(idx);
                 
                 let mut msg_obj = json!({
@@ -657,6 +681,10 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec
             }
             Message::Assistant(assistant) => {
                 let content = build_anthropic_assistant_content(&assistant.content);
+                if content.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                    // Drop empty assistant messages (Anthropic rejects empty blocks).
+                    continue;
+                }
                 messages.push(json!({
                     "role": "assistant",
                     "content": content
@@ -705,10 +733,15 @@ fn build_anthropic_content(blocks: &[ContentBlock]) -> Result<Value, TransformEr
 
     for block in blocks {
         match block {
-            ContentBlock::Text(t) => parts.push(json!({
-                "type": "text",
-                "text": t.text
-            })),
+            ContentBlock::Text(t) => {
+                if t.text.trim().is_empty() {
+                    continue;
+                }
+                parts.push(json!({
+                    "type": "text",
+                    "text": t.text
+                }))
+            }
             ContentBlock::Image(img) => {
                 if img.is_url {
                     return Err(TransformError::Unsupported(
@@ -742,10 +775,15 @@ fn build_anthropic_assistant_content(blocks: &[ContentBlock]) -> Value {
     let parts: Vec<Value> = blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text(t) => Some(json!({
-                "type": "text",
-                "text": t.text
-            })),
+            ContentBlock::Text(t) => {
+                if t.text.trim().is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "type": "text",
+                    "text": t.text
+                }))
+            }
             ContentBlock::Thinking(t) => {
                 let mut obj = json!({
                     "type": "thinking",
@@ -767,6 +805,65 @@ fn build_anthropic_assistant_content(blocks: &[ContentBlock]) -> Value {
         .collect();
 
     Value::Array(parts)
+}
+
+#[derive(Debug)]
+enum AnthropicToolChoiceDecision {
+    OmitTools,
+    Set(Value),
+    Ignore,
+}
+
+fn anthropic_tool_choice_from_openai(tool_choice: &Value) -> AnthropicToolChoiceDecision {
+    match tool_choice {
+        Value::String(s) => match s.as_str() {
+            "auto" => AnthropicToolChoiceDecision::Set(json!({"type": "auto"})),
+            "any" | "required" => AnthropicToolChoiceDecision::Set(json!({"type": "any"})),
+            "none" => AnthropicToolChoiceDecision::OmitTools,
+            _ => AnthropicToolChoiceDecision::Ignore,
+        },
+        Value::Object(obj) => {
+            let Some(choice_type) = obj.get("type").and_then(|t| t.as_str()) else {
+                return AnthropicToolChoiceDecision::Ignore;
+            };
+            match choice_type {
+                "auto" => AnthropicToolChoiceDecision::Set(json!({"type": "auto"})),
+                "any" | "required" => AnthropicToolChoiceDecision::Set(json!({"type": "any"})),
+                "none" => AnthropicToolChoiceDecision::OmitTools,
+                "function" => {
+                    let name = obj
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str());
+                    if let Some(name) = name {
+                        AnthropicToolChoiceDecision::Set(json!({"type": "tool", "name": name}))
+                    } else {
+                        AnthropicToolChoiceDecision::Ignore
+                    }
+                }
+                // Allow callers to pass Anthropic-style tool_choice through.
+                "tool" => {
+                    let name = obj.get("name").and_then(|n| n.as_str());
+                    if let Some(name) = name {
+                        AnthropicToolChoiceDecision::Set(json!({"type": "tool", "name": name}))
+                    } else {
+                        AnthropicToolChoiceDecision::Ignore
+                    }
+                }
+                _ => AnthropicToolChoiceDecision::Ignore,
+            }
+        }
+        _ => AnthropicToolChoiceDecision::Ignore,
+    }
+}
+
+fn anthropic_message_has_any_content(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        ContentBlock::Text(t) => !t.text.trim().is_empty(),
+        ContentBlock::Image(_) => true,
+        ContentBlock::ToolResult(_) => true,
+        _ => false,
+    })
 }
 
 fn parse_stop_reason(reason: &Option<String>) -> StopReason {
@@ -992,6 +1089,101 @@ fn process_anthropic_event(
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod request_quirks_tests {
+    use super::*;
+    use crate::transform::openai::parse_openai_request;
+    use crate::types::Message;
+
+    #[test]
+    fn anthropic_filters_empty_text_blocks() {
+        let body = json!({
+            "model": "claude-3-5-sonnet-20240620",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type":"text","text":""},
+                    {"type":"text","text":"  "},
+                    {"type":"text","text":"hi"}
+                ]
+            }],
+            "max_tokens": 16
+        });
+        let ctx = parse_openai_request(&body).unwrap();
+        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let messages = req["messages"].as_array().unwrap();
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hi");
+    }
+
+    #[test]
+    fn anthropic_drops_empty_messages() {
+        let ctx = Context::new("claude-3-5-sonnet-20240620").with_messages(vec![
+            Message::user(""),
+            Message::user("ok"),
+        ]);
+        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let messages = req["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_tool_choice_required_translates_to_any() {
+        let body = json!({
+            "model": "claude-3-5-sonnet-20240620",
+            "messages": [{"role":"user","content":"Call a tool"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name":"noop","description":"noop","parameters":{"type":"object","properties":{}}}
+            }],
+            "tool_choice": "required",
+            "max_tokens": 16
+        });
+        let ctx = parse_openai_request(&body).unwrap();
+        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        assert_eq!(req["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn anthropic_tool_choice_function_translates_to_tool() {
+        let body = json!({
+            "model": "claude-3-5-sonnet-20240620",
+            "messages": [{"role":"user","content":"Call a tool"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name":"noop","description":"noop","parameters":{"type":"object","properties":{}}}
+            }],
+            "tool_choice": {"type":"function","function":{"name":"noop"}},
+            "max_tokens": 16
+        });
+        let ctx = parse_openai_request(&body).unwrap();
+        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        assert_eq!(req["tool_choice"]["type"], "tool");
+        assert_eq!(req["tool_choice"]["name"], "noop");
+    }
+
+    #[test]
+    fn anthropic_tool_choice_none_omits_tools() {
+        let body = json!({
+            "model": "claude-3-5-sonnet-20240620",
+            "messages": [{"role":"user","content":"Don't call tools"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name":"noop","description":"noop","parameters":{"type":"object","properties":{}}}
+            }],
+            "tool_choice": "none",
+            "max_tokens": 16
+        });
+        let ctx = parse_openai_request(&body).unwrap();
+        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        assert!(req.get("tools").is_none());
+        assert!(req.get("tool_choice").is_none());
+    }
 }
 
 #[cfg(test)]
