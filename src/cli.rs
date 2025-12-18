@@ -826,72 +826,6 @@ impl EavsClient {
     }
 }
 
-// Request/Response types for CLI
-// Note: These are DTOs (Data Transfer Objects) for HTTP API communication.
-// They differ from internal types (e.g., keys/types.rs) because:
-// - JSON serialization uses Vec instead of HashSet for arrays
-// - Optional fields use skip_serializing_if for cleaner API payloads
-
-#[derive(Debug, Serialize)]
-pub struct CreateKeyCliRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    pub permissions: KeyPermissionsDto,
-}
-
-/// Key permissions DTO for CLI API requests.
-/// Uses Vec instead of HashSet for JSON serialization compatibility.
-#[derive(Debug, Serialize, Default)]
-pub struct KeyPermissionsDto {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_models: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_models: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_providers: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rpm_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tpm_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rpd_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_budget_usd: Option<f64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CreateKeyResponse {
-    pub key: String,
-    pub key_id: String,
-    pub key_hash: String,
-    pub expires_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct KeyInfo {
-    pub key_id: String,
-    pub key_hash: String,
-    pub name: Option<String>,
-    pub created_at: String,
-    pub expires_at: Option<String>,
-    pub disabled: bool,
-    pub permissions: serde_json::Value,
-    pub usage: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct UsageRecord {
-    pub timestamp: String,
-    pub model: String,
-    pub provider: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cached_tokens: u32,
-    pub cost_usd: f64,
-}
-
 #[derive(Debug)]
 pub struct ChatResponse {
     pub content: String,
@@ -963,6 +897,10 @@ fn parse_expiration_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     };
 
     Some(chrono::Utc::now() + duration)
+}
+
+fn parse_expiration(s: &str) -> Option<String> {
+    parse_expiration_datetime(s).map(|dt| dt.to_rfc3339())
 }
 
 /// Create a key directly in the database (no server required)

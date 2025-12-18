@@ -17,12 +17,21 @@ impl BedrockTransformer {
         Self
     }
 
+    fn strip_region_prefix(model_id: &str) -> &str {
+        for prefix in ["us.", "eu.", "apac."] {
+            if let Some(stripped) = model_id.strip_prefix(prefix) {
+                return stripped;
+            }
+        }
+        model_id
+    }
+
     fn is_anthropic_model(model_id: &str) -> bool {
-        model_id.starts_with("anthropic.")
+        Self::strip_region_prefix(model_id).starts_with("anthropic.")
     }
 
     fn is_titan_text_model(model_id: &str) -> bool {
-        model_id.starts_with("amazon.titan")
+        Self::strip_region_prefix(model_id).starts_with("amazon.titan")
     }
 }
 
@@ -181,6 +190,15 @@ mod tests {
         let req = BedrockTransformer::new().transform_request(&ctx).unwrap();
         assert_eq!(req["anthropic_version"], "bedrock-2023-05-31");
         assert!(req.get("model").is_none());
+    }
+
+    #[test]
+    fn bedrock_regional_anthropic_model_is_supported() {
+        let ctx = Context::new("us.anthropic.claude-3-opus-20240229-v1:0")
+            .with_messages(vec![Message::user("hi")])
+            .with_max_tokens(16);
+        let req = BedrockTransformer::new().transform_request(&ctx).unwrap();
+        assert_eq!(req["anthropic_version"], "bedrock-2023-05-31");
     }
 
     #[test]
