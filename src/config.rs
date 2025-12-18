@@ -99,6 +99,23 @@ pub struct AppConfig {
     pub capture: CaptureConfig,
 }
 
+impl AppConfig {
+    /// Create a config with all default values
+    pub fn with_defaults() -> Self {
+        Self {
+            server: ServerConfig::default(),
+            providers: HashMap::new(),
+            upstream: HashMap::new(),
+            logging: LoggingConfig::default(),
+            analysis: AnalysisConfig::default(),
+            policy: PolicyConfig::default(),
+            state: StateConfig::default(),
+            keys: KeysConfig::default(),
+            capture: CaptureConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -592,6 +609,10 @@ impl Default for StateConfig {
 pub struct KeysConfig {
     /// Enable virtual API key support
     pub enabled: bool,
+    /// Require a valid virtual API key for all requests.
+    /// When true, requests without a valid eavs_ key are rejected.
+    /// When false (default), requests without keys pass through (backward compatible).
+    pub require_key: bool,
     /// Path to the SQLite database file
     pub database_path: String,
     /// Master key for admin API (if not set, admin API is disabled)
@@ -613,6 +634,7 @@ impl Default for KeysConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            require_key: false,
             database_path: "~/.eavs/keys.db".to_string(),
             master_key: None,
             allow_self_provisioning: false,

@@ -172,6 +172,68 @@ impl ProviderType {
     pub fn needs_transform(&self) -> bool {
         matches!(self, Self::Anthropic | Self::Google | Self::Bedrock)
     }
+
+    /// Check if this provider supports the /v1/models endpoint natively.
+    /// Providers that don't support it will get a synthetic response.
+    pub fn supports_models_endpoint(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI
+                | Self::Anthropic  // Anthropic added /v1/models endpoint
+                | Self::Azure      // Azure has /openai/models, we translate the path
+                | Self::Mistral
+                | Self::Groq
+                | Self::XAI
+                | Self::OpenRouter
+                | Self::OpenAICompatible
+        )
+    }
+
+    /// Get a list of well-known models for providers that don't support /v1/models.
+    /// This returns a curated list of popular models for each provider.
+    pub fn synthetic_models(&self) -> Vec<&'static str> {
+        match self {
+            Self::Anthropic => vec![
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "claude-3-opus-20240229",
+                "claude-3-sonnet-20240229",
+                "claude-3-haiku-20240307",
+                "claude-sonnet-4-20250514",
+                "claude-haiku-4-20250514",
+            ],
+            Self::Google => vec![
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+                "gemini-1.5-flash-8b",
+                "gemini-2.0-flash-exp",
+                "gemini-exp-1206",
+            ],
+            Self::Azure => vec![
+                // Azure uses deployment names, return common model names
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4",
+                "gpt-4-turbo",
+                "gpt-35-turbo",
+            ],
+            Self::Bedrock => vec![
+                "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "anthropic.claude-3-5-haiku-20241022-v1:0",
+                "anthropic.claude-3-opus-20240229-v1:0",
+                "anthropic.claude-3-sonnet-20240229-v1:0",
+                "amazon.titan-text-express-v1",
+                "meta.llama3-70b-instruct-v1:0",
+            ],
+            Self::Cerebras => vec![
+                "llama3.1-8b",
+                "llama3.1-70b",
+            ],
+            Self::Mock => vec!["mock-model"],
+            // OpenAI-compatible providers should fetch from upstream
+            _ => vec![],
+        }
+    }
 }
 
 /// Detect provider name from a hostname.

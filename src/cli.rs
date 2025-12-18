@@ -190,6 +190,14 @@ pub enum KeyCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// List all virtual API keys
@@ -201,6 +209,14 @@ pub enum KeyCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Get information about a key
@@ -211,6 +227,14 @@ pub enum KeyCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Revoke (disable) a key
@@ -221,6 +245,14 @@ pub enum KeyCommands {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
+
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 
     /// Show usage history for a key
@@ -235,6 +267,14 @@ pub enum KeyCommands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
     },
 }
 
@@ -454,10 +494,9 @@ pub enum OutputFormat {
     Json,
 }
 
-/// Configuration for CLI client operations
+/// Configuration for CLI client operations (used for test/health commands that need server)
 pub struct CliConfig {
     pub server_url: String,
-    pub master_key: Option<String>,
     pub timeout: Duration,
 }
 
@@ -471,28 +510,34 @@ impl CliConfig {
     /// Create a CliConfig by loading settings from config file.
     /// Priority: EAVS_URL env > config file > default (127.0.0.1:3000)
     pub fn from_config(config_path: Option<&str>) -> Self {
-        // EAVS_URL env var takes highest priority
-        if let Ok(url) = std::env::var("EAVS_URL") {
-            if !url.trim().is_empty() {
-                return Self {
-                    server_url: url,
-                    master_key: std::env::var("EAVS_MASTER_KEY").ok(),
-                    timeout: Duration::from_secs(30),
-                };
-            }
-        }
+        // Try to load config for port
+        let config = if let Some(path) = config_path {
+            crate::config::AppConfig::load_from(path).ok()
+        } else {
+            crate::config::AppConfig::load().ok()
+        };
 
-        // Try to load port from config file
-        let port = get_effective_port(None, config_path);
+        // EAVS_URL env var takes highest priority for URL
+        let server_url = if let Ok(url) = std::env::var("EAVS_URL") {
+            if !url.trim().is_empty() {
+                url
+            } else {
+                let port = config.as_ref().map(|c| c.server.port).unwrap_or(3000);
+                format!("http://127.0.0.1:{}", port)
+            }
+        } else {
+            let port = config.as_ref().map(|c| c.server.port).unwrap_or(3000);
+            format!("http://127.0.0.1:{}", port)
+        };
+
         Self {
-            server_url: format!("http://127.0.0.1:{}", port),
-            master_key: std::env::var("EAVS_MASTER_KEY").ok(),
+            server_url,
             timeout: Duration::from_secs(30),
         }
     }
 }
 
-/// Client for talking to EAVS server
+/// Client for talking to EAVS server (used for test/health commands)
 pub struct EavsClient {
     client: reqwest::Client,
     pub config: CliConfig,
@@ -513,132 +558,6 @@ impl EavsClient {
             server_url: url,
             ..Default::default()
         })
-    }
-
-    /// Create a new virtual API key
-    pub async fn create_key(
-        &self,
-        request: &CreateKeyCliRequest,
-    ) -> Result<CreateKeyResponse, CliError> {
-        let url = format!("{}/admin/keys", self.config.server_url);
-
-        let mut req = self.client.post(&url).json(request);
-
-        if let Some(ref key) = self.config.master_key {
-            req = req.header("X-Master-Key", key);
-        }
-
-        let resp = req.send().await.map_err(CliError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        resp.json().await.map_err(CliError::Request)
-    }
-
-    /// List all virtual API keys
-    pub async fn list_keys(&self, include_disabled: bool) -> Result<Vec<KeyInfo>, CliError> {
-        let url = format!("{}/admin/keys", self.config.server_url);
-
-        let mut req = self.client.get(&url);
-
-        if include_disabled {
-            req = req.query(&[("include_disabled", "true")]);
-        }
-
-        if let Some(ref key) = self.config.master_key {
-            req = req.header("X-Master-Key", key);
-        }
-
-        let resp = req.send().await.map_err(CliError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        resp.json().await.map_err(CliError::Request)
-    }
-
-    /// Get key info by hash
-    pub async fn get_key(&self, key_hash: &str) -> Result<KeyInfo, CliError> {
-        let url = format!("{}/admin/keys/{}", self.config.server_url, key_hash);
-
-        let mut req = self.client.get(&url);
-
-        if let Some(ref key) = self.config.master_key {
-            req = req.header("X-Master-Key", key);
-        }
-
-        let resp = req.send().await.map_err(CliError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        resp.json().await.map_err(CliError::Request)
-    }
-
-    /// Revoke (disable) a key
-    pub async fn revoke_key(&self, key_hash: &str) -> Result<(), CliError> {
-        let url = format!("{}/admin/keys/{}", self.config.server_url, key_hash);
-
-        let mut req = self.client.delete(&url);
-
-        if let Some(ref key) = self.config.master_key {
-            req = req.header("X-Master-Key", key);
-        }
-
-        let resp = req.send().await.map_err(CliError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-    Ok(())
-}
-    /// Get usage history for a key
-    pub async fn get_usage(&self, key_hash: &str, days: u32) -> Result<Vec<UsageRecord>, CliError> {
-        let url = format!("{}/admin/keys/{}/usage", self.config.server_url, key_hash);
-
-        let mut req = self.client.get(&url).query(&[("days", days.to_string())]);
-
-        if let Some(ref key) = self.config.master_key {
-            req = req.header("X-Master-Key", key);
-        }
-
-        let resp = req.send().await.map_err(CliError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        resp.json().await.map_err(CliError::Request)
     }
 
     async fn post_chat_completions(
@@ -1018,32 +937,37 @@ impl std::fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 /// Parse expiration string like "30d", "24h", "never" into ISO timestamp
-pub fn parse_expiration(s: &str) -> Option<String> {
-    if s == "never" || s.is_empty() {
+// =============================================================================
+// Direct Database Key Management (no server required)
+// =============================================================================
+
+use crate::keys::{KeyStore, CreateKeyRequest, KeyPermissions};
+use std::collections::HashSet;
+
+/// Parse expiration string to DateTime
+fn parse_expiration_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() || s == "never" || s == "none" {
         return None;
     }
 
-    let now = chrono::Utc::now();
-    let duration = if let Some(days) = s.strip_suffix('d') {
-        let days: i64 = days.parse().ok()?;
-        chrono::Duration::days(days)
-    } else if let Some(hours) = s.strip_suffix('h') {
-        let hours: i64 = hours.parse().ok()?;
-        chrono::Duration::hours(hours)
-    } else if let Some(mins) = s.strip_suffix('m') {
-        let mins: i64 = mins.parse().ok()?;
-        chrono::Duration::minutes(mins)
-    } else {
-        return None;
+    // Parse duration like "30d", "24h", "60m"
+    let (num_str, unit) = s.split_at(s.len().saturating_sub(1));
+    let num: i64 = num_str.parse().ok()?;
+
+    let duration = match unit {
+        "d" => chrono::Duration::days(num),
+        "h" => chrono::Duration::hours(num),
+        "m" => chrono::Duration::minutes(num),
+        _ => return None,
     };
 
-    Some((now + duration).to_rfc3339())
+    Some(chrono::Utc::now() + duration)
 }
 
-// CLI execution functions
-
-pub async fn run_key_create(
-    client: &EavsClient,
+/// Create a key directly in the database (no server required)
+pub async fn run_key_create_direct(
+    store: &KeyStore,
     name: Option<String>,
     models: Vec<String>,
     blocked_models: Vec<String>,
@@ -1055,33 +979,25 @@ pub async fn run_key_create(
     expires: String,
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let request = CreateKeyCliRequest {
+    let request = CreateKeyRequest {
         name,
-        expires_at: parse_expiration(&expires),
-        permissions: KeyPermissionsDto {
-            allowed_models: if models.is_empty() {
-                None
-            } else {
-                Some(models)
-            },
-            blocked_models: if blocked_models.is_empty() {
-                None
-            } else {
-                Some(blocked_models)
-            },
-            allowed_providers: if providers.is_empty() {
-                None
-            } else {
-                Some(providers)
-            },
+        expires_at: parse_expiration_datetime(&expires),
+        permissions: KeyPermissions {
+            allowed_models: if models.is_empty() { None } else { Some(models.into_iter().collect::<HashSet<_>>()) },
+            blocked_models: if blocked_models.is_empty() { None } else { Some(blocked_models.into_iter().collect::<HashSet<_>>()) },
+            allowed_providers: if providers.is_empty() { None } else { Some(providers.into_iter().collect::<HashSet<_>>()) },
             rpm_limit: rpm,
             tpm_limit: tpm,
             rpd_limit: rpd,
             max_budget_usd: budget,
+            budget_window: None,
         },
+        metadata: serde_json::Value::Null,
     };
 
-    let response = client.create_key(&request).await?;
+    let response = store.create_key(request).await.map_err(|e| {
+        CliError::Other(format!("Failed to create key: {}", e))
+    })?;
 
     match format {
         OutputFormat::Json => {
@@ -1104,12 +1020,15 @@ pub async fn run_key_create(
     Ok(())
 }
 
-pub async fn run_key_list(
-    client: &EavsClient,
-    include_disabled: bool,
+/// List keys directly from the database (no server required)
+pub async fn run_key_list_direct(
+    store: &KeyStore,
+    _include_disabled: bool,  // TODO: implement filtering
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let keys = client.list_keys(include_disabled).await?;
+    let keys = store.list_keys().await.map_err(|e| {
+        CliError::Other(format!("Failed to list keys: {}", e))
+    })?;
 
     match format {
         OutputFormat::Json => {
@@ -1122,20 +1041,26 @@ pub async fn run_key_list(
             }
 
             println!(
-                "{:<12} {:<20} {:<10} {:<20}",
+                "{:<15} {:<20} {:<10} {:<20}",
                 "KEY ID", "NAME", "STATUS", "CREATED"
             );
-            println!("{}", "-".repeat(64));
+            println!("{}", "-".repeat(70));
 
             for key in keys {
                 let status = if key.disabled { "disabled" } else { "active" };
                 let name = key.name.unwrap_or_else(|| "-".to_string());
+                let name_display = if name.len() > 20 { 
+                    format!("{}...", &name[..17])
+                } else { 
+                    name 
+                };
+                let created = key.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
                 println!(
-                    "{:<12} {:<20} {:<10} {:<20}",
-                    &key.key_id[..12.min(key.key_id.len())],
-                    &name[..20.min(name.len())],
+                    "{:<15} {:<20} {:<10} {:<20}",
+                    key.key_id,
+                    name_display,
                     status,
-                    &key.created_at[..19.min(key.created_at.len())]
+                    created
                 );
             }
         }
@@ -1144,12 +1069,18 @@ pub async fn run_key_list(
     Ok(())
 }
 
-pub async fn run_key_info(
-    client: &EavsClient,
-    key: String,
+/// Get key info directly from the database (no server required)
+pub async fn run_key_info_direct(
+    store: &KeyStore,
+    key_id: &str,
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let info = client.get_key(&key).await?;
+    // Try to find by human ID first, then by hash prefix
+    let key = store.get_by_human_id(key_id)
+        .or_else(|| store.get_by_hash(key_id))
+        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+
+    let info = key.to_info();
 
     match format {
         OutputFormat::Json => {
@@ -1167,7 +1098,7 @@ pub async fn run_key_info(
             println!("Created:     {}", info.created_at);
             println!(
                 "Expires:     {}",
-                info.expires_at.unwrap_or_else(|| "never".to_string())
+                info.expires_at.map(|d| d.to_string()).unwrap_or_else(|| "never".to_string())
             );
             println!(
                 "Status:      {}",
@@ -1188,9 +1119,19 @@ pub async fn run_key_info(
     Ok(())
 }
 
-pub async fn run_key_revoke(client: &EavsClient, key: String, yes: bool) -> Result<(), CliError> {
+/// Revoke a key directly in the database (no server required)
+pub async fn run_key_revoke_direct(
+    store: &KeyStore,
+    key_id: &str,
+    yes: bool,
+) -> Result<(), CliError> {
+    // Find the key first
+    let key = store.get_by_human_id(key_id)
+        .or_else(|| store.get_by_hash(key_id))
+        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+
     if !yes {
-        eprint!("Are you sure you want to revoke key '{}'? [y/N] ", key);
+        eprint!("Are you sure you want to revoke key '{}'? [y/N] ", key.key_id);
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
         if !input.trim().eq_ignore_ascii_case("y") {
@@ -1199,19 +1140,30 @@ pub async fn run_key_revoke(client: &EavsClient, key: String, yes: bool) -> Resu
         }
     }
 
-    client.revoke_key(&key).await?;
-    println!("Key '{}' has been revoked.", key);
+    store.disable_key(&key.key_hash).await.map_err(|e| {
+        CliError::Other(format!("Failed to revoke key: {}", e))
+    })?;
+
+    println!("Key '{}' has been revoked.", key.key_id);
 
     Ok(())
 }
 
-pub async fn run_key_usage(
-    client: &EavsClient,
-    key: String,
+/// Get usage history directly from the database (no server required)
+pub async fn run_key_usage_direct(
+    store: &KeyStore,
+    key_id: &str,
     days: u32,
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let records = client.get_usage(&key, days).await?;
+    // Find the key first
+    let key = store.get_by_human_id(key_id)
+        .or_else(|| store.get_by_hash(key_id))
+        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+
+    let records = store.get_usage_history(&key.key_hash, Some(days)).await.map_err(|e| {
+        CliError::Other(format!("Failed to get usage history: {}", e))
+    })?;
 
     match format {
         OutputFormat::Json => {
@@ -1234,10 +1186,16 @@ pub async fn run_key_usage(
             let mut total_cost = 0.0f64;
 
             for record in &records {
+                let ts = record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+                let model_display = if record.model.len() > 15 { 
+                    format!("{}...", &record.model[..12])
+                } else { 
+                    record.model.clone() 
+                };
                 println!(
                     "{:<20} {:<15} {:<10} {:<10} ${:<9.4}",
-                    &record.timestamp[..19.min(record.timestamp.len())],
-                    &record.model[..15.min(record.model.len())],
+                    ts,
+                    model_display,
                     record.input_tokens,
                     record.output_tokens,
                     record.cost_usd
@@ -2512,7 +2470,7 @@ pub struct ServiceStatus {
 }
 
 /// Get the effective port from CLI arg, env, or config file
-fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u16 {
+pub fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u16 {
     // CLI/env takes precedence
     if let Some(p) = cli_port {
         return p;

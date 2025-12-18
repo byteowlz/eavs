@@ -18,11 +18,10 @@ mod upstream;
 mod integration_tests;
 
 use crate::cli::{
-    ensure_server_running, run_key_create, run_key_info, run_key_list, run_key_revoke,
-    run_key_usage, run_service_logs, run_service_restart, run_service_start, run_service_status,
-    run_service_stop, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit,
-    run_test_routing, Cli, run_test_image, run_test_tool_call, CliConfig, Commands, EavsClient,
-    KeyCommands, ServiceCommands, TestCommands,
+    ensure_server_running, run_service_logs, run_service_restart, run_service_start, 
+    run_service_status, run_service_stop, run_test_bench, run_test_chat, run_test_health, 
+    run_test_rate_limit, run_test_routing, Cli, run_test_image, run_test_tool_call, 
+    Commands, EavsClient, KeyCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -221,8 +220,27 @@ async fn run_service_command(action: ServiceCommands) -> Result<(), cli::CliErro
     }
 }
 
+/// Load config from file path or default location
+fn load_config(config_path: Option<&str>) -> crate::config::AppConfig {
+    if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config from {}: {}, using defaults", path, e);
+            crate::config::AppConfig::with_defaults()
+        })
+    } else {
+        crate::config::AppConfig::load().unwrap_or_else(|e| {
+            tracing::debug!("No config file found: {}, using defaults", e);
+            crate::config::AppConfig::with_defaults()
+        })
+    }
+}
+
 async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
-    let client = EavsClient::new(CliConfig::default());
+    use crate::keys::KeyStore;
+    use crate::cli::{
+        run_key_create_direct, run_key_list_direct, run_key_info_direct,
+        run_key_revoke_direct, run_key_usage_direct,
+    };
 
     match action {
         KeyCommands::Create {
@@ -236,9 +254,16 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             budget,
             expires,
             format,
+            url: _,  // Not needed for direct DB access
+            config,
         } => {
-            run_key_create(
-                &client,
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            run_key_create_direct(
+                &store,
                 name,
                 models,
                 blocked_models,
@@ -252,10 +277,38 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             )
             .await
         }
-        KeyCommands::List { all, format } => run_key_list(&client, all, format).await,
-        KeyCommands::Info { key, format } => run_key_info(&client, key, format).await,
-        KeyCommands::Revoke { key, yes } => run_key_revoke(&client, key, yes).await,
-        KeyCommands::Usage { key, days, format } => run_key_usage(&client, key, days, format).await,
+        KeyCommands::List { all, format, url: _, config } => {
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            run_key_list_direct(&store, all, format).await
+        }
+        KeyCommands::Info { key, format, url: _, config } => {
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            run_key_info_direct(&store, &key, format).await
+        }
+        KeyCommands::Revoke { key, yes, url: _, config } => {
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            run_key_revoke_direct(&store, &key, yes).await
+        }
+        KeyCommands::Usage { key, days, format, url: _, config } => {
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            run_key_usage_direct(&store, &key, days, format).await
+        }
     }
 }
 

@@ -67,7 +67,7 @@ impl ProxyError {
 /// - POST /azure/v1/chat/completions
 pub async fn provider_proxy_handler(
     State(state): State<AppState>,
-    Path(provider): Path<String>,
+    Path((provider, _path)): Path<(String, String)>,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     proxy_handler_inner(state, req, Some(provider)).await
@@ -224,8 +224,10 @@ async fn proxy_handler_inner(
         );
     }
 
-    // 3. Validate virtual API key if present
+    // 3. Validate virtual API key if present (or required)
     // Note: validated_key is used for tracking usage after response completes
+    let require_key = state.config.keys.enabled && state.config.keys.require_key;
+    
     #[allow(unused_variables)]
     let validated_key: Option<ValidatedKey> = if let Some(ref key) = auth_header {
         if is_virtual_key(key) {
@@ -262,10 +264,30 @@ async fn proxy_handler_inner(
                 )
                     .into_response());
             }
+        } else if require_key {
+            // Not a virtual key but require_key is enabled - reject
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ProxyError::new(
+                    "A valid virtual API key is required. Keys must start with 'eavs_'",
+                    "authentication_error",
+                ).with_code("invalid_api_key")),
+            )
+                .into_response());
         } else {
-            // Not a virtual key - pass through
+            // Not a virtual key - pass through (backward compatible)
             None
         }
+    } else if require_key {
+        // No key provided but require_key is enabled - reject
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ProxyError::new(
+                "Authorization header with a valid virtual API key is required",
+                "authentication_error",
+            ).with_code("missing_api_key")),
+        )
+            .into_response());
     } else {
         None
     };
@@ -354,8 +376,57 @@ async fn proxy_handler_inner(
     let api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
 
+    // Determine the actual API path (strip provider prefix if using provider-prefixed routing)
+    let api_path = if let Some(ref provider) = path_provider {
+        let prefix = format!("/{}", provider);
+        parts.uri.path().strip_prefix(&prefix).unwrap_or(parts.uri.path())
+    } else {
+        parts.uri.path()
+    };
+    
+    // Handle /v1/models endpoint for providers that don't support it natively
+    // Return a synthetic response with known models for that provider
+    if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
+        let models = provider_type.synthetic_models();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
+        let models_response = serde_json::json!({
+            "object": "list",
+            "data": models.iter().map(|m| {
+                serde_json::json!({
+                    "id": m,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": format!("{:?}", provider_type).to_lowercase()
+                })
+            }).collect::<Vec<_>>()
+        });
+        
+        let mut response = Json(models_response).into_response();
+        response.headers_mut().insert(
+            http::header::HeaderName::from_static("x-eavs-provider"),
+            http::HeaderValue::from_str(&provider_name).unwrap_or_else(|_| http::HeaderValue::from_static("unknown")),
+        );
+        response.headers_mut().insert(
+            http::header::HeaderName::from_static("x-eavs-synthetic"),
+            http::HeaderValue::from_static("true"),
+        );
+        
+        return Ok(response);
+    }
+    
+    // Check if this is a pass-through endpoint that doesn't need transformation
+    // (e.g., /v1/models, /v1/embeddings for providers that support them natively)
+    let is_passthrough_endpoint = api_path == "/v1/models" 
+        || api_path.starts_with("/v1/models/")
+        || api_path == "/v1/embeddings";
+    
     // Check if we need format translation
-    let needs_transform = provider_type.needs_transform();
+    // Skip transformation for pass-through endpoints
+    let needs_transform = provider_type.needs_transform() && !is_passthrough_endpoint;
     
     // Get the transformer for this provider
     let transformer = ProviderTransformer::for_provider(provider_type);
@@ -448,6 +519,16 @@ async fn proxy_handler_inner(
         // Azure OpenAI is deployment-based; treat `model` as deployment name when base_url is
         // the resource endpoint (no `/openai/deployments/...` path).
         let request_path = parts.uri.path();
+        
+        // If using provider-prefixed routing (e.g., /openai/v1/models), strip the provider prefix
+        // to get the actual API path (e.g., /v1/models)
+        let request_path = if let Some(ref provider) = path_provider {
+            let prefix = format!("/{}", provider);
+            request_path.strip_prefix(&prefix).unwrap_or(request_path)
+        } else {
+            request_path
+        };
+        
         let stripped_path = if (provider_type == ProviderType::Azure || base.ends_with("/v1"))
             && request_path.starts_with("/v1")
         {
@@ -457,11 +538,18 @@ async fn proxy_handler_inner(
         };
 
         if provider_type == ProviderType::Azure && !base.contains("/openai/deployments/") {
-            // Use explicit deployment name if configured, otherwise fall back to model name
-            let deployment = provider_config
-                .resolved_deployment()
-                .unwrap_or_else(|| model_name.clone());
-            format!("/openai/deployments/{}{}", deployment, stripped_path)
+            // Azure has different paths for different endpoints:
+            // - /models -> /openai/models (no deployment needed)
+            // - /chat/completions -> /openai/deployments/{deployment}/chat/completions
+            if stripped_path == "/models" {
+                "/openai/models".to_string()
+            } else {
+                // Use explicit deployment name if configured, otherwise fall back to model name
+                let deployment = provider_config
+                    .resolved_deployment()
+                    .unwrap_or_else(|| model_name.clone());
+                format!("/openai/deployments/{}{}", deployment, stripped_path)
+            }
         } else {
             stripped_path.to_string()
         }
@@ -1185,7 +1273,8 @@ async fn ws_proxy_handler_inner(
         .or(header_provider)
         .unwrap_or_else(|| "default".to_string());
 
-    // Validate virtual API key if present (for rate limiting)
+    // Validate virtual API key if present (or required)
+    let require_key = state.config.keys.enabled && state.config.keys.require_key;
     let auth_header = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -1222,7 +1311,27 @@ async fn ws_proxy_handler_inner(
                 )
                     .into_response();
             }
+        } else if require_key {
+            // Not a virtual key but require_key is enabled - reject
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ProxyError::new(
+                    "A valid virtual API key is required. Keys must start with 'eavs_'",
+                    "authentication_error",
+                ).with_code("invalid_api_key")),
+            )
+                .into_response();
         }
+    } else if require_key {
+        // No key provided but require_key is enabled - reject
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ProxyError::new(
+                "Authorization header with a valid virtual API key is required",
+                "authentication_error",
+            ).with_code("missing_api_key")),
+        )
+            .into_response();
     }
 
     // Register/update conversation in store if capture_all is enabled

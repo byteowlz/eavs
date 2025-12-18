@@ -155,6 +155,11 @@
           "description": "Enable virtual API key support",
           "default": false
         },
+        "require_key": {
+          "type": "boolean",
+          "description": "Require a valid virtual API key for all requests. When true, requests without a valid eavs_ key are rejected. When false (default), requests without keys pass through (backward compatible).",
+          "default": false
+        },
         "database_path": {
           "type": "string",
           "description": "Path to the SQLite database file. Supports ~ expansion.",
