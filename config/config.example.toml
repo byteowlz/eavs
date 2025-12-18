@@ -192,6 +192,7 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 
 # [keys]
 # enabled = true
+# require_key = true                   # Require a valid virtual key for all requests
 # database_path = "~/.eavs/keys.db"
 # master_key = "env:EAVS_MASTER_KEY"   # Admin API key (supports env: syntax)
 # allow_self_provisioning = false      # Allow creating keys without master key
