@@ -80,9 +80,19 @@ impl Upstream for ReqwestUpstream {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
                 })?;
 
-            let mut builder = self.client.request(method, &request.url);
+            let mut builder = self.client.request(method.clone(), &request.url);
             builder = builder.headers(request.headers.clone());
-            builder = builder.body(request.body);
+            
+            // Only add body for methods that support it and when body is non-empty.
+            // GET, HEAD, OPTIONS, and TRACE should not have a body per HTTP spec.
+            // Some providers (like OpenAI) reject GET requests with a body.
+            let should_have_body = !matches!(
+                method,
+                reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS | reqwest::Method::TRACE
+            );
+            if should_have_body && !request.body.is_empty() {
+                builder = builder.body(request.body);
+            }
 
             let resp = builder
                 .send()

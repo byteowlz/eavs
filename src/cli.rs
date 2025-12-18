@@ -422,6 +422,29 @@ pub enum TestCommands {
         #[arg(long, env = "EAVS_CONFIG")]
         config: Option<String>,
     },
+
+    /// Test provider routing mechanisms
+    Routing {
+        /// Provider to test routing for
+        #[arg(short, long, default_value = "default")]
+        provider: String,
+
+        /// Model to use (for auto-detection test)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// EAVS server URL
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
+        url: String,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+
+        /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
@@ -1416,6 +1439,217 @@ pub async fn run_test_health(client: &EavsClient, format: OutputFormat) -> Resul
     }
 
     Ok(())
+}
+
+/// Result of a single routing test
+#[derive(Debug, Serialize)]
+pub struct RoutingTestResult {
+    pub method: String,
+    pub success: bool,
+    pub resolved_provider: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Results of all routing tests
+#[derive(Debug, Serialize)]
+pub struct RoutingTestResults {
+    pub provider_prefix: RoutingTestResult,
+    pub x_provider_header: RoutingTestResult,
+    pub model_auto_detect: Option<RoutingTestResult>,
+}
+
+/// Test provider routing mechanisms
+pub async fn run_test_routing(
+    server_url: &str,
+    provider: &str,
+    model: Option<String>,
+    format: OutputFormat,
+) -> Result<(), CliError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    println!("Testing Provider Routing");
+    println!("{}", "=".repeat(50));
+    println!("Server: {}", server_url);
+    println!("Provider: {}", provider);
+    if let Some(ref m) = model {
+        println!("Model: {}", m);
+    }
+    println!();
+
+    // Test 1: Provider-prefixed path (e.g., /openai/v1/models)
+    println!("1. Testing provider-prefixed path: /{}/v1/models", provider);
+    let prefix_result = test_routing_method(
+        &client,
+        &format!("{}/{}/v1/models", server_url, provider),
+        None,
+        "provider-prefixed path",
+    ).await;
+
+    // Test 2: X-Provider header
+    println!("2. Testing X-Provider header: /v1/models with X-Provider: {}", provider);
+    let header_result = test_routing_method(
+        &client,
+        &format!("{}/v1/models", server_url),
+        Some(provider),
+        "X-Provider header",
+    ).await;
+
+    // Test 3: Model auto-detection (only if model is provided)
+    let auto_detect_result = if let Some(ref m) = model {
+        // Use provider detection to predict expected provider
+        let expected_provider = crate::provider::detect_provider_from_model(m);
+        println!("3. Testing model auto-detection with model: {}", m);
+        if let Some(ref expected) = expected_provider {
+            println!("   Expected provider from model: {}", expected);
+        } else {
+            println!("   No provider auto-detected from model name");
+        }
+
+        // Make a request with the model to see what provider it resolves to
+        // We use chat/completions with a minimal body
+        let body = serde_json::json!({
+            "model": m,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1
+        });
+
+        let resp = client
+            .post(&format!("{}/v1/chat/completions", server_url))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        let result = match resp {
+            Ok(r) => {
+                let resolved = r.headers()
+                    .get("x-eavs-provider")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                
+                // Consider it a success if we got a provider header back
+                // (even if the actual API call failed due to missing API key)
+                RoutingTestResult {
+                    method: "model auto-detection".to_string(),
+                    success: resolved.is_some(),
+                    resolved_provider: resolved,
+                    error: None,
+                }
+            }
+            Err(e) => RoutingTestResult {
+                method: "model auto-detection".to_string(),
+                success: false,
+                resolved_provider: None,
+                error: Some(e.to_string()),
+            },
+        };
+        Some(result)
+    } else {
+        println!("3. Model auto-detection: skipped (no --model provided)");
+        None
+    };
+
+    let results = RoutingTestResults {
+        provider_prefix: prefix_result,
+        x_provider_header: header_result,
+        model_auto_detect: auto_detect_result,
+    };
+
+    println!();
+    println!("Results");
+    println!("{}", "=".repeat(50));
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&results).unwrap());
+        }
+        OutputFormat::Text => {
+            print_routing_result(&results.provider_prefix);
+            print_routing_result(&results.x_provider_header);
+            if let Some(ref auto) = results.model_auto_detect {
+                print_routing_result(auto);
+            }
+            
+            println!();
+            let successes = [
+                results.provider_prefix.success,
+                results.x_provider_header.success,
+                results.model_auto_detect.as_ref().map(|r| r.success).unwrap_or(true),
+            ].iter().filter(|&&s| s).count();
+            
+            let total = if results.model_auto_detect.is_some() { 3 } else { 2 };
+            println!("Summary: {}/{} routing methods working", successes, total);
+        }
+    }
+
+    Ok(())
+}
+
+/// Test a single routing method
+async fn test_routing_method(
+    client: &reqwest::Client,
+    url: &str,
+    x_provider_header: Option<&str>,
+    method_name: &str,
+) -> RoutingTestResult {
+    let mut req = client.get(url);
+    
+    if let Some(provider) = x_provider_header {
+        req = req.header("X-Provider", provider);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let resolved = resp.headers()
+                .get("x-eavs-provider")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            
+            let status = resp.status();
+            
+            // Consider success if we got the provider header (routing worked)
+            // even if status is 401/403 (auth issue, not routing issue)
+            let success = resolved.is_some() || status.is_success();
+            
+            let error = if !status.is_success() && resolved.is_none() {
+                Some(format!("HTTP {}", status))
+            } else {
+                None
+            };
+            
+            RoutingTestResult {
+                method: method_name.to_string(),
+                success,
+                resolved_provider: resolved,
+                error,
+            }
+        }
+        Err(e) => RoutingTestResult {
+            method: method_name.to_string(),
+            success: false,
+            resolved_provider: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Print a single routing test result in text format
+fn print_routing_result(result: &RoutingTestResult) {
+    let status = if result.success { "OK" } else { "FAIL" };
+    print!("  {}: {}", result.method, status);
+    
+    if let Some(ref provider) = result.resolved_provider {
+        print!(" (resolved to: {})", provider);
+    }
+    
+    if let Some(ref err) = result.error {
+        print!(" - {}", err);
+    }
+    
+    println!();
 }
 
 

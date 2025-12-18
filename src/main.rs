@@ -20,9 +20,9 @@ mod integration_tests;
 use crate::cli::{
     ensure_server_running, run_key_create, run_key_info, run_key_list, run_key_revoke,
     run_key_usage, run_service_logs, run_service_restart, run_service_start, run_service_status,
-    run_service_stop, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit, Cli,
-    run_test_image, run_test_tool_call, CliConfig, Commands, EavsClient, KeyCommands,
-    ServiceCommands, TestCommands,
+    run_service_stop, run_test_bench, run_test_chat, run_test_health, run_test_rate_limit,
+    run_test_routing, Cli, run_test_image, run_test_tool_call, CliConfig, Commands, EavsClient,
+    KeyCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -166,9 +166,14 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
-        // WebSocket proxy (e.g. OpenAI Realtime)
+        // WebSocket proxy (e.g. OpenAI Realtime) - default route
         .route("/v1/realtime", get(proxy::ws_proxy_handler))
-        // Proxy API (capture all /v1 methods)
+        // Provider-prefixed WebSocket proxy (e.g. /openai/v1/realtime)
+        .route("/:provider/v1/realtime", get(proxy::provider_ws_proxy_handler))
+        // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
+        // This allows explicit provider selection via URL path
+        .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
+        // Default proxy route with X-Provider header or auto-detection
         .route("/v1/*path", any(proxy::proxy_handler))
         .with_state(state);
 
@@ -346,6 +351,17 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);
             run_test_health(&client, format).await
+        }
+        TestCommands::Routing {
+            provider,
+            model,
+            url,
+            format,
+            config,
+        } => {
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, config.as_deref()).await?;
+            run_test_routing(&server.url, &provider, model, format).await
         }
     }
 }
