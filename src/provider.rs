@@ -17,6 +17,8 @@ pub enum ProviderType {
     Bedrock,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
+    /// OpenAI Codex CLI (ChatGPT backend via OAuth) - uses Responses API
+    OpenAICodex,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -64,6 +66,7 @@ impl ProviderType {
             "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible" => {
                 Self::OpenAICompatible
             }
+            "openai-codex" | "codex" | "chatgpt" => Self::OpenAICodex,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => Self::OpenAI, // Default fallback
         }
@@ -138,6 +141,12 @@ impl ProviderType {
                 env_key_name: None,
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::OpenAICodex => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://chatgpt.com/backend-api"),
+                env_key_name: None, // Uses OAuth
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -171,7 +180,12 @@ impl ProviderType {
     /// Check if this provider requires request transformation.
     #[allow(dead_code)]
     pub fn needs_transform(&self) -> bool {
-        matches!(self, Self::Anthropic | Self::Google | Self::Bedrock)
+        matches!(self, Self::Anthropic | Self::Google | Self::Bedrock | Self::OpenAICodex)
+    }
+    
+    /// Check if this provider uses the Responses API format.
+    pub fn uses_responses_api(&self) -> bool {
+        matches!(self, Self::OpenAICodex)
     }
 
     /// Check if this provider supports the /v1/models endpoint natively.
@@ -347,6 +361,11 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
     // Anthropic Claude models
     if model_lower.starts_with("claude") {
         return Some("anthropic");
+    }
+
+    // OpenAI Codex models (GPT-5.x Codex, uses ChatGPT backend)
+    if model_lower.contains("codex") || model_lower.starts_with("gpt-5") {
+        return Some("openai-codex");
     }
 
     // OpenAI models (GPT, o1, o3, etc.)
@@ -667,13 +686,22 @@ mod tests {
         assert_eq!(detect_provider_from_model("gpt-4"), Some("openai"));
         assert_eq!(detect_provider_from_model("gpt-4-turbo"), Some("openai"));
         assert_eq!(detect_provider_from_model("gpt-4o"), Some("openai"));
-        assert_eq!(detect_provider_from_model("gpt-5.2"), Some("openai"));
         assert_eq!(detect_provider_from_model("o1-preview"), Some("openai"));
         assert_eq!(detect_provider_from_model("o3-mini"), Some("openai"));
         assert_eq!(detect_provider_from_model("text-embedding-3-small"), Some("openai"));
         assert_eq!(detect_provider_from_model("dall-e-3"), Some("openai"));
         assert_eq!(detect_provider_from_model("whisper-1"), Some("openai"));
         assert_eq!(detect_provider_from_model("tts-1-hd"), Some("openai"));
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_openai_codex() {
+        // GPT-5.x models use the Codex provider (ChatGPT backend)
+        assert_eq!(detect_provider_from_model("gpt-5.1-codex"), Some("openai-codex"));
+        assert_eq!(detect_provider_from_model("gpt-5.2-codex-max"), Some("openai-codex"));
+        assert_eq!(detect_provider_from_model("gpt-5.1"), Some("openai-codex"));
+        assert_eq!(detect_provider_from_model("gpt-5.2"), Some("openai-codex"));
+        assert_eq!(detect_provider_from_model("codex-mini-latest"), Some("openai-codex"));
     }
 
     #[test]
