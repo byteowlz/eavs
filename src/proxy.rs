@@ -392,11 +392,22 @@ async fn proxy_handler_inner(
     let mut api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
 
+    let mut is_anthropic_oauth = false;
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
+            tracing::info!("OAuth user: {}, provider: {}", oauth_user, provider_name);
             api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
-                Ok(token) => token,
+                Ok(token) => {
+                    tracing::info!("Got OAuth token starting with: {}...", &token[..20.min(token.len())]);
+                    // Check if this is an Anthropic OAuth token
+                    if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&token) {
+                        is_anthropic_oauth = true;
+                        tracing::info!("Detected Anthropic OAuth token, will inject Claude Code identity");
+                    }
+                    token
+                }
                 Err(msg) => {
+                    tracing::error!("OAuth token resolution failed: {}", msg);
                     return Err((
                         StatusCode::UNAUTHORIZED,
                         Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
@@ -480,6 +491,12 @@ async fn proxy_handler_inner(
 
         let requested_stream = context.stream;
         request_stream = requested_stream;
+
+        // For Anthropic OAuth tokens, inject Claude Code identity into system prompt
+        // This is required because OAuth tokens are scoped to Claude Code
+        if is_anthropic_oauth {
+            inject_claude_code_identity_into_context(&mut context);
+        }
 
         // Fake streaming for providers without native streaming support.
         if provider_type == ProviderType::Bedrock && requested_stream {
@@ -1861,6 +1878,19 @@ impl HeadersExt for http::Request<()> {
 /// Check if this is an Anthropic OAuth token (starts with sk-ant-oat)
 fn is_anthropic_oauth_token(api_key: &str) -> bool {
     api_key.starts_with("sk-ant-oat")
+}
+
+/// Anthropic OAuth tokens are scoped to "Claude Code" - requests must identify as Claude Code.
+/// This injects the required system prompt prefix for the token to work.
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn inject_claude_code_identity_into_context(context: &mut crate::types::Context) {
+    // Prepend Claude Code identity to the system prompt
+    let new_system = match &context.system_prompt {
+        Some(existing) => format!("{}\n\n{}", CLAUDE_CODE_IDENTITY, existing),
+        None => CLAUDE_CODE_IDENTITY.to_string(),
+    };
+    context.system_prompt = Some(new_system);
 }
 
 /// Apply authentication headers to any header container.

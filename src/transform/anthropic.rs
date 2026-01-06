@@ -116,7 +116,8 @@ impl RequestTransformer for AnthropicTransformer {
     }
 
     fn endpoint_path(&self, _context: &Context) -> String {
-        "/v1/messages".to_string()
+        // Note: base_url already includes /v1, so we only need /messages
+        "/messages".to_string()
     }
 }
 
