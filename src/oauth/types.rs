@@ -68,6 +68,8 @@ pub struct OAuthLoginResponse {
     pub expires_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_verifier: Option<String>,
 }
 
 #[derive(Debug, Clone)]

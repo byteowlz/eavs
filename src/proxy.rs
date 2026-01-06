@@ -388,8 +388,24 @@ async fn proxy_handler_inner(
     });
 
     // Use real API key from provider config (virtual key was just for auth)
-    let api_key = provider_config.resolved_api_key();
+    // But if the virtual key has oauth_user, use OAuth token instead
+    let mut api_key = provider_config.resolved_api_key();
     let provider_type = provider_config.provider_type();
+
+    if let Some(ref validated) = validated_key {
+        if let Some(oauth_user) = validated.oauth_user.as_deref() {
+            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+                Ok(token) => token,
+                Err(msg) => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
+                    )
+                        .into_response());
+                }
+            };
+        }
+    }
 
     // Determine the actual API path (strip provider prefix if using provider-prefixed routing)
     let api_path = if let Some(ref provider) = path_provider {
@@ -1842,10 +1858,32 @@ impl HeadersExt for http::Request<()> {
     }
 }
 
+/// Check if this is an Anthropic OAuth token (starts with sk-ant-oat)
+fn is_anthropic_oauth_token(api_key: &str) -> bool {
+    api_key.starts_with("sk-ant-oat")
+}
+
 /// Apply authentication headers to any header container.
 /// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
 fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType, api_key: &str) {
     if api_key.is_empty() {
+        return;
+    }
+
+    // Special handling for Anthropic OAuth tokens - they use Bearer auth + special headers
+    if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(api_key) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+            headers.insert_header(http::header::AUTHORIZATION, value);
+        }
+        // Add required OAuth beta header
+        headers.insert_header(
+            http::header::HeaderName::from_static("anthropic-beta"),
+            http::HeaderValue::from_static("oauth-2025-04-20"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
+            http::HeaderValue::from_static("true"),
+        );
         return;
     }
 
