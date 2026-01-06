@@ -25,8 +25,8 @@ pub fn start_analysis_plugins(state: AppState) -> Vec<tokio::task::JoinHandle<()
         .analysis
         .plugins
         .iter()
-        .cloned()
         .filter(|p| !p.command.trim().is_empty())
+        .cloned()
         .map(|plugin| spawn_plugin(state.clone(), plugin))
         .collect()
 }

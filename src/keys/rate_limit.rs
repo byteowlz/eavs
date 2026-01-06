@@ -346,6 +346,7 @@ impl DailyLimiter {
 /// Rate limit error with details.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 pub enum RateLimitError {
     RpmExceeded { limit: u32, reset_seconds: u64 },
     TpmExceeded { limit: u32, reset_seconds: u64 },

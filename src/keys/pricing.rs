@@ -479,6 +479,7 @@ struct LiteLLMModel {
 
 /// Errors that can occur when updating pricing data.
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum PricingUpdateError {
     NetworkError(String),
     HttpError(u16),

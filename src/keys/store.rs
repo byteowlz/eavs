@@ -14,7 +14,7 @@ use crate::keys::types::*;
 use crate::keys::generation::{generate_key, generate_human_id, hash_key};
 use chrono::{DateTime, Datelike, Utc};
 use dashmap::DashMap;
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -199,7 +199,8 @@ impl KeyStore {
                 disabled INTEGER NOT NULL DEFAULT 0,
                 permissions TEXT NOT NULL,
                 usage TEXT NOT NULL,
-                metadata TEXT
+                metadata TEXT,
+                oauth_user TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_keys_created ON virtual_keys(created_at);
@@ -210,6 +211,28 @@ impl KeyStore {
         .execute(pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        // Ensure oauth_user column exists for pre-existing databases.
+        let columns = sqlx::query("PRAGMA table_info(virtual_keys)")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        let mut has_oauth_user = false;
+        for row in columns {
+            let name: String = row
+                .try_get("name")
+                .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+            if name == "oauth_user" {
+                has_oauth_user = true;
+                break;
+            }
+        }
+        if !has_oauth_user {
+            sqlx::query("ALTER TABLE virtual_keys ADD COLUMN oauth_user TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        }
 
         // Usage history table for analytics
         sqlx::query(
@@ -235,13 +258,31 @@ impl KeyStore {
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
+        // OAuth credentials table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS oauth_credentials (
+                user_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                extra_data TEXT,
+                PRIMARY KEY (user_id, provider)
+            );
+            "#,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
         Ok(())
     }
 
     /// Refresh the in-memory cache from the database.
     pub async fn refresh_cache(&self) -> Result<(), KeyStoreError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata FROM virtual_keys WHERE disabled = 0",
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user FROM virtual_keys WHERE disabled = 0",
         )
         .fetch_all(&self.pool)
         .await
@@ -284,6 +325,7 @@ impl KeyStore {
             permissions: request.permissions.clone(),
             usage: KeyUsage::default(),
             metadata: request.metadata.clone(),
+            oauth_user: request.oauth_user.clone(),
         };
 
         // Insert into database
@@ -296,8 +338,8 @@ impl KeyStore {
 
         sqlx::query(
             r#"
-            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&key_hash)
@@ -310,6 +352,7 @@ impl KeyStore {
         .bind(&permissions_json)
         .bind(&usage_json)
         .bind(&metadata_json)
+        .bind(&virtual_key.oauth_user)
         .execute(&self.pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
@@ -326,6 +369,7 @@ impl KeyStore {
             created_at: virtual_key.created_at,
             expires_at: request.expires_at,
             permissions: request.permissions,
+            oauth_user: request.oauth_user,
         })
     }
     
@@ -391,7 +435,7 @@ impl KeyStore {
     /// List all keys (returns masked info, not actual keys).
     pub async fn list_keys(&self) -> Result<Vec<KeyInfo>, KeyStoreError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata FROM virtual_keys ORDER BY created_at DESC",
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user FROM virtual_keys ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await
@@ -459,6 +503,7 @@ impl KeyStore {
     /// - Cache is updated immediately (in-memory, O(1))
     /// - Usage history is recorded asynchronously
     /// - Key usage sync to SQLite is batched via background task
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_usage(
         &self,
         key_hash: &str,
@@ -600,6 +645,7 @@ struct KeyRow {
     permissions: String,
     usage: String,
     metadata: Option<String>,
+    oauth_user: Option<String>,
 }
 
 impl KeyRow {
@@ -649,6 +695,7 @@ impl KeyRow {
             permissions,
             usage,
             metadata,
+            oauth_user: self.oauth_user.clone(),
         })
     }
 }
@@ -729,6 +776,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
+            oauth_user: None,
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -750,6 +798,7 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
+                oauth_user: None,
             };
             store.create_key(request).await.unwrap();
         }
@@ -767,6 +816,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
+            oauth_user: None,
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -791,6 +841,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
+            oauth_user: None,
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -818,6 +869,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
+            oauth_user: None,
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -850,6 +902,7 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
+                oauth_user: None,
             };
 
             let response = store.create_key(request).await.unwrap();

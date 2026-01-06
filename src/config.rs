@@ -24,6 +24,7 @@ fn expand_path(input: &str) -> PathBuf {
         }
     }
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(ch) = chars.next() {
         if ch != '$' {
             out.push(ch);
@@ -186,7 +187,7 @@ fn redact_query_param(input: &str, param_name: &str) -> String {
         remaining = &remaining[idx + param_name.len() + 1..];
         
         // Skip the actual value
-        if let Some(end_idx) = remaining.find(|c| c == '&' || c == ' ' || c == '\n') {
+        if let Some(end_idx) = remaining.find(['&', ' ', '\n']) {
             remaining = &remaining[end_idx..];
         } else {
             remaining = "";
@@ -551,7 +552,7 @@ impl Default for AnalysisConfig {
 }
 
 /// Analysis plugin configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct AnalysisPluginConfig {
     /// Unique name for the plugin (for logs/observability).
@@ -562,17 +563,6 @@ pub struct AnalysisPluginConfig {
     pub args: Vec<String>,
     /// Environment variables for the plugin (supports `env:VAR` values).
     pub env: HashMap<String, String>,
-}
-
-impl Default for AnalysisPluginConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            command: String::new(),
-            args: Vec::new(),
-            env: HashMap::new(),
-        }
-    }
 }
 
 /// Configuration for conversation state storage.
@@ -714,7 +704,7 @@ impl CaptureConfig {
                 // Check in share/eavs/ (for system installs)
                 let addon_in_share = exe_dir.join("../share/eavs/eavs_capture.py");
                 if addon_in_share.exists() {
-                    return Some(addon_in_share.canonicalize().ok()?);
+                    return addon_in_share.canonicalize().ok();
                 }
             }
         }
@@ -998,6 +988,7 @@ impl AppConfig {
 pub struct ProviderLookupResult<'a> {
     pub config: &'a ProviderConfig,
     pub resolved_name: String,
+    #[allow(dead_code)]
     pub was_fallback: bool,
 }
 

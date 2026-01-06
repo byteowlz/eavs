@@ -39,20 +39,20 @@ pub trait Upstream: Send + Sync {
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
 
             if !resp.status.is_success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("fetch returned {}", resp.status),
-                ));
+                return Err(std::io::Error::other(format!(
+                    "fetch returned {}",
+                    resp.status
+                )));
             }
 
             let mut collected = Vec::new();
             while let Some(chunk) = resp.body.next().await {
                 let chunk = chunk?;
                 if collected.len() + chunk.len() > max_bytes {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("body exceeds {} bytes limit", max_bytes),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "body exceeds {} bytes limit",
+                        max_bytes
+                    )));
                 }
                 collected.extend_from_slice(&chunk);
             }
@@ -97,13 +97,13 @@ impl Upstream for ReqwestUpstream {
             let resp = builder
                 .send()
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
             let status = resp.status();
             let headers = resp.headers().clone();
             let body = resp
                 .bytes_stream()
-                .map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+                .map(|res| res.map_err(std::io::Error::other))
                 .boxed();
 
             Ok(UpstreamResponse {

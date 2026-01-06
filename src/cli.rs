@@ -870,7 +870,7 @@ impl std::fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Parse expiration string like "30d", "24h", "never" into ISO timestamp
+// Parse expiration string like "30d", "24h", "never" into ISO timestamp
 // =============================================================================
 // Direct Database Key Management (no server required)
 // =============================================================================
@@ -899,11 +899,13 @@ fn parse_expiration_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     Some(chrono::Utc::now() + duration)
 }
 
+#[allow(dead_code)]
 fn parse_expiration(s: &str) -> Option<String> {
     parse_expiration_datetime(s).map(|dt| dt.to_rfc3339())
 }
 
 /// Create a key directly in the database (no server required)
+#[allow(clippy::too_many_arguments)]
 pub async fn run_key_create_direct(
     store: &KeyStore,
     name: Option<String>,
@@ -931,6 +933,7 @@ pub async fn run_key_create_direct(
             budget_window: None,
         },
         metadata: serde_json::Value::Null,
+        oauth_user: None,
     };
 
     let response = store.create_key(request).await.map_err(|e| {
@@ -1413,7 +1416,7 @@ pub async fn run_test_routing(
         });
 
         let resp = client
-            .post(&format!("{}/v1/chat/completions", server_url))
+            .post(format!("{}/v1/chat/completions", server_url))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -1701,7 +1704,7 @@ impl ConcurrentBenchmarkResults {
         let max_ms = sorted[sorted.len() - 1];
         let mean_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
 
-        let median_ms = if sorted.len() % 2 == 0 {
+        let median_ms = if sorted.len().is_multiple_of(2) {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
         } else {
             sorted[sorted.len() / 2]
@@ -1753,6 +1756,7 @@ impl ConcurrentBenchmarkResults {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_test_bench(
     count: u32,
     provider: String,
@@ -1918,6 +1922,7 @@ pub async fn run_test_bench(
 }
 
 /// Run sequential benchmark (original behavior)
+#[allow(clippy::too_many_arguments)]
 async fn run_sequential_benchmark(
     client: &reqwest::Client,
     url: &str,
@@ -1957,8 +1962,8 @@ async fn run_sequential_benchmark(
         }
         completed += 1;
         
-        if completed % 10 == 0 {
-            if let Some(_) = duration {
+        if completed.is_multiple_of(10) {
+            if duration.is_some() {
                 println!(" [{} in {:.1}s]", completed, start_time.elapsed().as_secs_f64());
             } else {
                 println!(" [{}/{}]", completed, count);
@@ -1967,7 +1972,7 @@ async fn run_sequential_benchmark(
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
     
-    if completed % 10 != 0 {
+    if !completed.is_multiple_of(10) {
         println!();
     }
 
@@ -1981,6 +1986,7 @@ async fn run_sequential_benchmark(
 }
 
 /// Run concurrent benchmark
+#[allow(clippy::too_many_arguments)]
 async fn run_concurrent_benchmark(
     client: &reqwest::Client,
     url: &str,

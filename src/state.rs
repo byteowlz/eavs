@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, StateConfig};
 use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
+use crate::oauth::{OAuthPendingAuth, OAuthStore};
 use crate::upstream::{ReqwestUpstream, Upstream};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,10 @@ pub struct AppState {
     pub key_store: Arc<OnceCell<Arc<KeyStore>>>,
     /// Key validator (lazily initialized)
     pub key_validator: Arc<OnceCell<Arc<KeyValidator>>>,
+    /// OAuth credentials store (lazily initialized)
+    pub oauth_store: Arc<OnceCell<Arc<OAuthStore>>>,
+    /// Pending OAuth state storage
+    pub oauth_states: Arc<DashMap<String, OAuthPendingAuth>>,
     /// Rate limiter for keys
     pub rate_limiter: Arc<RateLimiter>,
     /// Pricing table for cost calculation
@@ -400,6 +405,8 @@ impl AppState {
             analysis_tx: tx,
             key_store: Arc::new(OnceCell::new()),
             key_validator: Arc::new(OnceCell::new()),
+            oauth_store: Arc::new(OnceCell::new()),
+            oauth_states: Arc::new(DashMap::new()),
             rate_limiter: Arc::new(RateLimiter::new()),
             pricing: pricing.clone(),
             cost_calculator: Arc::new(OnceCell::new()),
@@ -452,9 +459,35 @@ impl AppState {
         Ok(())
     }
 
+    /// Initialize the OAuth store (call during startup if keys are enabled).
+    pub async fn init_oauth_store(&self) -> Result<(), String> {
+        if !self.config.keys.enabled {
+            return Ok(());
+        }
+
+        let db_path = self.config.keys.resolved_database_path();
+        tracing::info!("Initializing OAuth store at {:?}", db_path);
+
+        let store = OAuthStore::new(&db_path)
+            .await
+            .map_err(|e| format!("Failed to initialize OAuth store: {}", e))?;
+
+        let store = Arc::new(store);
+        self.oauth_store
+            .set(store)
+            .map_err(|_| "OAuth store already initialized")?;
+
+        Ok(())
+    }
+
     /// Get the key store if initialized.
     pub fn get_key_store(&self) -> Option<&Arc<KeyStore>> {
         self.key_store.get()
+    }
+
+    /// Get the OAuth store if initialized.
+    pub fn get_oauth_store(&self) -> Option<&Arc<OAuthStore>> {
+        self.oauth_store.get()
     }
 
     /// Get the key validator if initialized.

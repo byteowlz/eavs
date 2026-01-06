@@ -11,6 +11,7 @@ pub struct AwsCredentials {
     pub session_token: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sign_request_headers(
     headers: &mut HeaderMap,
     method: &Method,

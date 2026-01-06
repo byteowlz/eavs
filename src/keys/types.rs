@@ -37,6 +37,9 @@ pub struct VirtualKey {
     /// Arbitrary metadata
     #[serde(default)]
     pub metadata: serde_json::Value,
+
+    /// Optional OAuth user binding for token-based auth
+    pub oauth_user: Option<String>,
 }
 
 /// Permissions and scopes for a virtual key.
@@ -139,6 +142,9 @@ pub struct CreateKeyRequest {
     /// Arbitrary metadata
     #[serde(default)]
     pub metadata: serde_json::Value,
+
+    /// Optional OAuth user binding
+    pub oauth_user: Option<String>,
 }
 
 /// Response after creating a key (includes the actual key value).
@@ -164,6 +170,9 @@ pub struct CreateKeyResponse {
 
     /// Permissions summary
     pub permissions: KeyPermissions,
+
+    /// Optional OAuth user binding
+    pub oauth_user: Option<String>,
 }
 
 /// Key info for listing (does not include the actual key).
@@ -192,6 +201,9 @@ pub struct KeyInfo {
 
     /// Usage stats
     pub usage: KeyUsage,
+
+    /// Optional OAuth user binding
+    pub oauth_user: Option<String>,
 }
 
 impl VirtualKey {
@@ -209,6 +221,7 @@ impl VirtualKey {
             permissions,
             usage: KeyUsage::default(),
             metadata: serde_json::Value::Null,
+            oauth_user: None,
         }
     }
 
@@ -263,6 +276,7 @@ impl VirtualKey {
             disabled: self.disabled,
             permissions: self.permissions.clone(),
             usage: self.usage.clone(),
+            oauth_user: self.oauth_user.clone(),
         }
     }
 }
