@@ -7,20 +7,11 @@ pub struct PolicyViolation {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct PolicyConfig {
     pub enabled: bool,
     pub rules: Vec<PolicyRule>,
-}
-
-impl Default for PolicyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            rules: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

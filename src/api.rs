@@ -1,4 +1,8 @@
 use crate::keys::{CreateKeyRequest, CreateKeyResponse, KeyInfo, KeyPermissions};
+use crate::oauth::{
+    anthropic, github_copilot, google, openai_codex, pkce, OAuthLoginResponse, OAuthPendingAuth,
+    OAuthProvider,
+};
 use crate::state::{AppState, ConversationMetadata, InjectionPayload};
 use axum::{
     extract::{Path, State},
@@ -11,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 /// Maximum content length for injected messages (1 MB)
 const MAX_INJECTION_CONTENT_LENGTH: usize = 1024 * 1024;
@@ -299,6 +304,7 @@ pub async fn create_key_handler(
         expires_at: payload.expires_at,
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
+        oauth_user: payload.oauth_user,
     };
 
     let response = store.create_key(request).await.map_err(|e| {
@@ -318,6 +324,7 @@ pub struct CreateKeyApiRequest {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub permissions: Option<KeyPermissions>,
     pub metadata: Option<serde_json::Value>,
+    pub oauth_user: Option<String>,
 }
 
 /// List all virtual API keys.
@@ -505,6 +512,7 @@ pub async fn provision_key_handler(
         expires_at: None,
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
+        oauth_user: payload.oauth_user,
     };
 
     let response = store.create_key(request).await.map_err(|e| {
@@ -522,6 +530,7 @@ pub async fn provision_key_handler(
 pub struct ProvisionKeyRequest {
     pub name: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub oauth_user: Option<String>,
 }
 
 /// Key stats response.
@@ -589,6 +598,468 @@ pub async fn update_pricing_handler(
 pub struct PricingUpdateResponse {
     pub models_updated: usize,
     pub total_models: usize,
+}
+
+// ============================================================================
+// OAuth Endpoints
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct OAuthApiError {
+    pub error: String,
+}
+
+fn oauth_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<OAuthApiError>) {
+    (
+        status,
+        Json(OAuthApiError {
+            error: message.into(),
+        }),
+    )
+}
+
+fn check_oauth_available(state: &AppState) -> Result<(), (StatusCode, Json<OAuthApiError>)> {
+    if !state.config.keys.enabled {
+        return Err(oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth storage requires keys to be enabled",
+        ));
+    }
+    if state.get_oauth_store().is_none() {
+        return Err(oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth store not initialized",
+        ));
+    }
+    Ok(())
+}
+
+fn provider_requires_pkce(provider: OAuthProvider) -> bool {
+    matches!(
+        provider,
+        OAuthProvider::OpenAICodex
+            | OAuthProvider::GoogleGeminiCli
+            | OAuthProvider::GoogleAntigravity
+    )
+}
+
+fn resolve_redirect_uri(
+    request_uri: Option<String>,
+) -> Result<String, (StatusCode, Json<OAuthApiError>)> {
+    if let Some(uri) = request_uri {
+        return Ok(uri);
+    }
+    std::env::var("EAVS_OAUTH_REDIRECT_URI")
+        .map_err(|_| oauth_error(StatusCode::BAD_REQUEST, "Missing redirect_uri"))
+}
+
+#[derive(Deserialize)]
+pub struct OAuthLoginRequest {
+    pub user_id: String,
+    pub redirect_uri: Option<String>,
+    pub extra_data: Option<serde_json::Value>,
+}
+
+pub async fn oauth_login_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(payload): Json<OAuthLoginRequest>,
+) -> Result<Json<OAuthLoginResponse>, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+
+    let provider = OAuthProvider::from_str(&provider)
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
+
+    let client = reqwest::Client::new();
+    let state_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    let response = match provider {
+        OAuthProvider::GithubCopilot => {
+            let config = github_copilot::config_from_env()
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            let device = github_copilot::start_device_flow(&client, &config)
+                .await
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            let instructions = format!(
+                "Open {} and enter code {}",
+                device.verification_uri, device.user_code
+            );
+            OAuthLoginResponse {
+                auth_url: None,
+                instructions,
+                verification_uri: Some(device.verification_uri),
+                user_code: Some(device.user_code),
+                device_code: Some(device.device_code),
+                interval: device.interval,
+                expires_in: Some(device.expires_in),
+                state: None,
+            }
+        }
+        OAuthProvider::Anthropic => {
+            let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
+            let config = anthropic::config_from_env(redirect_uri.clone())
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            let auth_url = anthropic::build_authorize_url(&config, &state_id);
+            state.oauth_states.insert(
+                state_id.clone(),
+                OAuthPendingAuth {
+                    user_id: payload.user_id.clone(),
+                    provider,
+                    code_verifier: None,
+                    redirect_uri: Some(redirect_uri),
+                    extra_data: payload.extra_data.clone(),
+                    created_at: now,
+                },
+            );
+            OAuthLoginResponse {
+                auth_url: Some(auth_url),
+                instructions: "Complete the login in your browser and return the code.".to_string(),
+                verification_uri: None,
+                user_code: None,
+                device_code: None,
+                interval: None,
+                expires_in: None,
+                state: Some(state_id),
+            }
+        }
+        OAuthProvider::OpenAICodex => {
+            let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
+            let config = openai_codex::config_from_env(redirect_uri.clone())
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            let (code_verifier, _) = pkce::generate_pkce_pair();
+            let auth_url = openai_codex::build_authorize_url(&config, &state_id, &code_verifier)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            state.oauth_states.insert(
+                state_id.clone(),
+                OAuthPendingAuth {
+                    user_id: payload.user_id.clone(),
+                    provider,
+                    code_verifier: Some(code_verifier),
+                    redirect_uri: Some(redirect_uri),
+                    extra_data: payload.extra_data.clone(),
+                    created_at: now,
+                },
+            );
+            OAuthLoginResponse {
+                auth_url: Some(auth_url),
+                instructions: "Complete the login in your browser and return the code.".to_string(),
+                verification_uri: None,
+                user_code: None,
+                device_code: None,
+                interval: None,
+                expires_in: None,
+                state: Some(state_id),
+            }
+        }
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
+            let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
+            let config = google::config_from_env(provider, redirect_uri.clone())
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            let (code_verifier, _) = pkce::generate_pkce_pair();
+            let auth_url = google::build_authorize_url(&config, &state_id, &code_verifier)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            state.oauth_states.insert(
+                state_id.clone(),
+                OAuthPendingAuth {
+                    user_id: payload.user_id.clone(),
+                    provider,
+                    code_verifier: Some(code_verifier),
+                    redirect_uri: Some(redirect_uri),
+                    extra_data: payload.extra_data.clone(),
+                    created_at: now,
+                },
+            );
+            OAuthLoginResponse {
+                auth_url: Some(auth_url),
+                instructions: "Complete the login in your browser and return the code.".to_string(),
+                verification_uri: None,
+                user_code: None,
+                device_code: None,
+                interval: None,
+                expires_in: None,
+                state: Some(state_id),
+            }
+        }
+    };
+
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+pub struct OAuthCallbackRequest {
+    pub code: String,
+    pub state: String,
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct OAuthStatusResponse {
+    pub status: String,
+    pub provider: String,
+    pub user_id: String,
+}
+
+pub async fn oauth_callback_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<OAuthCallbackRequest>,
+) -> Result<Json<OAuthStatusResponse>, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+
+    let pending = state
+        .oauth_states
+        .remove(&payload.state)
+        .map(|(_, v)| v)
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown or expired state"))?;
+
+    let redirect_uri = payload.redirect_uri.or(pending.redirect_uri);
+    let client = reqwest::Client::new();
+    let store = state.get_oauth_store().unwrap();
+
+    let credentials = match pending.provider {
+        OAuthProvider::Anthropic => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let config = anthropic::config_from_env(redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            anthropic::exchange_code(&client, &config, &pending.user_id, &payload.code)
+                .await
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::OpenAICodex => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let code_verifier = pending
+                .code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
+            let config = openai_codex::config_from_env(redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            openai_codex::exchange_code(
+                &client,
+                &config,
+                &pending.user_id,
+                &payload.code,
+                &code_verifier,
+            )
+            .await
+            .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let code_verifier = pending
+                .code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
+            let config = google::config_from_env(pending.provider, redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            google::exchange_code(
+                &client,
+                &config,
+                &pending.user_id,
+                &payload.code,
+                &code_verifier,
+            )
+            .await
+            .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::GithubCopilot => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "GitHub Copilot uses the device code flow",
+            ));
+        }
+    };
+
+    store
+        .upsert_credentials(&credentials)
+        .await
+        .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(OAuthStatusResponse {
+        status: "stored".to_string(),
+        provider: pending.provider.as_str().to_string(),
+        user_id: pending.user_id,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct OAuthCodeRequest {
+    pub user_id: String,
+    pub code: String,
+    pub state: Option<String>,
+    pub redirect_uri: Option<String>,
+}
+
+pub async fn oauth_code_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(payload): Json<OAuthCodeRequest>,
+) -> Result<Json<OAuthStatusResponse>, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+
+    let provider = OAuthProvider::from_str(&provider)
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
+
+    let mut user_id = payload.user_id.clone();
+    let mut code_verifier = None;
+    let mut redirect_uri = payload.redirect_uri;
+
+    if let Some(state_id) = payload.state.as_ref() {
+        if let Some((_, pending)) = state.oauth_states.remove(state_id) {
+            user_id = pending.user_id;
+            code_verifier = pending.code_verifier;
+            if redirect_uri.is_none() {
+                redirect_uri = pending.redirect_uri;
+            }
+        }
+    }
+
+    if provider_requires_pkce(provider) && code_verifier.is_none() {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "Missing PKCE verifier; use /auth/login to generate state",
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    let store = state.get_oauth_store().unwrap();
+
+    let credentials = match provider {
+        OAuthProvider::Anthropic => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let config = anthropic::config_from_env(redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            anthropic::exchange_code(&client, &config, &user_id, &payload.code)
+                .await
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::OpenAICodex => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let verifier = code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
+            let config = openai_codex::config_from_env(redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            openai_codex::exchange_code(&client, &config, &user_id, &payload.code, &verifier)
+                .await
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
+            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let verifier = code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
+            let config = google::config_from_env(provider, redirect_uri)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+            google::exchange_code(&client, &config, &user_id, &payload.code, &verifier)
+                .await
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+        }
+        OAuthProvider::GithubCopilot => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "GitHub Copilot uses the device code flow",
+            ));
+        }
+    };
+
+    store
+        .upsert_credentials(&credentials)
+        .await
+        .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(OAuthStatusResponse {
+        status: "stored".to_string(),
+        provider: provider.as_str().to_string(),
+        user_id,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct OAuthPollRequest {
+    pub user_id: String,
+    pub device_code: String,
+}
+
+#[derive(Serialize)]
+pub struct OAuthPollResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<u64>,
+}
+
+pub async fn oauth_poll_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(payload): Json<OAuthPollRequest>,
+) -> Result<Json<OAuthPollResponse>, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+
+    let provider = OAuthProvider::from_str(&provider)
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
+
+    if provider != OAuthProvider::GithubCopilot {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "Polling is only supported for GitHub Copilot",
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    let config = github_copilot::config_from_env()
+        .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+
+    match github_copilot::poll_device_flow(
+        &client,
+        &config,
+        &payload.user_id,
+        &payload.device_code,
+    )
+    .await
+    .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+    {
+        github_copilot::DevicePollResult::Pending { interval } => Ok(Json(OAuthPollResponse {
+            status: "pending".to_string(),
+            interval,
+        })),
+        github_copilot::DevicePollResult::Authorized(credentials) => {
+            let store = state.get_oauth_store().unwrap();
+            store
+                .upsert_credentials(&credentials)
+                .await
+                .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(Json(OAuthPollResponse {
+                status: "stored".to_string(),
+                interval: None,
+            }))
+        }
+    }
+}
+
+pub async fn oauth_status_handler(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Vec<String>>, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+    let store = state.get_oauth_store().unwrap();
+    let providers = store
+        .list_providers(&user_id)
+        .await
+        .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(providers))
+}
+
+pub async fn oauth_delete_handler(
+    State(state): State<AppState>,
+    Path((user_id, provider)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<OAuthApiError>)> {
+    check_oauth_available(&state)?;
+
+    let provider = OAuthProvider::from_str(&provider)
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
+
+    let store = state.get_oauth_store().unwrap();
+    let deleted = store
+        .delete_credentials(&user_id, provider)
+        .await
+        .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(if deleted { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
 }
 
 #[cfg(test)]

@@ -1,4 +1,8 @@
 use crate::keys::{is_virtual_key, ValidatedKey};
+use crate::oauth::{
+    anthropic as oauth_anthropic, google as oauth_google, openai_codex as oauth_openai,
+    OAuthProvider as OAuthProviderKind,
+};
 use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
 use crate::provider::{detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType};
 use crate::state::{AnalysisEvent, AppState, Injection};
@@ -132,9 +136,8 @@ async fn proxy_handler_inner(
     
     // Initial provider from path/header/host (model-based comes later)
     let pre_body_provider = path_provider
-        .as_ref()
-        .map(|s| s.as_str())
-        .or_else(|| header_provider.as_deref())
+        .as_deref()
+        .or(header_provider.as_deref())
         .or_else(|| {
             // Try to detect provider from X-Original-Host (mitmproxy capture mode)
             original_host.as_deref()
@@ -1524,6 +1527,8 @@ async fn ws_proxy_handler_inner(
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
+    let mut validated_key: Option<ValidatedKey> = None;
+
     if let Some(ref key) = auth_header {
         if is_virtual_key(key) {
             if let Some(validator) = state.get_key_validator() {
@@ -1533,7 +1538,9 @@ async fn ws_proxy_handler_inner(
                     .validate(key, "websocket", &provider_name, Some(estimated_tokens))
                     .await
                 {
-                    Ok(_) => {} // Validation passed
+                    Ok(validated) => {
+                        validated_key = Some(validated);
+                    }
                     Err(e) => {
                         return (
                             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
@@ -1607,7 +1614,22 @@ async fn ws_proxy_handler_inner(
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
-    let api_key = provider_config.resolved_api_key();
+    let mut api_key = provider_config.resolved_api_key();
+
+    if let Some(ref validated) = validated_key {
+        if let Some(oauth_user) = validated.oauth_user.as_deref() {
+            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+                Ok(token) => token,
+                Err(msg) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
+                    )
+                        .into_response();
+                }
+            };
+        }
+    }
 
     let upstream_url = match build_ws_upstream_url(
         &provider_config.resolved_base_url(),
@@ -1895,6 +1917,87 @@ fn apply_http_auth_headers(headers: &mut HeaderMap, provider_type: ProviderType,
 
 fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
     apply_extra_headers(headers, provider_type);
+}
+
+fn oauth_default_redirect_uri() -> String {
+    std::env::var("EAVS_OAUTH_REDIRECT_URI").unwrap_or_else(|_| "http://localhost".to_string())
+}
+
+async fn resolve_oauth_access_token(
+    state: &AppState,
+    provider_name: &str,
+    oauth_user: &str,
+) -> Result<String, String> {
+    let provider = OAuthProviderKind::from_str(provider_name)
+        .ok_or_else(|| "OAuth provider not supported for this route".to_string())?;
+
+    let store = state
+        .get_oauth_store()
+        .ok_or_else(|| "OAuth store not initialized".to_string())?;
+
+    let mut credentials = store
+        .get_credentials(oauth_user, provider)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "OAuth credentials not found".to_string())?;
+
+    if credentials.is_expired(60) {
+        if credentials.refresh_token.is_empty() {
+            return Err("OAuth token expired and no refresh token available".to_string());
+        }
+
+        let client = reqwest::Client::new();
+        let redirect_uri = oauth_default_redirect_uri();
+
+        credentials = match provider {
+            OAuthProviderKind::Anthropic => {
+                let config = oauth_anthropic::config_from_env(redirect_uri)
+                    .map_err(|e| e.to_string())?;
+                oauth_anthropic::refresh_token(
+                    &client,
+                    &config,
+                    oauth_user,
+                    &credentials.refresh_token,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            OAuthProviderKind::OpenAICodex => {
+                let config = oauth_openai::config_from_env(redirect_uri)
+                    .map_err(|e| e.to_string())?;
+                oauth_openai::refresh_token(
+                    &client,
+                    &config,
+                    oauth_user,
+                    &credentials.refresh_token,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            OAuthProviderKind::GoogleGeminiCli | OAuthProviderKind::GoogleAntigravity => {
+                let config = oauth_google::config_from_env(provider, redirect_uri)
+                    .map_err(|e| e.to_string())?;
+                oauth_google::refresh_token(
+                    &client,
+                    &config,
+                    oauth_user,
+                    &credentials.refresh_token,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            OAuthProviderKind::GithubCopilot => {
+                return Err("GitHub Copilot OAuth refresh not supported".to_string());
+            }
+        };
+
+        store
+            .upsert_credentials(&credentials)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(credentials.access_token)
 }
 
 async fn resolve_bedrock_aws_credentials(

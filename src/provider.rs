@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 /// Supported LLM provider types with their specific authentication and API patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ProviderType {
     #[default]
     OpenAI,

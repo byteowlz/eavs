@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct AwsCredentialsWithExpiration {
     pub creds: AwsCredentials,
+    #[allow(dead_code)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

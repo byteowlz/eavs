@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod keys;
 mod logging;
+mod oauth;
 mod policy;
 mod provider;
 mod plugins;
@@ -121,6 +122,9 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             tracing::error!("Failed to initialize key store: {}", e);
             // Continue without keys - they're optional
         }
+        if let Err(e) = state.init_oauth_store().await {
+            tracing::error!("Failed to initialize OAuth store: {}", e);
+        }
     }
 
     // Start logging task
@@ -164,6 +168,13 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/keys/:key_hash/usage", get(api::key_usage_handler))
         // Admin API - Pricing
         .route("/admin/pricing/update", post(api::update_pricing_handler))
+        // OAuth API
+        .route("/auth/login/:provider", post(api::oauth_login_handler))
+        .route("/auth/callback", post(api::oauth_callback_handler))
+        .route("/auth/poll/:provider", post(api::oauth_poll_handler))
+        .route("/auth/code/:provider", post(api::oauth_code_handler))
+        .route("/auth/status/:user_id", get(api::oauth_status_handler))
+        .route("/auth/:user_id/:provider", delete(api::oauth_delete_handler))
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
         // WebSocket proxy (e.g. OpenAI Realtime) - default route
