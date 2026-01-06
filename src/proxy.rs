@@ -390,9 +390,10 @@ async fn proxy_handler_inner(
     // Use real API key from provider config (virtual key was just for auth)
     // But if the virtual key has oauth_user, use OAuth token instead
     let mut api_key = provider_config.resolved_api_key();
-    let provider_type = provider_config.provider_type();
+    let mut provider_type = provider_config.provider_type();
 
     let mut is_anthropic_oauth = false;
+    let mut is_openai_codex_oauth = false;
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
             tracing::info!("OAuth user: {}, provider: {}", oauth_user, provider_name);
@@ -403,6 +404,13 @@ async fn proxy_handler_inner(
                     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&token) {
                         is_anthropic_oauth = true;
                         tracing::info!("Detected Anthropic OAuth token, will inject Claude Code identity");
+                    }
+                    // Check if this is an OpenAI Codex OAuth token
+                    if is_openai_codex_oauth_token(&token) {
+                        is_openai_codex_oauth = true;
+                        // Override provider type to use Codex (ChatGPT backend + Responses API)
+                        provider_type = ProviderType::OpenAICodex;
+                        tracing::info!("Detected OpenAI Codex OAuth token, switching to OpenAICodex provider");
                     }
                     token
                 }
@@ -466,9 +474,17 @@ async fn proxy_handler_inner(
         || api_path.starts_with("/v1/models/")
         || api_path == "/v1/embeddings";
     
+    // Check if client is sending Responses API format directly
+    // This allows clients to use the Responses API natively with EAVS just handling OAuth
+    let is_responses_api_request = api_path == "/v1/responses" 
+        || api_path == "/responses"
+        || api_path == "/codex/responses";
+    
     // Check if we need format translation
-    // Skip transformation for pass-through endpoints
-    let needs_transform = provider_type.needs_transform() && !is_passthrough_endpoint;
+    // Skip transformation for pass-through endpoints and native Responses API requests
+    let needs_transform = provider_type.needs_transform() 
+        && !is_passthrough_endpoint 
+        && !is_responses_api_request;
     
     // Get the transformer for this provider
     let transformer = ProviderTransformer::for_provider(provider_type);
@@ -581,7 +597,12 @@ async fn proxy_handler_inner(
     };
 
     // Construct URL with transformer's endpoint path if transforming
-    let base = provider_config.resolved_base_url();
+    // Override base URL for OpenAI Codex OAuth (uses ChatGPT backend)
+    let base = if is_openai_codex_oauth {
+        "https://chatgpt.com/backend-api".to_string()
+    } else {
+        provider_config.resolved_base_url()
+    };
     let base = base.trim_end_matches('/');
     
     let path = if needs_transform {
@@ -1880,6 +1901,57 @@ fn is_anthropic_oauth_token(api_key: &str) -> bool {
     api_key.starts_with("sk-ant-oat")
 }
 
+/// Check if this is an OpenAI Codex OAuth token (JWT format)
+/// OpenAI OAuth tokens are JWTs that start with "eyJ" (base64 encoded JSON header)
+fn is_openai_codex_oauth_token(api_key: &str) -> bool {
+    api_key.starts_with("eyJ") && api_key.contains('.')
+}
+
+/// Extract account ID from OpenAI OAuth JWT token.
+/// The account ID is stored in the JWT claims under "https://api.openai.com/auth"
+fn extract_openai_account_id(token: &str) -> Option<String> {
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    
+    // Decode the payload (second part)
+    let payload = parts[1];
+    // JWT uses base64url encoding, need to handle padding
+    let padded = match payload.len() % 4 {
+        2 => format!("{}==", payload),
+        3 => format!("{}=", payload),
+        _ => payload.to_string(),
+    };
+    
+    // Replace URL-safe chars with standard base64
+    let standard_b64 = padded.replace('-', "+").replace('_', "/");
+    
+    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &standard_b64) {
+        Ok(bytes) => bytes,
+        Err(_) => return None,
+    };
+    
+    let json: serde_json::Value = match serde_json::from_slice(&decoded) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    
+    // Look for account ID in the standard OpenAI claim path
+    json.get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("org_id").or_else(|| auth.get("account_id")))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            // Fallback: try direct org_id or account_id
+            json.get("org_id")
+                .or_else(|| json.get("account_id"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+}
+
 /// Anthropic OAuth tokens are scoped to "Claude Code" - requests must identify as Claude Code.
 /// This injects the required system prompt prefix for the token to work.
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -1913,6 +1985,34 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         headers.insert_header(
             http::header::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
             http::HeaderValue::from_static("true"),
+        );
+        return;
+    }
+
+    // Special handling for OpenAI Codex OAuth tokens - they need additional headers
+    if provider_type == ProviderType::OpenAICodex && is_openai_codex_oauth_token(api_key) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+            headers.insert_header(http::header::AUTHORIZATION, value);
+        }
+        
+        // Extract and set account ID from JWT
+        if let Some(account_id) = extract_openai_account_id(api_key) {
+            if let Ok(value) = http::HeaderValue::from_str(&account_id) {
+                headers.insert_header(
+                    http::header::HeaderName::from_static("chatgpt-account-id"),
+                    value,
+                );
+            }
+        }
+        
+        // Add required Codex headers
+        headers.insert_header(
+            http::header::HeaderName::from_static("openai-beta"),
+            http::HeaderValue::from_static("responses=experimental"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("originator"),
+            http::HeaderValue::from_static("codex_cli_rs"),
         );
         return;
     }

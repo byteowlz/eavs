@@ -12,6 +12,7 @@ pub mod google;
 pub mod messages;
 pub mod mistral;
 pub mod openai;
+pub mod openai_responses;
 
 use crate::provider::ProviderType;
 use crate::types::{Context, StreamEvent, StreamState};
@@ -23,6 +24,7 @@ pub use bedrock::BedrockTransformer;
 pub use google::GoogleTransformer;
 pub use mistral::MistralTransformer;
 pub use openai::OpenAITransformer;
+pub use openai_responses::OpenAIResponsesTransformer;
 
 /// Trait for transforming requests to a provider's format.
 pub trait RequestTransformer {
@@ -90,6 +92,7 @@ impl RequestResponseTransformer for GoogleTransformer {}
 impl RequestResponseTransformer for AzureTransformer {}
 impl RequestResponseTransformer for MistralTransformer {}
 impl RequestResponseTransformer for BedrockTransformer {}
+impl RequestResponseTransformer for OpenAIResponsesTransformer {}
 
 impl ProviderTransformer {
     /// Create a transformer for the given provider type.
@@ -107,6 +110,7 @@ impl ProviderTransformer {
             ProviderType::Azure => Box::new(AzureTransformer::new()),
             ProviderType::Mistral => Box::new(MistralTransformer::new()),
             ProviderType::Bedrock => Box::new(BedrockTransformer::new()),
+            ProviderType::OpenAICodex => Box::new(OpenAIResponsesTransformer::new()),
         };
         Self { inner }
     }
