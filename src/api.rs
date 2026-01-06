@@ -637,7 +637,8 @@ fn check_oauth_available(state: &AppState) -> Result<(), (StatusCode, Json<OAuth
 fn provider_requires_pkce(provider: OAuthProvider) -> bool {
     matches!(
         provider,
-        OAuthProvider::OpenAICodex
+        OAuthProvider::Anthropic
+            | OAuthProvider::OpenAICodex
             | OAuthProvider::GoogleGeminiCli
             | OAuthProvider::GoogleAntigravity
     )
@@ -694,19 +695,22 @@ pub async fn oauth_login_handler(
                 interval: device.interval,
                 expires_in: Some(device.expires_in),
                 state: None,
+                code_verifier: None,
             }
         }
         OAuthProvider::Anthropic => {
             let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
             let config = anthropic::config_from_env(redirect_uri.clone())
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            let auth_url = anthropic::build_authorize_url(&config, &state_id);
+            let (code_verifier, _) = pkce::generate_pkce_pair();
+            let auth_url = anthropic::build_authorize_url(&config, &state_id, &code_verifier)
+                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
             state.oauth_states.insert(
                 state_id.clone(),
                 OAuthPendingAuth {
                     user_id: payload.user_id.clone(),
                     provider,
-                    code_verifier: None,
+                    code_verifier: Some(code_verifier.clone()),
                     redirect_uri: Some(redirect_uri),
                     extra_data: payload.extra_data.clone(),
                     created_at: now,
@@ -721,6 +725,7 @@ pub async fn oauth_login_handler(
                 interval: None,
                 expires_in: None,
                 state: Some(state_id),
+                code_verifier: Some(code_verifier),
             }
         }
         OAuthProvider::OpenAICodex => {
@@ -750,6 +755,7 @@ pub async fn oauth_login_handler(
                 interval: None,
                 expires_in: None,
                 state: Some(state_id),
+                code_verifier: None,
             }
         }
         OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
@@ -779,6 +785,7 @@ pub async fn oauth_login_handler(
                 interval: None,
                 expires_in: None,
                 state: Some(state_id),
+                code_verifier: None,
             }
         }
     };
@@ -819,9 +826,19 @@ pub async fn oauth_callback_handler(
     let credentials = match pending.provider {
         OAuthProvider::Anthropic => {
             let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let code_verifier = pending
+                .code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
             let config = anthropic::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            anthropic::exchange_code(&client, &config, &pending.user_id, &payload.code)
+            anthropic::exchange_code(
+                &client,
+                &config,
+                &pending.user_id,
+                &payload.code,
+                &payload.state,
+                &code_verifier,
+            )
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
@@ -924,9 +941,13 @@ pub async fn oauth_code_handler(
     let credentials = match provider {
         OAuthProvider::Anthropic => {
             let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let verifier = code_verifier
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
+            let state_str = payload.state.as_deref()
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing state"))?;
             let config = anthropic::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            anthropic::exchange_code(&client, &config, &user_id, &payload.code)
+            anthropic::exchange_code(&client, &config, &user_id, &payload.code, state_str, &verifier)
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
