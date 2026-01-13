@@ -469,6 +469,29 @@ impl KeyStore {
         }
     }
 
+    /// Update OAuth user binding for a key.
+    pub async fn update_oauth_user(
+        &self,
+        key_hash: &str,
+        oauth_user: Option<String>,
+    ) -> Result<bool, KeyStoreError> {
+        let result = sqlx::query("UPDATE virtual_keys SET oauth_user = ? WHERE key_hash = ?")
+            .bind(&oauth_user)
+            .bind(key_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        if result.rows_affected() > 0 {
+            if let Some(mut key) = self.cache.get_mut(key_hash) {
+                key.oauth_user = oauth_user;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Gracefully shutdown the key store, flushing any pending writes.
     #[allow(dead_code)]
     pub fn shutdown(&self) {

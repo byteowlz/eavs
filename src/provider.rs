@@ -19,6 +19,8 @@ pub enum ProviderType {
     OpenAICompatible,
     /// OpenAI Codex CLI (ChatGPT backend via OAuth) - uses Responses API
     OpenAICodex,
+    /// OpenAI Responses API (api.openai.com/v1/responses)
+    OpenAIResponses,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -67,6 +69,7 @@ impl ProviderType {
                 Self::OpenAICompatible
             }
             "openai-codex" | "codex" | "chatgpt" => Self::OpenAICodex,
+            "openai-responses" | "responses" => Self::OpenAIResponses,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => Self::OpenAI, // Default fallback
         }
@@ -147,6 +150,12 @@ impl ProviderType {
                 env_key_name: None, // Uses OAuth
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::OpenAIResponses => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.openai.com/v1"),
+                env_key_name: Some("OPENAI_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -180,12 +189,15 @@ impl ProviderType {
     /// Check if this provider requires request transformation.
     #[allow(dead_code)]
     pub fn needs_transform(&self) -> bool {
-        matches!(self, Self::Anthropic | Self::Google | Self::Bedrock | Self::OpenAICodex)
+        matches!(
+            self,
+            Self::Anthropic | Self::Google | Self::Bedrock | Self::OpenAICodex | Self::OpenAIResponses
+        )
     }
     
     /// Check if this provider uses the Responses API format.
     pub fn uses_responses_api(&self) -> bool {
-        matches!(self, Self::OpenAICodex)
+        matches!(self, Self::OpenAICodex | Self::OpenAIResponses)
     }
 
     /// Check if this provider supports the /v1/models endpoint natively.
@@ -201,6 +213,7 @@ impl ProviderType {
                 | Self::XAI
                 | Self::OpenRouter
                 | Self::OpenAICompatible
+                | Self::OpenAIResponses
         )
     }
 
@@ -552,6 +565,18 @@ mod tests {
         assert_eq!(ProviderType::from_str("xai"), ProviderType::XAI);
         assert_eq!(ProviderType::from_str("grok"), ProviderType::XAI);
         assert_eq!(ProviderType::from_str("openrouter"), ProviderType::OpenRouter);
+        assert_eq!(
+            ProviderType::from_str("openai-responses"),
+            ProviderType::OpenAIResponses
+        );
+        assert_eq!(
+            ProviderType::from_str("responses"),
+            ProviderType::OpenAIResponses
+        );
+        assert_eq!(
+            ProviderType::from_str("openai-codex"),
+            ProviderType::OpenAICodex
+        );
         assert_eq!(
             ProviderType::from_str("ollama"),
             ProviderType::OpenAICompatible

@@ -146,6 +146,12 @@ async fn proxy_handler_inner(
 
     // 2. Read and modify body if needed (Pre-request Injection)
     let (parts, body) = req.into_parts();
+    let include_claude_code_beta = parts
+        .headers
+        .get("anthropic-beta")
+        .and_then(|h| h.to_str().ok())
+        .map(|v| v.split(',').any(|p| p.trim() == "claude-code-20250219"))
+        .unwrap_or(false);
     
     // Use configurable max body size to prevent DoS attacks
     let max_body_size = if state.config.server.max_body_size > 0 {
@@ -196,9 +202,16 @@ async fn proxy_handler_inner(
     // 3. X-Original-Host header (mitmproxy capture mode)
     // 4. Auto-detect from model name
     // 5. Falls back to "default"
+    let runtime_default_provider = if pre_body_provider.is_none() {
+        crate::runtime_state::load_runtime_state().and_then(|state| state.default_provider)
+    } else {
+        None
+    };
+
     let model_detected_provider = detect_provider_from_model(&model);
-    
+
     let provider_name_requested = pre_body_provider
+        .or(runtime_default_provider.as_deref())
         .or(model_detected_provider)
         .unwrap_or("default")
         .to_string();
@@ -220,6 +233,11 @@ async fn proxy_handler_inner(
             detected_provider = %provider_name_requested,
             "Request intercepted via mitmproxy capture mode"
         );
+    } else if runtime_default_provider.is_some() {
+        tracing::debug!(
+            provider = %provider_name_requested,
+            "Provider selected via runtime default"
+        );
     } else if model_detected_provider.is_some() {
         tracing::debug!(
             model = %model,
@@ -232,7 +250,8 @@ async fn proxy_handler_inner(
     //
     // If the provider was auto-detected from the model but isn't configured, fall back to
     // the configured "default" provider (backwards compatible with older configs).
-    let provider_selected_by_model = pre_body_provider.is_none() && model_detected_provider.is_some();
+    let provider_selected_by_model =
+        pre_body_provider.is_none() && runtime_default_provider.is_none() && model_detected_provider.is_some();
     let provider_lookup = state
         .config
         .resolve_provider(&provider_name_requested)
@@ -543,7 +562,7 @@ async fn proxy_handler_inner(
         transformed_endpoint_path = Some(transformer.endpoint_path(&context));
         
         // Transform to target provider format
-        let transformed = transformer.transform_request(&context).map_err(|e| {
+        let mut transformed = transformer.transform_request(&context).map_err(|e| {
             let status = match e {
                 TransformError::InvalidJson(_)
                 | TransformError::MissingField(_)
@@ -558,6 +577,10 @@ async fn proxy_handler_inner(
             tracing::error!("Failed to transform request: {}", e);
             (status, Json(ProxyError::new(format!("{}", e), error_type))).into_response()
         })?;
+
+        if is_anthropic_oauth {
+            prefix_anthropic_oauth_tools(&mut transformed);
+        }
 
         beta_scan_body = Some(transformed.clone());
         
@@ -670,6 +693,17 @@ async fn proxy_handler_inner(
         url.push_str(&query_string);
     }
 
+    if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&api_key) {
+        if let Ok(mut parsed) = url::Url::parse(&url) {
+            if parsed.path() == "/v1/messages"
+                && !parsed.query_pairs().any(|(k, _)| k == "beta")
+            {
+                parsed.query_pairs_mut().append_pair("beta", "true");
+                url = parsed.to_string();
+            }
+        }
+    }
+
     let request_body = Bytes::from(request_body);
 
     // Build upstream request
@@ -715,6 +749,17 @@ async fn proxy_handler_inner(
             &mut upstream_headers,
             http::header::HeaderName::from_static("anthropic-beta"),
             betas,
+        );
+    }
+
+    if provider_type == ProviderType::Anthropic
+        && is_anthropic_oauth_token(&api_key)
+        && include_claude_code_beta
+    {
+        upsert_csv_header(
+            &mut upstream_headers,
+            http::header::HeaderName::from_static("anthropic-beta"),
+            vec!["claude-code-20250219".to_string()],
         );
     }
 
@@ -1965,6 +2010,34 @@ fn inject_claude_code_identity_into_context(context: &mut crate::types::Context)
     context.system_prompt = Some(new_system);
 }
 
+fn prefix_anthropic_oauth_tools(body: &mut Value) {
+    const TOOL_PREFIX: &str = "oc_";
+
+    if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+        for tool in tools {
+            if let Some(name) = tool.get_mut("name").and_then(|v| v.as_str()) {
+                if !name.starts_with(TOOL_PREFIX) {
+                    *tool
+                        .get_mut("name")
+                        .unwrap() = Value::String(format!("{}{}", TOOL_PREFIX, name));
+                }
+            }
+        }
+    }
+
+    if let Some(choice) = body.get_mut("tool_choice") {
+        if let Some(obj) = choice.as_object_mut() {
+            if let Some(name_value) = obj.get_mut("name") {
+                if let Some(name) = name_value.as_str() {
+                    if !name.starts_with(TOOL_PREFIX) {
+                        *name_value = Value::String(format!("{}{}", TOOL_PREFIX, name));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Apply authentication headers to any header container.
 /// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
 fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType, api_key: &str) {
@@ -1980,11 +2053,15 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         // Add required OAuth beta header
         headers.insert_header(
             http::header::HeaderName::from_static("anthropic-beta"),
-            http::HeaderValue::from_static("oauth-2025-04-20"),
+            http::HeaderValue::from_static("oauth-2025-04-20, interleaved-thinking-2025-05-14"),
         );
         headers.insert_header(
             http::header::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
             http::HeaderValue::from_static("true"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("user-agent"),
+            http::HeaderValue::from_static("claude-cli/2.1.2 (external, cli)"),
         );
         return;
     }
@@ -2115,7 +2192,10 @@ async fn resolve_oauth_access_token(
         }
 
         let client = reqwest::Client::new();
-        let redirect_uri = oauth_default_redirect_uri();
+        let redirect_uri = std::env::var("EAVS_OAUTH_REDIRECT_URI")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(oauth_anthropic::default_redirect_uri);
 
         credentials = match provider {
             OAuthProviderKind::Anthropic => {

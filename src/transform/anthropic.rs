@@ -209,7 +209,7 @@ impl ResponseTransformer for AnthropicTransformer {
                 "tool_use" => {
                     let tool_call = ToolCall::new(
                         content.id.as_deref().unwrap_or_default(),
-                        content.name.as_deref().unwrap_or_default(),
+                        &strip_oauth_tool_prefix(content.name.as_deref().unwrap_or_default()),
                         content.input.clone().unwrap_or(Value::Null),
                     );
                     message.content.push(ContentBlock::ToolCall(tool_call.clone()));
@@ -604,7 +604,7 @@ fn parse_anthropic_assistant_message(msg: &Value) -> Result<AssistantMessage, Tr
                     }
                     "tool_use" => {
                         let id = part["id"].as_str().unwrap_or_default();
-                        let name = part["name"].as_str().unwrap_or_default();
+                        let name = strip_oauth_tool_prefix(part["name"].as_str().unwrap_or_default());
                         let input = part["input"].clone();
                         content.push(ContentBlock::ToolCall(ToolCall::new(id, name, input)));
                     }
@@ -631,6 +631,10 @@ fn parse_anthropic_tool(tool: &Value) -> Result<Tool, TransformError> {
     let parameters = tool["input_schema"].clone();
 
     Ok(Tool::new(name, description, parameters))
+}
+
+fn strip_oauth_tool_prefix(name: &str) -> String {
+    name.strip_prefix("oc_").unwrap_or(name).to_string()
 }
 
 fn tool_to_anthropic(tool: &Tool) -> Value {
@@ -965,7 +969,9 @@ fn process_anthropic_event(
                 "tool_use" => {
                     state.content_blocks[index].block_type = ContentBlockType::ToolCall;
                     let id = content_block["id"].as_str().unwrap_or_default().to_string();
-                    let name = content_block["name"].as_str().unwrap_or_default().to_string();
+                    let name = strip_oauth_tool_prefix(
+                        content_block["name"].as_str().unwrap_or_default(),
+                    );
                     state.content_blocks[index].tool_id = Some(id.clone());
                     state.content_blocks[index].tool_name = Some(name.clone());
                     events.push(StreamEvent::ToolCallStart {

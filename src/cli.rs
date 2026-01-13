@@ -77,6 +77,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: KeyCommands,
     },
+    /// Switch provider shortcuts for the default endpoint
+    Provider {
+        #[command(subcommand)]
+        action: ProviderCommands,
+    },
 
     /// Test the proxy functionality
     Test {
@@ -273,6 +278,54 @@ pub enum KeyCommands {
         url: Option<String>,
 
         /// Path to config file to use when auto-starting the server
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Bind or clear an OAuth user for a key
+    Bind {
+        /// Key hash or key ID prefix
+        key: String,
+
+        /// OAuth user id to bind (for OAuth-backed providers)
+        #[arg(long)]
+        oauth_user: Option<String>,
+
+        /// Clear the OAuth user binding
+        #[arg(long, conflicts_with = "oauth_user")]
+        clear: bool,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+
+        /// Path to config file to use when resolving the key database
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProviderCommands {
+    /// Show the current default provider override
+    Current,
+
+    /// Set the default provider override (applies to auto endpoint)
+    Use {
+        /// Provider name (must exist in config)
+        provider: String,
+
+        /// Path to config file to validate provider name
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Clear the default provider override
+    Clear,
+
+    /// List providers available in the config file
+    List {
+        /// Path to config file to read provider names from
         #[arg(long, env = "EAVS_CONFIG")]
         config: Option<String>,
     },
@@ -1036,6 +1089,10 @@ pub async fn run_key_info_direct(
                 "Name:        {}",
                 info.name.unwrap_or_else(|| "-".to_string())
             );
+            println!(
+                "OAuth User:  {}",
+                info.oauth_user.unwrap_or_else(|| "-".to_string())
+            );
             println!("Created:     {}", info.created_at);
             println!(
                 "Expires:     {}",
@@ -1154,6 +1211,115 @@ pub async fn run_key_usage_direct(
         }
     }
 
+    Ok(())
+}
+
+/// Bind or clear OAuth user for a key directly in the database.
+pub async fn run_key_bind_direct(
+    store: &KeyStore,
+    key_id: &str,
+    oauth_user: Option<String>,
+    format: OutputFormat,
+) -> Result<(), CliError> {
+    let key = store
+        .get_by_human_id(key_id)
+        .or_else(|| store.get_by_hash(key_id))
+        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+
+    let updated = store
+        .update_oauth_user(&key.key_hash, oauth_user.clone())
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to update key: {}", e)))?;
+
+    if !updated {
+        return Err(CliError::Other(format!("Key not found: {}", key_id)));
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let response = serde_json::json!({
+                "key_id": key.key_id,
+                "key_hash": key.key_hash,
+                "oauth_user": oauth_user,
+            });
+            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+        }
+        OutputFormat::Text => {
+            if let Some(user) = oauth_user {
+                println!("Key '{}' is now bound to OAuth user '{}'.", key.key_id, user);
+            } else {
+                println!("OAuth binding cleared for key '{}'.", key.key_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_provider_current() -> Result<(), CliError> {
+    let state = crate::runtime_state::load_runtime_state().unwrap_or_default();
+    if let Some(provider) = state.default_provider {
+        println!("{}", provider);
+    } else {
+        println!("default");
+    }
+    Ok(())
+}
+
+pub fn run_provider_use(provider: &str, config_path: Option<&str>) -> Result<(), CliError> {
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path).ok()
+    } else {
+        crate::config::AppConfig::load().ok()
+    };
+
+    if let Some(cfg) = config {
+        if cfg.resolve_provider(provider).is_none() {
+            let available = cfg.provider_names();
+            return Err(CliError::Other(format!(
+                "Unknown provider '{}'. Available providers: {:?}",
+                provider, available
+            )));
+        }
+    }
+
+    let mut state = crate::runtime_state::load_runtime_state().unwrap_or_default();
+    state.default_provider = Some(provider.to_string());
+    crate::runtime_state::save_runtime_state(&state)
+        .map_err(CliError::Other)?;
+    println!("{}", provider);
+    Ok(())
+}
+
+pub fn run_provider_clear() -> Result<(), CliError> {
+    let mut state = crate::runtime_state::load_runtime_state().unwrap_or_default();
+    state.default_provider = None;
+    crate::runtime_state::save_runtime_state(&state)
+        .map_err(CliError::Other)?;
+    println!("default");
+    Ok(())
+}
+
+pub fn run_provider_list(config_path: Option<&str>) -> Result<(), CliError> {
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path).map_err(|e| {
+            CliError::Other(format!("Failed to load config from {}: {}", path, e))
+        })?
+    } else {
+        crate::config::AppConfig::load().map_err(|e| {
+            CliError::Other(format!("Failed to load config: {}", e))
+        })?
+    };
+
+    let mut providers = config
+        .provider_names()
+        .into_iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>();
+    providers.sort();
+    for provider in providers {
+        println!("{}", provider);
+    }
     Ok(())
 }
 

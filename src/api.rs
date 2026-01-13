@@ -654,6 +654,23 @@ fn resolve_redirect_uri(
         .map_err(|_| oauth_error(StatusCode::BAD_REQUEST, "Missing redirect_uri"))
 }
 
+fn resolve_anthropic_redirect_uri(request_uri: Option<String>) -> String {
+    if let Some(uri) = request_uri {
+        return uri;
+    }
+    std::env::var("EAVS_OAUTH_REDIRECT_URI")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| anthropic::default_redirect_uri())
+}
+
+fn split_oauth_code(code: &str) -> (String, Option<String>) {
+    let mut parts = code.splitn(2, '#');
+    let code_part = parts.next().unwrap_or_default().to_string();
+    let state_part = parts.next().map(|s| s.to_string());
+    (code_part, state_part)
+}
+
 #[derive(Deserialize)]
 pub struct OAuthLoginRequest {
     pub user_id: String,
@@ -699,10 +716,11 @@ pub async fn oauth_login_handler(
             }
         }
         OAuthProvider::Anthropic => {
-            let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
+            let redirect_uri = resolve_anthropic_redirect_uri(payload.redirect_uri);
             let config = anthropic::config_from_env(redirect_uri.clone())
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
             let (code_verifier, _) = pkce::generate_pkce_pair();
+            let state_id = code_verifier.clone();
             let auth_url = anthropic::build_authorize_url(&config, &state_id, &code_verifier)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
             state.oauth_states.insert(
@@ -813,9 +831,12 @@ pub async fn oauth_callback_handler(
 ) -> Result<Json<OAuthStatusResponse>, (StatusCode, Json<OAuthApiError>)> {
     check_oauth_available(&state)?;
 
+    let (code, state_override) = split_oauth_code(&payload.code);
+    let state_value = state_override.unwrap_or(payload.state);
+
     let pending = state
         .oauth_states
-        .remove(&payload.state)
+        .remove(&state_value)
         .map(|(_, v)| v)
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown or expired state"))?;
 
@@ -825,7 +846,7 @@ pub async fn oauth_callback_handler(
 
     let credentials = match pending.provider {
         OAuthProvider::Anthropic => {
-            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let redirect_uri = redirect_uri.unwrap_or_else(anthropic::default_redirect_uri);
             let code_verifier = pending
                 .code_verifier
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
@@ -835,8 +856,8 @@ pub async fn oauth_callback_handler(
                 &client,
                 &config,
                 &pending.user_id,
-                &payload.code,
-                &payload.state,
+                &code,
+                &state_value,
                 &code_verifier,
             )
                 .await
@@ -917,8 +938,9 @@ pub async fn oauth_code_handler(
     let mut user_id = payload.user_id.clone();
     let mut code_verifier = None;
     let mut redirect_uri = payload.redirect_uri;
+    let (code, state_override) = split_oauth_code(&payload.code);
 
-    if let Some(state_id) = payload.state.as_ref() {
+    if let Some(state_id) = state_override.as_ref().or(payload.state.as_ref()) {
         if let Some((_, pending)) = state.oauth_states.remove(state_id) {
             user_id = pending.user_id;
             code_verifier = pending.code_verifier;
@@ -940,14 +962,14 @@ pub async fn oauth_code_handler(
 
     let credentials = match provider {
         OAuthProvider::Anthropic => {
-            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
+            let redirect_uri = redirect_uri.unwrap_or_else(anthropic::default_redirect_uri);
             let verifier = code_verifier
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
-            let state_str = payload.state.as_deref()
+            let state_str = state_override.as_deref().or(payload.state.as_deref())
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing state"))?;
             let config = anthropic::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            anthropic::exchange_code(&client, &config, &user_id, &payload.code, state_str, &verifier)
+            anthropic::exchange_code(&client, &config, &user_id, &code, state_str, &verifier)
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
@@ -957,7 +979,7 @@ pub async fn oauth_code_handler(
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
             let config = openai_codex::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            openai_codex::exchange_code(&client, &config, &user_id, &payload.code, &verifier)
+            openai_codex::exchange_code(&client, &config, &user_id, &code, &verifier)
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
@@ -967,7 +989,7 @@ pub async fn oauth_code_handler(
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
             let config = google::config_from_env(provider, redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            google::exchange_code(&client, &config, &user_id, &payload.code, &verifier)
+            google::exchange_code(&client, &config, &user_id, &code, &verifier)
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }

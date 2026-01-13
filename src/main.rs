@@ -7,6 +7,7 @@ mod config;
 mod keys;
 mod logging;
 mod oauth;
+mod runtime_state;
 mod policy;
 mod provider;
 mod plugins;
@@ -23,7 +24,7 @@ use crate::cli::{
     ensure_server_running, run_service_logs, run_service_restart, run_service_start, 
     run_service_status, run_service_stop, run_test_bench, run_test_chat, run_test_health, 
     run_test_rate_limit, run_test_routing, Cli, run_test_image, run_test_tool_call, 
-    Commands, EavsClient, KeyCommands, ServiceCommands, TestCommands,
+    Commands, EavsClient, KeyCommands, ProviderCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -54,6 +55,12 @@ async fn main() {
         }
         Commands::Key { action } => {
             if let Err(e) = run_key_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Provider { action } => {
+            if let Err(e) = run_provider_command(action) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -251,7 +258,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
     use crate::keys::KeyStore;
     use crate::cli::{
         run_key_create_direct, run_key_list_direct, run_key_info_direct,
-        run_key_revoke_direct, run_key_usage_direct,
+        run_key_revoke_direct, run_key_usage_direct, run_key_bind_direct,
     };
 
     match action {
@@ -321,6 +328,33 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             })?;
             run_key_usage_direct(&store, &key, days, format).await
         }
+        KeyCommands::Bind { key, oauth_user, clear, format, config } => {
+            let app_config = load_config(config.as_deref());
+            let db_path = app_config.keys.resolved_database_path();
+            let store = KeyStore::new(&db_path).await.map_err(|e| {
+                cli::CliError::Other(format!("Failed to open key database: {}", e))
+            })?;
+            let oauth_user = if clear { None } else { oauth_user };
+            if !clear && oauth_user.is_none() {
+                return Err(cli::CliError::Other(
+                    "Provide --oauth-user or use --clear".to_string(),
+                ));
+            }
+            run_key_bind_direct(&store, &key, oauth_user, format).await
+        }
+    }
+}
+
+fn run_provider_command(action: ProviderCommands) -> Result<(), cli::CliError> {
+    use crate::cli::{
+        run_provider_clear, run_provider_current, run_provider_list, run_provider_use,
+    };
+
+    match action {
+        ProviderCommands::Current => run_provider_current(),
+        ProviderCommands::Use { provider, config } => run_provider_use(&provider, config.as_deref()),
+        ProviderCommands::Clear => run_provider_clear(),
+        ProviderCommands::List { config } => run_provider_list(config.as_deref()),
     }
 }
 
