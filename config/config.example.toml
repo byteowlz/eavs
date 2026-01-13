@@ -26,11 +26,24 @@ type = "openai"
 api_key = "env:OPENAI_API_KEY"
 # base_url defaults to https://api.openai.com/v1
 
+# OpenAI Responses API (official /v1/responses)
+[providers.openai_responses]
+type = "openai-responses"
+api_key = "env:OPENAI_API_KEY"
+# base_url defaults to https://api.openai.com/v1
+
 # Anthropic Claude
 [providers.anthropic]
 type = "anthropic"
 api_key = "env:ANTHROPIC_API_KEY"
 # base_url defaults to https://api.anthropic.com/v1
+# For Claude Code OAuth, leave api_key empty and use OAuth (see OAuth section below).
+
+# OpenAI Codex (ChatGPT backend via OAuth)
+[providers.codex]
+type = "openai-codex"
+# OAuth tokens are stored in the key database (requires keys.enabled = true).
+# base_url defaults to https://chatgpt.com/backend-api
 
 # Google Gemini
 [providers.google]
@@ -205,6 +218,16 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 # - Linux: ~/.local/share/eavs/word_lists.toml
 # - macOS: ~/Library/Application Support/eavs/word_lists.toml
 # word_lists_path = "~/.config/eavs/word_lists.toml"
+
+# =============================================================================
+# OAuth (Claude Code + OpenAI Codex)
+# =============================================================================
+# OAuth credentials are configured via environment variables (not in config):
+#   - EAVS_OAUTH_REDIRECT_URI (required)
+#   - EAVS_OAUTH_ANTHROPIC_CLIENT_ID / _SECRET / _SCOPE
+#   - EAVS_OAUTH_OPENAI_CLIENT_ID / _SECRET / _SCOPE
+#
+# OAuth tokens are stored in the keys database, so [keys].enabled must be true.
 
 # =============================================================================
 # Transparent Traffic Capture (via mitmproxy)

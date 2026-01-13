@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 const AUTH_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const DEFAULT_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 
 pub struct AnthropicOAuthConfig {
     pub client_id: String,
@@ -16,10 +18,17 @@ pub struct AnthropicOAuthConfig {
 
 pub fn config_from_env(redirect_uri: String) -> Result<AnthropicOAuthConfig, String> {
     let client_id = std::env::var("EAVS_OAUTH_ANTHROPIC_CLIENT_ID")
-        .map_err(|_| "Missing EAVS_OAUTH_ANTHROPIC_CLIENT_ID".to_string())?;
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
     let client_secret = std::env::var("EAVS_OAUTH_ANTHROPIC_CLIENT_SECRET").ok();
     let scope = std::env::var("EAVS_OAUTH_ANTHROPIC_SCOPE")
         .unwrap_or_else(|_| "org:create_api_key user:profile user:inference".to_string());
+    let redirect_uri = if redirect_uri.trim().is_empty() {
+        DEFAULT_REDIRECT_URI.to_string()
+    } else {
+        redirect_uri
+    };
 
     Ok(AnthropicOAuthConfig {
         client_id,
@@ -27,6 +36,10 @@ pub fn config_from_env(redirect_uri: String) -> Result<AnthropicOAuthConfig, Str
         redirect_uri,
         scope,
     })
+}
+
+pub fn default_redirect_uri() -> String {
+    DEFAULT_REDIRECT_URI.to_string()
 }
 
 pub fn build_authorize_url(
@@ -38,6 +51,7 @@ pub fn build_authorize_url(
     let mut url = url::Url::parse(AUTH_URL)
         .unwrap_or_else(|_| url::Url::parse("https://claude.ai/oauth/authorize").unwrap());
     url.query_pairs_mut()
+        .append_pair("code", "true")
         .append_pair("response_type", "code")
         .append_pair("client_id", &config.client_id)
         .append_pair("redirect_uri", &config.redirect_uri)

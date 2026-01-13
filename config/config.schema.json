@@ -382,7 +382,9 @@
             "aws-bedrock",
             "ollama",
             "vllm",
-            "openai-compatible"
+            "openai-compatible",
+            "openai-codex",
+            "openai-responses"
           ],
           "default": "openai"
         },

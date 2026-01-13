@@ -110,7 +110,9 @@ impl ProviderTransformer {
             ProviderType::Azure => Box::new(AzureTransformer::new()),
             ProviderType::Mistral => Box::new(MistralTransformer::new()),
             ProviderType::Bedrock => Box::new(BedrockTransformer::new()),
-            ProviderType::OpenAICodex => Box::new(OpenAIResponsesTransformer::new()),
+            ProviderType::OpenAICodex | ProviderType::OpenAIResponses => {
+                Box::new(OpenAIResponsesTransformer::new())
+            }
         };
         Self { inner }
     }

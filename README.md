@@ -65,6 +65,8 @@ base_url = "http://localhost:11434/v1"
 Supported providers:
 
 - `openai` - OpenAI API
+- `openai-responses` - OpenAI Responses API (same keys, /v1/responses)
+- `openai-codex` - OpenAI Codex/ChatGPT backend via OAuth
 - `anthropic` - Anthropic Claude
 - `google` - Google Gemini
 - `mistral` - Mistral AI
@@ -76,6 +78,16 @@ Supported providers:
 - `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
 - `mock` - Mock provider for testing (no network calls)
+
+When to use which OpenAI provider:
+- `openai` for the Chat Completions API (`/v1/chat/completions`).
+- `openai-responses` for the Responses API (`/v1/responses`).
+- `openai-codex` for the Codex/ChatGPT backend with OAuth tokens.
+
+Provider shortcuts (no client changes required):
+- `eavs provider use <name>` sets a runtime default for the auto endpoint.
+- `eavs provider clear` resets to the config default.
+- State is stored in XDG state at `~/.local/state/eavs/state.toml` (or `$XDG_STATE_HOME`).
 
 ### Logging
 
@@ -142,6 +154,12 @@ eavs key usage <key-id>
 
 # Revoke a key
 eavs key revoke <key-id>
+
+# Bind a key to an OAuth user (Claude Code / Codex)
+eavs key bind <key-id> --oauth-user "<user-id>"
+
+# Clear the OAuth binding
+eavs key bind <key-id> --clear
 ```
 
 ### AWS Bedrock
