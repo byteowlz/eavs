@@ -184,7 +184,9 @@ impl ResponseTransformer for AnthropicTransformer {
             match content.content_type.as_str() {
                 "text" => {
                     let text = content.text.as_deref().unwrap_or_default();
-                    message.content.push(ContentBlock::Text(TextContent::new(text)));
+                    message
+                        .content
+                        .push(ContentBlock::Text(TextContent::new(text)));
                     events.push(StreamEvent::TextEnd {
                         content_index: idx,
                         content: text.to_string(),
@@ -198,7 +200,7 @@ impl ResponseTransformer for AnthropicTransformer {
                             ThinkingContent::with_signature(thinking, sig)
                         } else {
                             ThinkingContent::new(thinking)
-                        }
+                        },
                     ));
                     events.push(StreamEvent::ThinkingEnd {
                         content_index: idx,
@@ -212,7 +214,9 @@ impl ResponseTransformer for AnthropicTransformer {
                         &strip_oauth_tool_prefix(content.name.as_deref().unwrap_or_default()),
                         content.input.clone().unwrap_or(Value::Null),
                     );
-                    message.content.push(ContentBlock::ToolCall(tool_call.clone()));
+                    message
+                        .content
+                        .push(ContentBlock::ToolCall(tool_call.clone()));
                     events.push(StreamEvent::ToolCallEnd {
                         content_index: idx,
                         tool_call,
@@ -397,7 +401,10 @@ pub fn build_anthropic_sse(event: &StreamEvent) -> String {
             });
             format!("event: content_block_start\ndata: {}\n\n", data)
         }
-        StreamEvent::TextDelta { content_index, delta } => {
+        StreamEvent::TextDelta {
+            content_index,
+            delta,
+        } => {
             let data = json!({
                 "type": "content_block_delta",
                 "index": content_index,
@@ -426,7 +433,10 @@ pub fn build_anthropic_sse(event: &StreamEvent) -> String {
             });
             format!("event: content_block_start\ndata: {}\n\n", data)
         }
-        StreamEvent::ThinkingDelta { content_index, delta } => {
+        StreamEvent::ThinkingDelta {
+            content_index,
+            delta,
+        } => {
             let data = json!({
                 "type": "content_block_delta",
                 "index": content_index,
@@ -437,7 +447,11 @@ pub fn build_anthropic_sse(event: &StreamEvent) -> String {
             });
             format!("event: content_block_delta\ndata: {}\n\n", data)
         }
-        StreamEvent::ThinkingEnd { content_index, signature, .. } => {
+        StreamEvent::ThinkingEnd {
+            content_index,
+            signature,
+            ..
+        } => {
             let mut data = json!({
                 "type": "content_block_stop",
                 "index": content_index
@@ -447,7 +461,11 @@ pub fn build_anthropic_sse(event: &StreamEvent) -> String {
             }
             format!("event: content_block_stop\ndata: {}\n\n", data)
         }
-        StreamEvent::ToolCallStart { content_index, id, name } => {
+        StreamEvent::ToolCallStart {
+            content_index,
+            id,
+            name,
+        } => {
             let data = json!({
                 "type": "content_block_start",
                 "index": content_index,
@@ -460,7 +478,10 @@ pub fn build_anthropic_sse(event: &StreamEvent) -> String {
             });
             format!("event: content_block_start\ndata: {}\n\n", data)
         }
-        StreamEvent::ToolCallDelta { content_index, delta } => {
+        StreamEvent::ToolCallDelta {
+            content_index,
+            delta,
+        } => {
             let data = json!({
                 "type": "content_block_delta",
                 "index": content_index,
@@ -557,7 +578,7 @@ fn parse_anthropic_user_message(msg: &Value) -> Result<crate::types::UserMessage
                         let tool_call_id = part["tool_use_id"].as_str().unwrap_or_default();
                         let result_content = part["content"].as_str().unwrap_or_default();
                         let is_error = part["is_error"].as_bool().unwrap_or(false);
-                        
+
                         // Store as inline tool result
                         content.push(ContentBlock::ToolResult(crate::types::ToolResultContent {
                             tool_call_id: tool_call_id.to_string(),
@@ -597,14 +618,17 @@ fn parse_anthropic_assistant_message(msg: &Value) -> Result<AssistantMessage, Tr
                         let thinking = part["thinking"].as_str().unwrap_or_default();
                         let signature = part["signature"].as_str().map(String::from);
                         if let Some(sig) = signature {
-                            content.push(ContentBlock::Thinking(ThinkingContent::with_signature(thinking, sig)));
+                            content.push(ContentBlock::Thinking(ThinkingContent::with_signature(
+                                thinking, sig,
+                            )));
                         } else {
                             content.push(ContentBlock::Thinking(ThinkingContent::new(thinking)));
                         }
                     }
                     "tool_use" => {
                         let id = part["id"].as_str().unwrap_or_default();
-                        let name = strip_oauth_tool_prefix(part["name"].as_str().unwrap_or_default());
+                        let name =
+                            strip_oauth_tool_prefix(part["name"].as_str().unwrap_or_default());
                         let input = part["input"].clone();
                         content.push(ContentBlock::ToolCall(ToolCall::new(id, name, input)));
                     }
@@ -645,7 +669,10 @@ fn tool_to_anthropic(tool: &Tool) -> Value {
     })
 }
 
-fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec<Value>, TransformError> {
+fn build_anthropic_messages(
+    context: &Context,
+    enable_cache: bool,
+) -> Result<Vec<Value>, TransformError> {
     let mut messages = Vec::new();
     let mut last_user_idx = None;
 
@@ -667,7 +694,7 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec
                     continue;
                 }
                 let is_last_user = last_user_idx == Some(idx);
-                
+
                 let mut msg_obj = json!({
                     "role": "user",
                     "content": content
@@ -697,12 +724,14 @@ fn build_anthropic_messages(context: &Context, enable_cache: bool) -> Result<Vec
             }
             Message::Tool(tool_result) => {
                 // In Anthropic, tool results go in user messages
-                let content_text: String = tool_result.content.iter().map(|b| {
-                    match b {
+                let content_text: String = tool_result
+                    .content
+                    .iter()
+                    .map(|b| match b {
                         ContentBlock::Text(t) => t.text.clone(),
-                        _ => String::new()
-                    }
-                }).collect();
+                        _ => String::new(),
+                    })
+                    .collect();
 
                 let tool_content = if tool_result.is_error {
                     json!([{
@@ -938,9 +967,10 @@ fn process_anthropic_event(
             state.started = true;
             state.message.model = message["model"].as_str().unwrap_or_default().to_string();
             state.message.api = ApiType::AnthropicMessages;
-            
+
             if let Some(usage) = message.get("usage") {
-                state.message.usage.prompt_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+                state.message.usage.prompt_tokens =
+                    usage["input_tokens"].as_u64().unwrap_or(0) as u32;
             }
 
             events.push(StreamEvent::Start {
@@ -960,18 +990,21 @@ fn process_anthropic_event(
             match block_type {
                 "text" => {
                     state.content_blocks[index].block_type = ContentBlockType::Text;
-                    events.push(StreamEvent::TextStart { content_index: index });
+                    events.push(StreamEvent::TextStart {
+                        content_index: index,
+                    });
                 }
                 "thinking" => {
                     state.content_blocks[index].block_type = ContentBlockType::Thinking;
-                    events.push(StreamEvent::ThinkingStart { content_index: index });
+                    events.push(StreamEvent::ThinkingStart {
+                        content_index: index,
+                    });
                 }
                 "tool_use" => {
                     state.content_blocks[index].block_type = ContentBlockType::ToolCall;
                     let id = content_block["id"].as_str().unwrap_or_default().to_string();
-                    let name = strip_oauth_tool_prefix(
-                        content_block["name"].as_str().unwrap_or_default(),
-                    );
+                    let name =
+                        strip_oauth_tool_prefix(content_block["name"].as_str().unwrap_or_default());
                     state.content_blocks[index].tool_id = Some(id.clone());
                     state.content_blocks[index].tool_name = Some(name.clone());
                     events.push(StreamEvent::ToolCallStart {
@@ -1020,13 +1053,16 @@ fn process_anthropic_event(
         }
         "content_block_stop" => {
             let index = data["index"].as_u64().unwrap_or(0) as usize;
-            
+
             if index < state.content_blocks.len() {
                 let block = &state.content_blocks[index];
-                
+
                 match block.block_type {
                     ContentBlockType::Text => {
-                        state.message.content.push(ContentBlock::Text(TextContent::new(&block.text)));
+                        state
+                            .message
+                            .content
+                            .push(ContentBlock::Text(TextContent::new(&block.text)));
                         events.push(StreamEvent::TextEnd {
                             content_index: index,
                             content: block.text.clone(),
@@ -1036,12 +1072,13 @@ fn process_anthropic_event(
                         let signature = data["signature"].as_str().map(String::from);
                         if let Some(ref sig) = signature {
                             state.message.content.push(ContentBlock::Thinking(
-                                ThinkingContent::with_signature(&block.text, sig)
+                                ThinkingContent::with_signature(&block.text, sig),
                             ));
                         } else {
-                            state.message.content.push(ContentBlock::Thinking(
-                                ThinkingContent::new(&block.text)
-                            ));
+                            state
+                                .message
+                                .content
+                                .push(ContentBlock::Thinking(ThinkingContent::new(&block.text)));
                         }
                         events.push(StreamEvent::ThinkingEnd {
                             content_index: index,
@@ -1055,7 +1092,10 @@ fn process_anthropic_event(
                             block.tool_name.as_deref().unwrap_or_default(),
                             serde_json::from_str(&block.text).unwrap_or(Value::Null),
                         );
-                        state.message.content.push(ContentBlock::ToolCall(tool_call.clone()));
+                        state
+                            .message
+                            .content
+                            .push(ContentBlock::ToolCall(tool_call.clone()));
                         events.push(StreamEvent::ToolCallEnd {
                             content_index: index,
                             tool_call,
@@ -1071,8 +1111,10 @@ fn process_anthropic_event(
                 }
             }
             if let Some(usage) = data.get("usage") {
-                state.message.usage.completion_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-                state.message.usage.total_tokens = state.message.usage.prompt_tokens + state.message.usage.completion_tokens;
+                state.message.usage.completion_tokens =
+                    usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+                state.message.usage.total_tokens =
+                    state.message.usage.prompt_tokens + state.message.usage.completion_tokens;
                 events.push(StreamEvent::Usage {
                     usage: state.message.usage.clone(),
                 });
@@ -1129,10 +1171,8 @@ mod request_quirks_tests {
 
     #[test]
     fn anthropic_drops_empty_messages() {
-        let ctx = Context::new("claude-3-5-sonnet-20240620").with_messages(vec![
-            Message::user(""),
-            Message::user("ok"),
-        ]);
+        let ctx = Context::new("claude-3-5-sonnet-20240620")
+            .with_messages(vec![Message::user(""), Message::user("ok")]);
         let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
         let messages = req["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
@@ -1270,7 +1310,7 @@ mod tests {
         });
 
         let ctx = parse_anthropic_request(&body).unwrap();
-        
+
         if let Message::Assistant(assistant) = &ctx.messages[1] {
             assert_eq!(assistant.content.len(), 2);
             if let ContentBlock::Thinking(t) = &assistant.content[0] {
@@ -1304,8 +1344,12 @@ mod tests {
         let transformer = AnthropicTransformer::new();
         let headers = transformer.headers("sk-ant-test");
 
-        assert!(headers.iter().any(|(k, v)| k == "x-api-key" && v == "sk-ant-test"));
-        assert!(headers.iter().any(|(k, v)| k == "anthropic-version" && v == "2023-06-01"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk-ant-test"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "anthropic-version" && v == "2023-06-01"));
     }
 
     #[test]
@@ -1351,9 +1395,15 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
         let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Start { .. })));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextStart { .. })));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Start { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextStart { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
     }
 
     #[test]
@@ -1376,8 +1426,16 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
         let events = transformer.parse_response(&body).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "Hello!")));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { reason: StopReason::EndTurn, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "Hello!")));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::Done {
+                reason: StopReason::EndTurn,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1395,22 +1453,25 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
     #[test]
     fn test_build_anthropic_messages_with_tool_result() {
-        let ctx = Context::new("claude-sonnet-4-20250514")
-            .with_messages(vec![
-                Message::user("Get weather"),
-                Message::Assistant(AssistantMessage {
-                    content: vec![ContentBlock::ToolCall(ToolCall::new(
-                        "tool_123",
-                        "get_weather",
-                        json!({"city": "NYC"}),
-                    ))],
-                    ..Default::default()
-                }),
-                Message::Tool(ToolResultMessage::text("tool_123", "get_weather", "Sunny, 72F")),
-            ]);
+        let ctx = Context::new("claude-sonnet-4-20250514").with_messages(vec![
+            Message::user("Get weather"),
+            Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::ToolCall(ToolCall::new(
+                    "tool_123",
+                    "get_weather",
+                    json!({"city": "NYC"}),
+                ))],
+                ..Default::default()
+            }),
+            Message::Tool(ToolResultMessage::text(
+                "tool_123",
+                "get_weather",
+                "Sunny, 72F",
+            )),
+        ]);
 
         let messages = build_anthropic_messages(&ctx, false).unwrap();
-        
+
         assert_eq!(messages.len(), 3);
         // Tool result should be in a user message
         assert_eq!(messages[2]["role"], "user");
@@ -1426,7 +1487,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
         let content = build_anthropic_assistant_content(&blocks);
         let parts = content.as_array().unwrap();
-        
+
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["type"], "thinking");
         assert_eq!(parts[0]["signature"], "sig123");

@@ -6,8 +6,8 @@
 //! - `key` - Manage virtual API keys
 //! - `test` - Test the proxy functionality
 
-use clap::{Parser, Subcommand};
 use base64::Engine;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use std::time::Duration;
 /// Returns the accumulated content from all chunks.
 fn parse_sse_stream_content(text: &str) -> String {
     let mut content = String::new();
-    
+
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
@@ -35,14 +35,16 @@ fn parse_sse_stream_content(text: &str) -> String {
             }
         }
     }
-    
+
     content
 }
 
 /// EAVS - Bidirectional LLM Proxy with Virtual API Keys
 #[derive(Parser)]
 #[command(name = "eavs")]
-#[command(about = "Bidirectional LLM proxy with virtual API keys, rate limiting, and cost tracking")]
+#[command(
+    about = "Bidirectional LLM proxy with virtual API keys, rate limiting, and cost tracking"
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -718,7 +720,9 @@ impl EavsClient {
         // Use async file I/O to avoid blocking the tokio runtime
         let bytes = tokio::fs::read(image_path).await.map_err(CliError::Io)?;
         let mime = guess_image_mime(image_path).ok_or_else(|| {
-            CliError::Other("Unsupported image extension (expected png/jpg/jpeg/webp/gif)".to_string())
+            CliError::Other(
+                "Unsupported image extension (expected png/jpg/jpeg/webp/gif)".to_string(),
+            )
         })?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         let data_url = format!("data:{};base64,{}", mime, b64);
@@ -849,9 +853,8 @@ impl EavsClient {
                 uptime_secs: None,
             })
         } else {
-            serde_json::from_str(&text).map_err(|e| {
-                CliError::Other(format!("Failed to parse health response: {}", e))
-            })
+            serde_json::from_str(&text)
+                .map_err(|e| CliError::Other(format!("Failed to parse health response: {}", e)))
         }
     }
 
@@ -928,7 +931,7 @@ impl std::error::Error for CliError {}
 // Direct Database Key Management (no server required)
 // =============================================================================
 
-use crate::keys::{KeyStore, CreateKeyRequest, KeyPermissions};
+use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore};
 use std::collections::HashSet;
 
 /// Parse expiration string to DateTime
@@ -976,9 +979,21 @@ pub async fn run_key_create_direct(
         name,
         expires_at: parse_expiration_datetime(&expires),
         permissions: KeyPermissions {
-            allowed_models: if models.is_empty() { None } else { Some(models.into_iter().collect::<HashSet<_>>()) },
-            blocked_models: if blocked_models.is_empty() { None } else { Some(blocked_models.into_iter().collect::<HashSet<_>>()) },
-            allowed_providers: if providers.is_empty() { None } else { Some(providers.into_iter().collect::<HashSet<_>>()) },
+            allowed_models: if models.is_empty() {
+                None
+            } else {
+                Some(models.into_iter().collect::<HashSet<_>>())
+            },
+            blocked_models: if blocked_models.is_empty() {
+                None
+            } else {
+                Some(blocked_models.into_iter().collect::<HashSet<_>>())
+            },
+            allowed_providers: if providers.is_empty() {
+                None
+            } else {
+                Some(providers.into_iter().collect::<HashSet<_>>())
+            },
             rpm_limit: rpm,
             tpm_limit: tpm,
             rpd_limit: rpd,
@@ -989,9 +1004,10 @@ pub async fn run_key_create_direct(
         oauth_user: None,
     };
 
-    let response = store.create_key(request).await.map_err(|e| {
-        CliError::Other(format!("Failed to create key: {}", e))
-    })?;
+    let response = store
+        .create_key(request)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to create key: {}", e)))?;
 
     match format {
         OutputFormat::Json => {
@@ -1017,12 +1033,13 @@ pub async fn run_key_create_direct(
 /// List keys directly from the database (no server required)
 pub async fn run_key_list_direct(
     store: &KeyStore,
-    _include_disabled: bool,  // TODO: implement filtering
+    _include_disabled: bool, // TODO: implement filtering
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let keys = store.list_keys().await.map_err(|e| {
-        CliError::Other(format!("Failed to list keys: {}", e))
-    })?;
+    let keys = store
+        .list_keys()
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to list keys: {}", e)))?;
 
     match format {
         OutputFormat::Json => {
@@ -1043,18 +1060,15 @@ pub async fn run_key_list_direct(
             for key in keys {
                 let status = if key.disabled { "disabled" } else { "active" };
                 let name = key.name.unwrap_or_else(|| "-".to_string());
-                let name_display = if name.len() > 20 { 
+                let name_display = if name.len() > 20 {
                     format!("{}...", &name[..17])
-                } else { 
-                    name 
+                } else {
+                    name
                 };
                 let created = key.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
                 println!(
                     "{:<15} {:<20} {:<10} {:<20}",
-                    key.key_id,
-                    name_display,
-                    status,
-                    created
+                    key.key_id, name_display, status, created
                 );
             }
         }
@@ -1070,7 +1084,8 @@ pub async fn run_key_info_direct(
     format: OutputFormat,
 ) -> Result<(), CliError> {
     // Try to find by human ID first, then by hash prefix
-    let key = store.get_by_human_id(key_id)
+    let key = store
+        .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
         .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
 
@@ -1096,7 +1111,9 @@ pub async fn run_key_info_direct(
             println!("Created:     {}", info.created_at);
             println!(
                 "Expires:     {}",
-                info.expires_at.map(|d| d.to_string()).unwrap_or_else(|| "never".to_string())
+                info.expires_at
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "never".to_string())
             );
             println!(
                 "Status:      {}",
@@ -1124,12 +1141,16 @@ pub async fn run_key_revoke_direct(
     yes: bool,
 ) -> Result<(), CliError> {
     // Find the key first
-    let key = store.get_by_human_id(key_id)
+    let key = store
+        .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
         .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
 
     if !yes {
-        eprint!("Are you sure you want to revoke key '{}'? [y/N] ", key.key_id);
+        eprint!(
+            "Are you sure you want to revoke key '{}'? [y/N] ",
+            key.key_id
+        );
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
         if !input.trim().eq_ignore_ascii_case("y") {
@@ -1138,9 +1159,10 @@ pub async fn run_key_revoke_direct(
         }
     }
 
-    store.disable_key(&key.key_hash).await.map_err(|e| {
-        CliError::Other(format!("Failed to revoke key: {}", e))
-    })?;
+    store
+        .disable_key(&key.key_hash)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to revoke key: {}", e)))?;
 
     println!("Key '{}' has been revoked.", key.key_id);
 
@@ -1155,13 +1177,15 @@ pub async fn run_key_usage_direct(
     format: OutputFormat,
 ) -> Result<(), CliError> {
     // Find the key first
-    let key = store.get_by_human_id(key_id)
+    let key = store
+        .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
         .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
 
-    let records = store.get_usage_history(&key.key_hash, Some(days)).await.map_err(|e| {
-        CliError::Other(format!("Failed to get usage history: {}", e))
-    })?;
+    let records = store
+        .get_usage_history(&key.key_hash, Some(days))
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to get usage history: {}", e)))?;
 
     match format {
         OutputFormat::Json => {
@@ -1185,18 +1209,14 @@ pub async fn run_key_usage_direct(
 
             for record in &records {
                 let ts = record.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-                let model_display = if record.model.len() > 15 { 
+                let model_display = if record.model.len() > 15 {
                     format!("{}...", &record.model[..12])
-                } else { 
-                    record.model.clone() 
+                } else {
+                    record.model.clone()
                 };
                 println!(
                     "{:<20} {:<15} {:<10} {:<10} ${:<9.4}",
-                    ts,
-                    model_display,
-                    record.input_tokens,
-                    record.output_tokens,
-                    record.cost_usd
+                    ts, model_display, record.input_tokens, record.output_tokens, record.cost_usd
                 );
                 total_input += record.input_tokens;
                 total_output += record.output_tokens;
@@ -1246,7 +1266,10 @@ pub async fn run_key_bind_direct(
         }
         OutputFormat::Text => {
             if let Some(user) = oauth_user {
-                println!("Key '{}' is now bound to OAuth user '{}'.", key.key_id, user);
+                println!(
+                    "Key '{}' is now bound to OAuth user '{}'.",
+                    key.key_id, user
+                );
             } else {
                 println!("OAuth binding cleared for key '{}'.", key.key_id);
             }
@@ -1285,8 +1308,7 @@ pub fn run_provider_use(provider: &str, config_path: Option<&str>) -> Result<(),
 
     let mut state = crate::runtime_state::load_runtime_state().unwrap_or_default();
     state.default_provider = Some(provider.to_string());
-    crate::runtime_state::save_runtime_state(&state)
-        .map_err(CliError::Other)?;
+    crate::runtime_state::save_runtime_state(&state).map_err(CliError::Other)?;
     println!("{}", provider);
     Ok(())
 }
@@ -1294,21 +1316,18 @@ pub fn run_provider_use(provider: &str, config_path: Option<&str>) -> Result<(),
 pub fn run_provider_clear() -> Result<(), CliError> {
     let mut state = crate::runtime_state::load_runtime_state().unwrap_or_default();
     state.default_provider = None;
-    crate::runtime_state::save_runtime_state(&state)
-        .map_err(CliError::Other)?;
+    crate::runtime_state::save_runtime_state(&state).map_err(CliError::Other)?;
     println!("default");
     Ok(())
 }
 
 pub fn run_provider_list(config_path: Option<&str>) -> Result<(), CliError> {
     let config = if let Some(path) = config_path {
-        crate::config::AppConfig::load_from(path).map_err(|e| {
-            CliError::Other(format!("Failed to load config from {}: {}", path, e))
-        })?
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config from {}: {}", path, e)))?
     } else {
-        crate::config::AppConfig::load().map_err(|e| {
-            CliError::Other(format!("Failed to load config: {}", e))
-        })?
+        crate::config::AppConfig::load()
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
     };
 
     let mut providers = config
@@ -1378,7 +1397,14 @@ pub async fn run_test_image(
     println!();
 
     let response = client
-        .chat_with_image(&prompt, &image, &model, &provider, api_key.as_deref(), stream)
+        .chat_with_image(
+            &prompt,
+            &image,
+            &model,
+            &provider,
+            api_key.as_deref(),
+            stream,
+        )
         .await?;
 
     println!("Response:");
@@ -1418,7 +1444,10 @@ pub async fn run_test_tool_call(
         .await?;
 
     println!("Response:");
-    println!("{}", serde_json::to_string_pretty(&response).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_default()
+    );
     println!();
 
     println!("Timing: {:.2?}", start.elapsed());
@@ -1551,16 +1580,21 @@ pub async fn run_test_routing(
         &format!("{}/{}/v1/models", server_url, provider),
         None,
         "provider-prefixed path",
-    ).await;
+    )
+    .await;
 
     // Test 2: X-Provider header
-    println!("2. Testing X-Provider header: /v1/models with X-Provider: {}", provider);
+    println!(
+        "2. Testing X-Provider header: /v1/models with X-Provider: {}",
+        provider
+    );
     let header_result = test_routing_method(
         &client,
         &format!("{}/v1/models", server_url),
         Some(provider),
         "X-Provider header",
-    ).await;
+    )
+    .await;
 
     // Test 3: Model auto-detection (only if model is provided)
     let auto_detect_result = if let Some(ref m) = model {
@@ -1590,11 +1624,12 @@ pub async fn run_test_routing(
 
         let result = match resp {
             Ok(r) => {
-                let resolved = r.headers()
+                let resolved = r
+                    .headers()
                     .get("x-eavs-provider")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
-                
+
                 // Consider it a success if we got a provider header back
                 // (even if the actual API call failed due to missing API key)
                 RoutingTestResult {
@@ -1637,15 +1672,26 @@ pub async fn run_test_routing(
             if let Some(ref auto) = results.model_auto_detect {
                 print_routing_result(auto);
             }
-            
+
             println!();
             let successes = [
                 results.provider_prefix.success,
                 results.x_provider_header.success,
-                results.model_auto_detect.as_ref().map(|r| r.success).unwrap_or(true),
-            ].iter().filter(|&&s| s).count();
-            
-            let total = if results.model_auto_detect.is_some() { 3 } else { 2 };
+                results
+                    .model_auto_detect
+                    .as_ref()
+                    .map(|r| r.success)
+                    .unwrap_or(true),
+            ]
+            .iter()
+            .filter(|&&s| s)
+            .count();
+
+            let total = if results.model_auto_detect.is_some() {
+                3
+            } else {
+                2
+            };
             println!("Summary: {}/{} routing methods working", successes, total);
         }
     }
@@ -1661,30 +1707,31 @@ async fn test_routing_method(
     method_name: &str,
 ) -> RoutingTestResult {
     let mut req = client.get(url);
-    
+
     if let Some(provider) = x_provider_header {
         req = req.header("X-Provider", provider);
     }
 
     match req.send().await {
         Ok(resp) => {
-            let resolved = resp.headers()
+            let resolved = resp
+                .headers()
                 .get("x-eavs-provider")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            
+
             let status = resp.status();
-            
+
             // Consider success if we got the provider header (routing worked)
             // even if status is 401/403 (auth issue, not routing issue)
             let success = resolved.is_some() || status.is_success();
-            
+
             let error = if !status.is_success() && resolved.is_none() {
                 Some(format!("HTTP {}", status))
             } else {
                 None
             };
-            
+
             RoutingTestResult {
                 method: method_name.to_string(),
                 success,
@@ -1705,19 +1752,17 @@ async fn test_routing_method(
 fn print_routing_result(result: &RoutingTestResult) {
     let status = if result.success { "OK" } else { "FAIL" };
     print!("  {}: {}", result.method, status);
-    
+
     if let Some(ref provider) = result.resolved_provider {
         print!(" (resolved to: {})", provider);
     }
-    
+
     if let Some(ref err) = result.error {
         print!(" - {}", err);
     }
-    
+
     println!();
 }
-
-
 
 /// Run a single timed request
 async fn timed_request(
@@ -1779,7 +1824,7 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
     let s = s.trim().to_lowercase();
     let mut total_secs = 0u64;
     let mut current_num = String::new();
-    
+
     for c in s.chars() {
         if c.is_ascii_digit() {
             current_num.push(c);
@@ -1794,12 +1839,12 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
             }
         }
     }
-    
+
     // Handle case where just a number is given (assume seconds)
     if !current_num.is_empty() {
         total_secs += current_num.parse::<u64>().ok()?;
     }
-    
+
     if total_secs > 0 {
         Some(Duration::from_secs(total_secs))
     } else {
@@ -1881,7 +1926,8 @@ impl ConcurrentBenchmarkResults {
         let p95_ms = sorted[p95_idx];
         let p99_ms = sorted[p99_idx];
 
-        let variance = sorted.iter().map(|x| (x - mean_ms).powi(2)).sum::<f64>() / sorted.len() as f64;
+        let variance =
+            sorted.iter().map(|x| (x - mean_ms).powi(2)).sum::<f64>() / sorted.len() as f64;
         let stddev_ms = variance.sqrt();
 
         Self {
@@ -1906,8 +1952,10 @@ impl ConcurrentBenchmarkResults {
     fn print_text(&self) {
         println!("  Concurrency:       {}", self.concurrency);
         println!("  Duration:          {:.2}s", self.duration_secs);
-        println!("  Total requests:    {} ({} successful, {} failed)", 
-                 self.total_requests, self.successful, self.failed);
+        println!(
+            "  Total requests:    {} ({} successful, {} failed)",
+            self.total_requests, self.successful, self.failed
+        );
         println!("  Throughput:        {:.2} req/s", self.requests_per_second);
         if self.successful > 0 {
             println!("  Latency:");
@@ -1971,7 +2019,14 @@ pub async fn run_test_bench(
     // Warm-up request
     println!("Warming up...");
     let endpoint_url = format!("{}/v1/chat/completions", eavs_url);
-    let _ = timed_request(&client, &endpoint_url, &body, api_key.as_deref(), Some(&provider)).await;
+    let _ = timed_request(
+        &client,
+        &endpoint_url,
+        &body,
+        api_key.as_deref(),
+        Some(&provider),
+    )
+    .await;
 
     // Run benchmark
     let eavs_results = if concurrent == 1 {
@@ -1985,7 +2040,8 @@ pub async fn run_test_bench(
             count,
             test_duration,
             format!("EAVS ({})", eavs_url),
-        ).await
+        )
+        .await
     } else {
         // Concurrent benchmark
         run_concurrent_benchmark(
@@ -1998,7 +2054,8 @@ pub async fn run_test_bench(
             concurrent,
             test_duration,
             format!("EAVS ({})", eavs_url),
-        ).await
+        )
+        .await
     };
 
     // Optionally benchmark direct provider access
@@ -2011,30 +2068,36 @@ pub async fn run_test_bench(
         println!("Benchmarking direct provider ({})...", direct_url);
 
         let direct_endpoint = format!("{}/v1/chat/completions", direct_url);
-        
+
         if concurrent == 1 {
-            Some(run_sequential_benchmark(
-                &client,
-                &direct_endpoint,
-                &body,
-                Some(&direct_api_key),
-                None,
-                count,
-                test_duration,
-                format!("Direct ({})", direct_url),
-            ).await)
+            Some(
+                run_sequential_benchmark(
+                    &client,
+                    &direct_endpoint,
+                    &body,
+                    Some(&direct_api_key),
+                    None,
+                    count,
+                    test_duration,
+                    format!("Direct ({})", direct_url),
+                )
+                .await,
+            )
         } else {
-            Some(run_concurrent_benchmark(
-                &client,
-                &direct_endpoint,
-                &body,
-                Some(&direct_api_key),
-                None,
-                count,
-                concurrent,
-                test_duration,
-                format!("Direct ({})", direct_url),
-            ).await)
+            Some(
+                run_concurrent_benchmark(
+                    &client,
+                    &direct_endpoint,
+                    &body,
+                    Some(&direct_api_key),
+                    None,
+                    count,
+                    concurrent,
+                    test_duration,
+                    format!("Direct ({})", direct_url),
+                )
+                .await,
+            )
         }
     } else {
         None
@@ -2078,8 +2141,14 @@ pub async fn run_test_bench(
                 } else {
                     0.0
                 };
-                println!("  Mean overhead:   {:.2}ms ({:.1}%)", overhead_ms, overhead_pct);
-                println!("  Median overhead: {:.2}ms", eavs_results.median_ms - direct.median_ms);
+                println!(
+                    "  Mean overhead:   {:.2}ms ({:.1}%)",
+                    overhead_ms, overhead_pct
+                );
+                println!(
+                    "  Median overhead: {:.2}ms",
+                    eavs_results.median_ms - direct.median_ms
+                );
             }
         }
     }
@@ -2100,7 +2169,7 @@ async fn run_sequential_benchmark(
     target_name: String,
 ) -> ConcurrentBenchmarkResults {
     println!("Benchmarking {} (sequential)...", target_name);
-    
+
     let start_time = std::time::Instant::now();
     let mut latencies = Vec::with_capacity(count as usize);
     let mut failed = 0u32;
@@ -2127,17 +2196,21 @@ async fn run_sequential_benchmark(
             }
         }
         completed += 1;
-        
+
         if completed.is_multiple_of(10) {
             if duration.is_some() {
-                println!(" [{} in {:.1}s]", completed, start_time.elapsed().as_secs_f64());
+                println!(
+                    " [{} in {:.1}s]",
+                    completed,
+                    start_time.elapsed().as_secs_f64()
+                );
             } else {
                 println!(" [{}/{}]", completed, count);
             }
         }
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
-    
+
     if !completed.is_multiple_of(10) {
         println!();
     }
@@ -2164,21 +2237,24 @@ async fn run_concurrent_benchmark(
     duration: Option<Duration>,
     target_name: String,
 ) -> ConcurrentBenchmarkResults {
-    use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    println!("Benchmarking {} ({} concurrent)...", target_name, concurrency);
+    println!(
+        "Benchmarking {} ({} concurrent)...",
+        target_name, concurrency
+    );
 
     let start_time = std::time::Instant::now();
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(count as usize)));
     let failed = Arc::new(AtomicU32::new(0));
     let completed = Arc::new(AtomicU32::new(0));
     let should_stop = Arc::new(AtomicBool::new(false));
-    
+
     // Spawn worker tasks
     let mut handles = Vec::new();
-    
+
     for _ in 0..concurrency {
         let client = client.clone();
         let url = url.to_string();
@@ -2190,14 +2266,14 @@ async fn run_concurrent_benchmark(
         let completed = completed.clone();
         let should_stop = should_stop.clone();
         let start = start_time;
-        
+
         let handle = tokio::spawn(async move {
             loop {
                 // Check if we should stop
                 if should_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                
+
                 // Check termination conditions
                 if let Some(dur) = duration {
                     if start.elapsed() >= dur {
@@ -2210,7 +2286,7 @@ async fn run_concurrent_benchmark(
                         break;
                     }
                 }
-                
+
                 // Make request
                 let result = timed_request(
                     &client,
@@ -2218,8 +2294,9 @@ async fn run_concurrent_benchmark(
                     &body,
                     api_key.as_deref(),
                     provider.as_deref(),
-                ).await;
-                
+                )
+                .await;
+
                 match result {
                     Ok(dur) => {
                         let mut lats = latencies.lock().await;
@@ -2232,10 +2309,10 @@ async fn run_concurrent_benchmark(
                 completed.fetch_add(1, Ordering::Relaxed);
             }
         });
-        
+
         handles.push(handle);
     }
-    
+
     // Progress reporting task
     let completed_progress = completed.clone();
     let failed_progress = failed.clone();
@@ -2256,19 +2333,19 @@ async fn run_concurrent_benchmark(
             }
         }
     });
-    
+
     // Wait for all workers
     for handle in handles {
         let _ = handle.await;
     }
     should_stop.store(true, Ordering::Relaxed);
     let _ = progress_handle.await;
-    
+
     println!();
 
     let final_latencies = latencies.lock().await.clone();
     let final_failed = failed.load(Ordering::Relaxed);
-    
+
     ConcurrentBenchmarkResults::from_results(
         target_name,
         concurrency,
@@ -2344,9 +2421,8 @@ pub fn start_server_background(
     port: Option<u16>,
     config_path: Option<&str>,
 ) -> Result<std::process::Child, CliError> {
-    let exe_path = std::env::current_exe().map_err(|e| {
-        CliError::Other(format!("Failed to get current executable path: {}", e))
-    })?;
+    let exe_path = std::env::current_exe()
+        .map_err(|e| CliError::Other(format!("Failed to get current executable path: {}", e)))?;
 
     let mut cmd = std::process::Command::new(&exe_path);
     cmd.arg("serve")
@@ -2362,9 +2438,8 @@ pub fn start_server_background(
         cmd.arg("--config").arg(config);
     }
 
-    cmd.spawn().map_err(|e| {
-        CliError::Other(format!("Failed to start EAVS server: {}", e))
-    })
+    cmd.spawn()
+        .map_err(|e| CliError::Other(format!("Failed to start EAVS server: {}", e)))
 }
 
 /// Ensure an EAVS server is running, starting one if necessary.
@@ -2374,13 +2449,14 @@ pub async fn ensure_server_running(
     config_path: Option<&str>,
 ) -> Result<ServerStatus, CliError> {
     // Parse the preferred URL to get host and port
-    let url = url::Url::parse(preferred_url).map_err(|e| {
-        CliError::Other(format!("Invalid URL '{}': {}", preferred_url, e))
-    })?;
+    let url = url::Url::parse(preferred_url)
+        .map_err(|e| CliError::Other(format!("Invalid URL '{}': {}", preferred_url, e)))?;
 
     let host = url.host_str().unwrap_or("127.0.0.1");
     // Use port from URL if specified, otherwise get from config
-    let preferred_port = url.port().unwrap_or_else(|| get_effective_port(None, config_path));
+    let preferred_port = url
+        .port()
+        .unwrap_or_else(|| get_effective_port(None, config_path));
 
     // First, check if EAVS is already running at the preferred URL
     let check_url = format!("{}://{}:{}", url.scheme(), host, preferred_port);
@@ -2407,7 +2483,11 @@ pub async fn ensure_server_running(
 
     // Start the server (don't pass port - let config determine it, unless we had to find a new port)
     eprintln!("Starting EAVS server on port {}...", port);
-    let cli_port = if port != preferred_port { Some(port) } else { None };
+    let cli_port = if port != preferred_port {
+        Some(port)
+    } else {
+        None
+    };
     let _child = start_server_background(cli_port, config_path)?;
 
     // Build the new URL
@@ -2457,20 +2537,20 @@ fn xdg_state_dir() -> PathBuf {
 
 /// Get the PID file path for a given port
 fn get_pid_file_path(port: u16) -> std::path::PathBuf {
-    xdg_state_dir().join("eavs").join(format!("eavs-{}.pid", port))
+    xdg_state_dir()
+        .join("eavs")
+        .join(format!("eavs-{}.pid", port))
 }
 
 /// Write the PID file
 fn write_pid_file(port: u16, pid: u32) -> Result<(), CliError> {
     let pid_path = get_pid_file_path(port);
     if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliError::Other(format!("Failed to create PID directory: {}", e))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::Other(format!("Failed to create PID directory: {}", e)))?;
     }
-    std::fs::write(&pid_path, pid.to_string()).map_err(|e| {
-        CliError::Other(format!("Failed to write PID file: {}", e))
-    })
+    std::fs::write(&pid_path, pid.to_string())
+        .map_err(|e| CliError::Other(format!("Failed to write PID file: {}", e)))
 }
 
 /// Read the PID from file
@@ -2524,7 +2604,11 @@ fn kill_process(pid: u32, force: bool) -> Result<(), CliError> {
     #[cfg(not(unix))]
     {
         std::process::Command::new("taskkill")
-            .args(if force { vec!["/F", "/PID"] } else { vec!["/PID"] })
+            .args(if force {
+                vec!["/F", "/PID"]
+            } else {
+                vec!["/PID"]
+            })
             .arg(pid.to_string())
             .output()
             .map_err(|e| CliError::Other(format!("Failed to kill process: {}", e)))?;
@@ -2585,14 +2669,14 @@ pub fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u
     if let Some(p) = cli_port {
         return p;
     }
-    
+
     // Try to load from config file
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path).ok()
     } else {
         crate::config::AppConfig::load().ok()
     };
-    
+
     config.map(|c| c.server.port).unwrap_or(3000)
 }
 
@@ -2727,7 +2811,10 @@ pub async fn run_service_stop(port: Option<u16>, force: bool) -> Result<(), CliE
         None => {
             // Check if something is responding on the port
             if is_eavs_server_running(&url).await {
-                println!("EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})", effective_port);
+                println!(
+                    "EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})",
+                    effective_port
+                );
                 return Err(CliError::Other(
                     "Could not determine EAVS server PID".to_string(),
                 ));
@@ -2739,7 +2826,10 @@ pub async fn run_service_stop(port: Option<u16>, force: bool) -> Result<(), CliE
 }
 
 /// Restart the EAVS service
-pub async fn run_service_restart(port: Option<u16>, config_path: Option<String>) -> Result<(), CliError> {
+pub async fn run_service_restart(
+    port: Option<u16>,
+    config_path: Option<String>,
+) -> Result<(), CliError> {
     println!("Restarting EAVS server...");
 
     // Stop if running (use config to find port if not specified)
@@ -2819,7 +2909,10 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
 
                 // Check if port is in use by something else
                 if !is_port_available(effective_port) {
-                    println!("  Note:      Port {} is in use by another application", effective_port);
+                    println!(
+                        "  Note:      Port {} is in use by another application",
+                        effective_port
+                    );
                 }
             }
         }
@@ -2888,10 +2981,14 @@ mod tests {
         // Create a temp config file with a custom port
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("test-config.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
             [server]
             port = 4242
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let port = get_effective_port(None, Some(config_path.to_str().unwrap()));
         assert_eq!(port, 4242);
@@ -2910,10 +3007,14 @@ mod tests {
         // Create a temp config file with a custom port
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("test-config.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
             [server]
             port = 4242
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // CLI port should override config file port
         let port = get_effective_port(Some(9999), Some(config_path.to_str().unwrap()));
@@ -2986,7 +3087,8 @@ mod tests {
 
     #[test]
     fn test_benchmark_results_from_empty_latencies() {
-        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, vec![], 5);
+        let results =
+            ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, vec![], 5);
         assert_eq!(results.successful, 0);
         assert_eq!(results.failed, 5);
         assert_eq!(results.total_requests, 5);
@@ -2997,8 +3099,9 @@ mod tests {
     #[test]
     fn test_benchmark_results_statistics() {
         let latencies = vec![10.0, 20.0, 30.0, 40.0, 50.0];
-        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, latencies, 0);
-        
+        let results =
+            ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, latencies, 0);
+
         assert_eq!(results.successful, 5);
         assert_eq!(results.failed, 0);
         assert_eq!(results.min_ms, 10.0);
@@ -3011,9 +3114,15 @@ mod tests {
     fn test_parse_duration_string() {
         assert_eq!(parse_duration_string("30s"), Some(Duration::from_secs(30)));
         assert_eq!(parse_duration_string("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(parse_duration_string("2m30s"), Some(Duration::from_secs(150)));
+        assert_eq!(
+            parse_duration_string("2m30s"),
+            Some(Duration::from_secs(150))
+        );
         assert_eq!(parse_duration_string("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(parse_duration_string("1h30m"), Some(Duration::from_secs(5400)));
+        assert_eq!(
+            parse_duration_string("1h30m"),
+            Some(Duration::from_secs(5400))
+        );
         assert_eq!(parse_duration_string("invalid"), None);
         assert_eq!(parse_duration_string(""), None);
     }
@@ -3021,8 +3130,9 @@ mod tests {
     #[test]
     fn test_concurrent_benchmark_throughput() {
         let latencies = vec![100.0, 100.0, 100.0, 100.0, 100.0]; // 5 requests at 100ms each
-        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 5, 1.0, latencies, 0);
-        
+        let results =
+            ConcurrentBenchmarkResults::from_results("test".to_string(), 5, 1.0, latencies, 0);
+
         assert_eq!(results.total_requests, 5);
         assert_eq!(results.requests_per_second, 5.0); // 5 requests in 1 second
         assert_eq!(results.concurrency, 5);
@@ -3053,7 +3163,10 @@ mod tests {
         // Test without XDG_STATE_HOME but with HOME
         env::remove_var("XDG_STATE_HOME");
         env::set_var("HOME", "/home/testuser");
-        assert_eq!(xdg_state_dir(), PathBuf::from("/home/testuser/.local/state"));
+        assert_eq!(
+            xdg_state_dir(),
+            PathBuf::from("/home/testuser/.local/state")
+        );
 
         // Restore original env
         if let Some(val) = original_state {

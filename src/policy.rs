@@ -50,7 +50,12 @@ pub enum PolicyRule {
 }
 
 impl PolicyConfig {
-    pub fn apply(&self, provider: &str, path: &str, body: &mut Value) -> Result<(), PolicyViolation> {
+    pub fn apply(
+        &self,
+        provider: &str,
+        path: &str,
+        body: &mut Value,
+    ) -> Result<(), PolicyViolation> {
         if !self.enabled {
             return Ok(());
         }
@@ -85,7 +90,11 @@ impl PolicyConfig {
                             .unwrap_or_else(|| "Request denied by policy".to_string()),
                     });
                 }
-                PolicyRule::RewriteModel { provider: p, model: m, to } => {
+                PolicyRule::RewriteModel {
+                    provider: p,
+                    model: m,
+                    to,
+                } => {
                     if !matches_opt(p.as_deref(), provider) {
                         continue;
                     }
@@ -169,7 +178,9 @@ mod tests {
         };
 
         let mut body = json!({"model":"gpt-4o-mini","messages":[]});
-        let err = policy.apply("default", "/v1/chat/completions", &mut body).unwrap_err();
+        let err = policy
+            .apply("default", "/v1/chat/completions", &mut body)
+            .unwrap_err();
         assert_eq!(err.message, "nope");
     }
 
@@ -185,7 +196,9 @@ mod tests {
         };
 
         let mut body = json!({"model":"gpt-4o-mini","messages":[]});
-        policy.apply("default", "/v1/chat/completions", &mut body).unwrap();
+        policy
+            .apply("default", "/v1/chat/completions", &mut body)
+            .unwrap();
         assert_eq!(body["model"], "gpt-4o");
     }
 
@@ -209,7 +222,9 @@ mod tests {
             ]
         });
 
-        policy.apply("default", "/v1/chat/completions", &mut body).unwrap();
+        policy
+            .apply("default", "/v1/chat/completions", &mut body)
+            .unwrap();
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["function"]["name"], "get_weather");

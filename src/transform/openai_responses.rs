@@ -373,7 +373,11 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
                                 let arguments: Value =
                                     serde_json::from_str(&args_str).unwrap_or(json!({}));
 
-                                let tool_call = ToolCall { id, name, arguments };
+                                let tool_call = ToolCall {
+                                    id,
+                                    name,
+                                    arguments,
+                                };
 
                                 // Add to message
                                 state
@@ -486,7 +490,11 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
                         let args_str = item["arguments"].as_str().unwrap_or("{}");
                         let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
 
-                        let tool_call = ToolCall { id, name, arguments };
+                        let tool_call = ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        };
                         message
                             .content
                             .push(ContentBlock::ToolCall(tool_call.clone()));
@@ -550,7 +558,11 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
         };
 
         // Check for tool use
-        if message.content.iter().any(|c| matches!(c, ContentBlock::ToolCall(_))) {
+        if message
+            .content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::ToolCall(_)))
+        {
             message.stop_reason = StopReason::ToolUse;
         }
 
@@ -621,7 +633,9 @@ mod tests {
     #[test]
     fn test_is_codex_model() {
         assert!(OpenAIResponsesTransformer::is_codex_model("gpt-5.1-codex"));
-        assert!(OpenAIResponsesTransformer::is_codex_model("gpt-5.2-codex-max"));
+        assert!(OpenAIResponsesTransformer::is_codex_model(
+            "gpt-5.2-codex-max"
+        ));
         assert!(OpenAIResponsesTransformer::is_codex_model("gpt-5.1"));
         assert!(!OpenAIResponsesTransformer::is_codex_model("gpt-4o"));
         assert!(!OpenAIResponsesTransformer::is_codex_model("claude-3-opus"));

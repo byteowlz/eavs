@@ -122,7 +122,9 @@ async fn handle_plugin_command(state: &AppState, cmd: PluginCommand) -> Result<(
                 .ws_sessions
                 .deliver_injections(&conversation_id, messages.clone());
             if !delivered {
-                state.conversations.add_injections(&conversation_id, messages);
+                state
+                    .conversations
+                    .add_injections(&conversation_id, messages);
             }
             Ok(())
         }
@@ -145,7 +147,7 @@ fn resolve_env_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ProviderConfig};
+    use crate::config::{AppConfig, ProviderConfig, TransformConfig};
     use crate::upstream::{Upstream, UpstreamRequest};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
@@ -160,7 +162,8 @@ mod tests {
         fn send<'a>(
             &'a self,
             _request: UpstreamRequest,
-        ) -> futures::future::BoxFuture<'a, Result<crate::upstream::UpstreamResponse, std::io::Error>> {
+        ) -> futures::future::BoxFuture<'a, Result<crate::upstream::UpstreamResponse, std::io::Error>>
+        {
             Box::pin(async move {
                 Ok(crate::upstream::UpstreamResponse {
                     status: StatusCode::OK,
@@ -192,6 +195,7 @@ mod tests {
             state: Default::default(),
             keys: Default::default(),
             capture: Default::default(),
+            transform: TransformConfig::default(),
         }
     }
 

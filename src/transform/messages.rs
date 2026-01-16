@@ -93,7 +93,7 @@ pub fn filter_orphan_tool_calls(mut messages: Vec<Message>) -> Vec<Message> {
 
     // Process all messages except the last one
     let last_idx = messages.len() - 1;
-    
+
     for (idx, msg) in messages.iter_mut().enumerate() {
         if idx == last_idx {
             // Don't filter tool calls from the last message
@@ -128,9 +128,10 @@ pub fn filter_orphan_tool_calls(mut messages: Vec<Message>) -> Vec<Message> {
 pub fn has_thinking_blocks(messages: &[Message]) -> bool {
     messages.iter().any(|msg| {
         if let Message::Assistant(assistant) = msg {
-            assistant.content.iter().any(|block| {
-                matches!(block, ContentBlock::Thinking(_))
-            })
+            assistant
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Thinking(_)))
         } else {
             false
         }
@@ -192,12 +193,9 @@ pub fn convert_thinking_to_text(messages: Vec<Message>) -> Vec<Message> {
                     .content
                     .into_iter()
                     .map(|block| match block {
-                        ContentBlock::Thinking(thinking) => {
-                            ContentBlock::Text(TextContent::new(format!(
-                                "<thinking>\n{}\n</thinking>",
-                                thinking.thinking
-                            )))
-                        }
+                        ContentBlock::Thinking(thinking) => ContentBlock::Text(TextContent::new(
+                            format!("<thinking>\n{}\n</thinking>", thinking.thinking),
+                        )),
                         other => other,
                     })
                     .collect();
@@ -240,7 +238,9 @@ fn merge_consecutive_text(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
             }
             other => {
                 if !current_text.is_empty() {
-                    result.push(ContentBlock::Text(TextContent::new(std::mem::take(&mut current_text))));
+                    result.push(ContentBlock::Text(TextContent::new(std::mem::take(
+                        &mut current_text,
+                    ))));
                 }
                 result.push(other.clone());
             }
@@ -307,9 +307,7 @@ mod tests {
     #[test]
     fn test_no_transform_same_provider() {
         let assistant = AssistantMessage {
-            content: vec![
-                ContentBlock::Thinking(ThinkingContent::new("Thinking...")),
-            ],
+            content: vec![ContentBlock::Thinking(ThinkingContent::new("Thinking..."))],
             provider: "anthropic".to_string(),
             api: ApiType::AnthropicMessages,
             ..Default::default()
@@ -385,10 +383,7 @@ mod tests {
         ];
         assert!(has_thinking_blocks(&with_thinking));
 
-        let without_thinking = vec![
-            Message::user("Hello"),
-            Message::assistant("Hi there"),
-        ];
+        let without_thinking = vec![Message::user("Hello"), Message::assistant("Hi there")];
         assert!(!has_thinking_blocks(&without_thinking));
     }
 
@@ -398,8 +393,16 @@ mod tests {
             Message::user("Get weather and search"),
             Message::Assistant(AssistantMessage {
                 content: vec![
-                    ContentBlock::ToolCall(ToolCall::new("call_1", "get_weather", serde_json::json!({}))),
-                    ContentBlock::ToolCall(ToolCall::new("call_2", "search", serde_json::json!({}))),
+                    ContentBlock::ToolCall(ToolCall::new(
+                        "call_1",
+                        "get_weather",
+                        serde_json::json!({}),
+                    )),
+                    ContentBlock::ToolCall(ToolCall::new(
+                        "call_2",
+                        "search",
+                        serde_json::json!({}),
+                    )),
                 ],
                 ..Default::default()
             }),
@@ -454,23 +457,21 @@ mod tests {
 
     #[test]
     fn test_merge_text_blocks() {
-        let messages = vec![
-            Message::Assistant(AssistantMessage {
-                content: vec![
-                    ContentBlock::Text(TextContent::new("First")),
-                    ContentBlock::Text(TextContent::new("Second")),
-                    ContentBlock::ToolCall(ToolCall::new("call_1", "test", serde_json::json!({}))),
-                    ContentBlock::Text(TextContent::new("Third")),
-                ],
-                ..Default::default()
-            }),
-        ];
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![
+                ContentBlock::Text(TextContent::new("First")),
+                ContentBlock::Text(TextContent::new("Second")),
+                ContentBlock::ToolCall(ToolCall::new("call_1", "test", serde_json::json!({}))),
+                ContentBlock::Text(TextContent::new("Third")),
+            ],
+            ..Default::default()
+        })];
 
         let merged = merge_text_blocks(messages);
 
         if let Message::Assistant(assistant) = &merged[0] {
             assert_eq!(assistant.content.len(), 3);
-            
+
             // First two texts should be merged
             if let ContentBlock::Text(t) = &assistant.content[0] {
                 assert!(t.text.contains("First"));
@@ -478,10 +479,10 @@ mod tests {
             } else {
                 panic!("Expected text block");
             }
-            
+
             // Tool call preserved
             assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
-            
+
             // Last text preserved
             if let ContentBlock::Text(t) = &assistant.content[2] {
                 assert_eq!(t.text, "Third");
@@ -496,10 +497,10 @@ mod tests {
     #[test]
     fn test_empty_messages() {
         let messages: Vec<Message> = vec![];
-        
+
         let transformed = transform_messages(&messages, "openai", "openai_completions");
         assert!(transformed.is_empty());
-        
+
         let filtered = filter_orphan_tool_calls(messages);
         assert!(filtered.is_empty());
     }

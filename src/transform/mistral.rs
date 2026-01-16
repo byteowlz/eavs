@@ -476,7 +476,9 @@ fn build_mistral_assistant_message(assistant: &AssistantMessage) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{TextContent, ThinkingContent, Tool, ToolCall, ToolResultMessage, UserMessage};
+    use crate::types::{
+        TextContent, ThinkingContent, Tool, ToolCall, ToolResultMessage, UserMessage,
+    };
 
     #[test]
     fn test_mistral_transformer_new() {
@@ -570,14 +572,15 @@ mod tests {
     fn test_mistral_thinking_conversion() {
         let transformer = MistralTransformer::new();
 
-        let ctx =
-            Context::new("mistral-large").with_messages(vec![Message::Assistant(AssistantMessage {
+        let ctx = Context::new("mistral-large").with_messages(vec![Message::Assistant(
+            AssistantMessage {
                 content: vec![
                     ContentBlock::Thinking(ThinkingContent::new("Let me think...")),
                     ContentBlock::Text(TextContent::new("Here's my answer")),
                 ],
                 ..Default::default()
-            })]);
+            },
+        )]);
 
         let request = transformer.transform_request(&ctx).unwrap();
         let messages = request["messages"].as_array().unwrap();
@@ -593,15 +596,16 @@ mod tests {
     fn test_mistral_tool_call_id_fix() {
         let transformer = MistralTransformer::new();
 
-        let ctx =
-            Context::new("mistral-large").with_messages(vec![Message::Assistant(AssistantMessage {
+        let ctx = Context::new("mistral-large").with_messages(vec![Message::Assistant(
+            AssistantMessage {
                 content: vec![ContentBlock::ToolCall(ToolCall::new(
                     "call_very_long_id_12345",
                     "get_weather",
                     json!({"city": "NYC"}),
                 ))],
                 ..Default::default()
-            })]);
+            },
+        )]);
 
         let request = transformer.transform_request(&ctx).unwrap();
         let messages = request["messages"].as_array().unwrap();
@@ -634,15 +638,14 @@ mod tests {
     fn test_mistral_tool_result_empty_content() {
         let transformer = MistralTransformer::new();
 
-        let ctx = Context::new("mistral-large").with_messages(vec![Message::Tool(
-            ToolResultMessage {
+        let ctx =
+            Context::new("mistral-large").with_messages(vec![Message::Tool(ToolResultMessage {
                 tool_call_id: "call_123456789".to_string(),
                 tool_name: "do_nothing".to_string(),
                 content: vec![],
                 is_error: false,
                 timestamp: 0,
-            },
-        )]);
+            })]);
 
         let request = transformer.transform_request(&ctx).unwrap();
         let messages = request["messages"].as_array().unwrap();
@@ -766,6 +769,8 @@ mod tests {
         assert!(params.get("$schema").is_none());
         assert!(params.get("$id").is_none());
         assert!(params.get("additionalProperties").is_none());
-        assert!(params["properties"]["x"].get("additionalProperties").is_none());
+        assert!(params["properties"]["x"]
+            .get("additionalProperties")
+            .is_none());
     }
 }

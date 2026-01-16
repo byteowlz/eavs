@@ -191,10 +191,14 @@ impl ProviderType {
     pub fn needs_transform(&self) -> bool {
         matches!(
             self,
-            Self::Anthropic | Self::Google | Self::Bedrock | Self::OpenAICodex | Self::OpenAIResponses
+            Self::Anthropic
+                | Self::Google
+                | Self::Bedrock
+                | Self::OpenAICodex
+                | Self::OpenAIResponses
         )
     }
-    
+
     /// Check if this provider uses the Responses API format.
     pub fn uses_responses_api(&self) -> bool {
         matches!(self, Self::OpenAICodex | Self::OpenAIResponses)
@@ -253,10 +257,7 @@ impl ProviderType {
                 "amazon.titan-text-express-v1",
                 "meta.llama3-70b-instruct-v1:0",
             ],
-            Self::Cerebras => vec![
-                "llama3.1-8b",
-                "llama3.1-70b",
-            ],
+            Self::Cerebras => vec!["llama3.1-8b", "llama3.1-70b"],
             Self::Mock => vec!["mock-model"],
             // OpenAI-compatible providers should fetch from upstream
             _ => vec![],
@@ -564,7 +565,10 @@ mod tests {
         assert_eq!(ProviderType::from_str("cerebras"), ProviderType::Cerebras);
         assert_eq!(ProviderType::from_str("xai"), ProviderType::XAI);
         assert_eq!(ProviderType::from_str("grok"), ProviderType::XAI);
-        assert_eq!(ProviderType::from_str("openrouter"), ProviderType::OpenRouter);
+        assert_eq!(
+            ProviderType::from_str("openrouter"),
+            ProviderType::OpenRouter
+        );
         assert_eq!(
             ProviderType::from_str("openai-responses"),
             ProviderType::OpenAIResponses
@@ -596,7 +600,7 @@ mod tests {
         let mock = ProviderType::Mock;
         assert!(mock.is_mock());
         assert!(!ProviderType::OpenAI.is_mock());
-        
+
         let info = mock.info();
         assert_eq!(info.default_base_url, Some("mock://localhost"));
         assert!(matches!(info.auth_style, AuthStyle::None));
@@ -605,10 +609,7 @@ mod tests {
     #[test]
     fn test_provider_info_defaults() {
         let openai = ProviderType::OpenAI.info();
-        assert_eq!(
-            openai.default_base_url,
-            Some("https://api.openai.com/v1")
-        );
+        assert_eq!(openai.default_base_url, Some("https://api.openai.com/v1"));
         assert_eq!(openai.env_key_name, Some("OPENAI_API_KEY"));
 
         let anthropic = ProviderType::Anthropic.info();
@@ -670,22 +671,46 @@ mod tests {
         assert_eq!(detect_provider_from_host("chatgpt.com"), Some("openai"));
 
         // Anthropic
-        assert_eq!(detect_provider_from_host("api.anthropic.com"), Some("anthropic"));
+        assert_eq!(
+            detect_provider_from_host("api.anthropic.com"),
+            Some("anthropic")
+        );
         assert_eq!(detect_provider_from_host("claude.ai"), Some("anthropic"));
 
         // Google
-        assert_eq!(detect_provider_from_host("generativelanguage.googleapis.com"), Some("google"));
-        assert_eq!(detect_provider_from_host("gemini.google.com"), Some("google"));
+        assert_eq!(
+            detect_provider_from_host("generativelanguage.googleapis.com"),
+            Some("google")
+        );
+        assert_eq!(
+            detect_provider_from_host("gemini.google.com"),
+            Some("google")
+        );
 
         // Other providers
         assert_eq!(detect_provider_from_host("api.mistral.ai"), Some("mistral"));
         assert_eq!(detect_provider_from_host("api.groq.com"), Some("groq"));
-        assert_eq!(detect_provider_from_host("api.cerebras.ai"), Some("cerebras"));
+        assert_eq!(
+            detect_provider_from_host("api.cerebras.ai"),
+            Some("cerebras")
+        );
         assert_eq!(detect_provider_from_host("api.x.ai"), Some("xai"));
-        assert_eq!(detect_provider_from_host("openrouter.ai"), Some("openrouter"));
-        assert_eq!(detect_provider_from_host("api.together.xyz"), Some("together"));
-        assert_eq!(detect_provider_from_host("api.perplexity.ai"), Some("perplexity"));
-        assert_eq!(detect_provider_from_host("api.deepseek.com"), Some("deepseek"));
+        assert_eq!(
+            detect_provider_from_host("openrouter.ai"),
+            Some("openrouter")
+        );
+        assert_eq!(
+            detect_provider_from_host("api.together.xyz"),
+            Some("together")
+        );
+        assert_eq!(
+            detect_provider_from_host("api.perplexity.ai"),
+            Some("perplexity")
+        );
+        assert_eq!(
+            detect_provider_from_host("api.deepseek.com"),
+            Some("deepseek")
+        );
 
         // Unknown hosts
         assert_eq!(detect_provider_from_host("example.com"), None);
@@ -695,15 +720,30 @@ mod tests {
     #[test]
     fn test_detect_provider_from_host_case_insensitive() {
         assert_eq!(detect_provider_from_host("API.OPENAI.COM"), Some("openai"));
-        assert_eq!(detect_provider_from_host("Api.Anthropic.Com"), Some("anthropic"));
+        assert_eq!(
+            detect_provider_from_host("Api.Anthropic.Com"),
+            Some("anthropic")
+        );
     }
 
     #[test]
     fn test_detect_provider_from_model_anthropic() {
-        assert_eq!(detect_provider_from_model("claude-3-opus"), Some("anthropic"));
-        assert_eq!(detect_provider_from_model("claude-3-5-sonnet-20240620"), Some("anthropic"));
-        assert_eq!(detect_provider_from_model("claude-sonnet-4-20250514"), Some("anthropic"));
-        assert_eq!(detect_provider_from_model("Claude-3-Haiku"), Some("anthropic"));
+        assert_eq!(
+            detect_provider_from_model("claude-3-opus"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            detect_provider_from_model("claude-3-5-sonnet-20240620"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            detect_provider_from_model("claude-sonnet-4-20250514"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            detect_provider_from_model("Claude-3-Haiku"),
+            Some("anthropic")
+        );
     }
 
     #[test]
@@ -713,7 +753,10 @@ mod tests {
         assert_eq!(detect_provider_from_model("gpt-4o"), Some("openai"));
         assert_eq!(detect_provider_from_model("o1-preview"), Some("openai"));
         assert_eq!(detect_provider_from_model("o3-mini"), Some("openai"));
-        assert_eq!(detect_provider_from_model("text-embedding-3-small"), Some("openai"));
+        assert_eq!(
+            detect_provider_from_model("text-embedding-3-small"),
+            Some("openai")
+        );
         assert_eq!(detect_provider_from_model("dall-e-3"), Some("openai"));
         assert_eq!(detect_provider_from_model("whisper-1"), Some("openai"));
         assert_eq!(detect_provider_from_model("tts-1-hd"), Some("openai"));
@@ -722,25 +765,46 @@ mod tests {
     #[test]
     fn test_detect_provider_from_model_openai_codex() {
         // GPT-5.x models use the Codex provider (ChatGPT backend)
-        assert_eq!(detect_provider_from_model("gpt-5.1-codex"), Some("openai-codex"));
-        assert_eq!(detect_provider_from_model("gpt-5.2-codex-max"), Some("openai-codex"));
+        assert_eq!(
+            detect_provider_from_model("gpt-5.1-codex"),
+            Some("openai-codex")
+        );
+        assert_eq!(
+            detect_provider_from_model("gpt-5.2-codex-max"),
+            Some("openai-codex")
+        );
         assert_eq!(detect_provider_from_model("gpt-5.1"), Some("openai-codex"));
         assert_eq!(detect_provider_from_model("gpt-5.2"), Some("openai-codex"));
-        assert_eq!(detect_provider_from_model("codex-mini-latest"), Some("openai-codex"));
+        assert_eq!(
+            detect_provider_from_model("codex-mini-latest"),
+            Some("openai-codex")
+        );
     }
 
     #[test]
     fn test_detect_provider_from_model_google() {
         assert_eq!(detect_provider_from_model("gemini-pro"), Some("google"));
-        assert_eq!(detect_provider_from_model("gemini-1.5-flash"), Some("google"));
-        assert_eq!(detect_provider_from_model("models/gemini-pro"), Some("google"));
+        assert_eq!(
+            detect_provider_from_model("gemini-1.5-flash"),
+            Some("google")
+        );
+        assert_eq!(
+            detect_provider_from_model("models/gemini-pro"),
+            Some("google")
+        );
     }
 
     #[test]
     fn test_detect_provider_from_model_mistral() {
         assert_eq!(detect_provider_from_model("mistral-large"), Some("mistral"));
-        assert_eq!(detect_provider_from_model("mistral-small-latest"), Some("mistral"));
-        assert_eq!(detect_provider_from_model("codestral-latest"), Some("mistral"));
+        assert_eq!(
+            detect_provider_from_model("mistral-small-latest"),
+            Some("mistral")
+        );
+        assert_eq!(
+            detect_provider_from_model("codestral-latest"),
+            Some("mistral")
+        );
         assert_eq!(detect_provider_from_model("pixtral-12b"), Some("mistral"));
     }
 
@@ -752,21 +816,42 @@ mod tests {
 
     #[test]
     fn test_detect_provider_from_model_bedrock() {
-        assert_eq!(detect_provider_from_model("anthropic.claude-3-sonnet"), Some("bedrock"));
-        assert_eq!(detect_provider_from_model("amazon.titan-text-express-v1"), Some("bedrock"));
-        assert_eq!(detect_provider_from_model("meta.llama3-70b-instruct-v1"), Some("bedrock"));
+        assert_eq!(
+            detect_provider_from_model("anthropic.claude-3-sonnet"),
+            Some("bedrock")
+        );
+        assert_eq!(
+            detect_provider_from_model("amazon.titan-text-express-v1"),
+            Some("bedrock")
+        );
+        assert_eq!(
+            detect_provider_from_model("meta.llama3-70b-instruct-v1"),
+            Some("bedrock")
+        );
     }
 
     #[test]
     fn test_detect_provider_from_model_perplexity() {
-        assert_eq!(detect_provider_from_model("pplx-70b-online"), Some("perplexity"));
-        assert_eq!(detect_provider_from_model("sonar-small-online"), Some("perplexity"));
+        assert_eq!(
+            detect_provider_from_model("pplx-70b-online"),
+            Some("perplexity")
+        );
+        assert_eq!(
+            detect_provider_from_model("sonar-small-online"),
+            Some("perplexity")
+        );
     }
 
     #[test]
     fn test_detect_provider_from_model_deepseek() {
-        assert_eq!(detect_provider_from_model("deepseek-coder"), Some("deepseek"));
-        assert_eq!(detect_provider_from_model("deepseek-chat"), Some("deepseek"));
+        assert_eq!(
+            detect_provider_from_model("deepseek-coder"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            detect_provider_from_model("deepseek-chat"),
+            Some("deepseek")
+        );
     }
 
     #[test]
@@ -780,7 +865,10 @@ mod tests {
 
     #[test]
     fn test_detect_provider_from_model_case_insensitive() {
-        assert_eq!(detect_provider_from_model("CLAUDE-3-OPUS"), Some("anthropic"));
+        assert_eq!(
+            detect_provider_from_model("CLAUDE-3-OPUS"),
+            Some("anthropic")
+        );
         assert_eq!(detect_provider_from_model("GPT-4"), Some("openai"));
         assert_eq!(detect_provider_from_model("Gemini-Pro"), Some("google"));
     }

@@ -14,7 +14,8 @@ pub struct GitHubCopilotConfig {
 pub fn config_from_env() -> Result<GitHubCopilotConfig, String> {
     let client_id = std::env::var("EAVS_OAUTH_GITHUB_COPILOT_CLIENT_ID")
         .map_err(|_| "Missing EAVS_OAUTH_GITHUB_COPILOT_CLIENT_ID".to_string())?;
-    let scope = std::env::var("EAVS_OAUTH_GITHUB_COPILOT_SCOPE").unwrap_or_else(|_| "read:user".to_string());
+    let scope = std::env::var("EAVS_OAUTH_GITHUB_COPILOT_SCOPE")
+        .unwrap_or_else(|_| "read:user".to_string());
 
     Ok(GitHubCopilotConfig { client_id, scope })
 }
@@ -79,17 +80,23 @@ pub async fn poll_device_flow(
         .map_err(|e| format!("Token poll parse failed: {}", e))?;
 
     if status.is_success() {
-        return Ok(DevicePollResult::Authorized(token_to_credentials(user_id, body)));
+        return Ok(DevicePollResult::Authorized(token_to_credentials(
+            user_id, body,
+        )));
     }
 
     if let Some(error) = body.error.as_deref() {
         match error {
             "authorization_pending" => {
-                return Ok(DevicePollResult::Pending { interval: body.interval })
+                return Ok(DevicePollResult::Pending {
+                    interval: body.interval,
+                })
             }
             "slow_down" => {
                 let interval = body.interval.unwrap_or(5) + 5;
-                return Ok(DevicePollResult::Pending { interval: Some(interval) });
+                return Ok(DevicePollResult::Pending {
+                    interval: Some(interval),
+                });
             }
             "expired_token" => return Err("Device code expired".to_string()),
             _ => return Err(format!("Device flow error: {}", error)),

@@ -18,18 +18,18 @@ impl CaptureHandle {
     /// Stop the mitmproxy process gracefully.
     pub fn stop(mut self) {
         tracing::info!("Stopping mitmproxy capture...");
-        
+
         // Try graceful shutdown first (SIGTERM on Unix)
         #[cfg(unix)]
         unsafe {
             libc::kill(self.child.id() as i32, libc::SIGTERM);
         }
-        
+
         #[cfg(not(unix))]
         {
             let _ = self.child.kill();
         }
-        
+
         // Wait for process to exit
         match self.child.wait() {
             Ok(status) => {
@@ -156,7 +156,7 @@ mod tests {
         };
 
         let args = config.build_mitmproxy_args(3000);
-        
+
         assert!(args.contains(&"--mode".to_string()));
         assert!(args.contains(&"local:ChatGPT".to_string()));
         assert!(args.contains(&"-s".to_string()));

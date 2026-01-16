@@ -92,8 +92,11 @@ pub async fn exchange_code(
         .map_err(|e| format!("Token request failed: {}", e))?;
 
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
-    
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
     if !status.is_success() {
         return Err(format!("Token exchange failed ({}): {}", status, text));
     }

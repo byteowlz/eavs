@@ -12,7 +12,6 @@ use governor::{
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-
 /// Rate limiter for virtual API keys.
 ///
 /// Supports per-key rate limiting for:
@@ -201,9 +200,7 @@ impl TokenBucketLimiter {
 
     fn refill_if_needed(&self) {
         let now = Self::now_secs();
-        let last = self
-            .last_refill
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let last = self.last_refill.load(std::sync::atomic::Ordering::Relaxed);
 
         // Refill every 60 seconds
         if now >= last + 60
@@ -216,10 +213,10 @@ impl TokenBucketLimiter {
                     std::sync::atomic::Ordering::Relaxed,
                 )
                 .is_ok()
-            {
-                self.tokens
-                    .store(self.limit, std::sync::atomic::Ordering::Relaxed);
-            }
+        {
+            self.tokens
+                .store(self.limit, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn check(&self, tokens: u32) -> bool {
@@ -229,7 +226,7 @@ impl TokenBucketLimiter {
 
     fn consume(&self, tokens: u32) {
         self.refill_if_needed();
-        
+
         // Use compare_exchange in a loop to safely consume tokens without underflow.
         // This fixes the race condition where available() could return a value
         // that's stale by the time fetch_sub executes.
@@ -237,15 +234,15 @@ impl TokenBucketLimiter {
             let current = self.tokens.load(std::sync::atomic::Ordering::Acquire);
             let to_consume = tokens.min(current);
             let new_value = current.saturating_sub(to_consume);
-            
+
             match self.tokens.compare_exchange(
                 current,
                 new_value,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
             ) {
-                Ok(_) => break,  // Successfully consumed
-                Err(_) => continue,  // Another thread modified tokens, retry
+                Ok(_) => break,     // Successfully consumed
+                Err(_) => continue, // Another thread modified tokens, retry
             }
         }
     }
@@ -295,15 +292,14 @@ impl DailyLimiter {
                     std::sync::atomic::Ordering::Relaxed,
                 )
                 .is_ok()
-            {
-                self.count
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-            }
+        {
+            self.count.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn check(&self) -> bool {
         self.reset_if_new_day();
-        
+
         // Use compare_exchange in a loop to atomically check and increment
         // This prevents race conditions where two threads could see the same
         // count and both succeed even when only one slot remains.
@@ -312,7 +308,7 @@ impl DailyLimiter {
             if current >= self.limit {
                 return false;
             }
-            
+
             // Try to atomically increment from current to current + 1
             match self.count.compare_exchange(
                 current,
@@ -320,8 +316,8 @@ impl DailyLimiter {
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
             ) {
-                Ok(_) => return true,  // Successfully incremented
-                Err(_) => continue,    // Another thread modified count, retry
+                Ok(_) => return true, // Successfully incremented
+                Err(_) => continue,   // Another thread modified count, retry
             }
         }
     }
@@ -450,7 +446,7 @@ mod tests {
         // and does not allow more requests than the limit.
         let limiter = Arc::new(DailyLimiter::new(100));
         let mut handles = vec![];
-        
+
         // Spawn 50 threads, each trying to make 5 requests
         for _ in 0..50 {
             let limiter = Arc::clone(&limiter);
@@ -464,13 +460,21 @@ mod tests {
                 successes
             }));
         }
-        
+
         let total_successes: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        
+
         // Should not exceed the limit of 100
-        assert!(total_successes <= 100, "Expected at most 100 successes, got {}", total_successes);
+        assert!(
+            total_successes <= 100,
+            "Expected at most 100 successes, got {}",
+            total_successes
+        );
         // With 50 threads * 5 requests = 250 attempts, we should hit the limit
-        assert_eq!(total_successes, 100, "Expected exactly 100 successes, got {}", total_successes);
+        assert_eq!(
+            total_successes, 100,
+            "Expected exactly 100 successes, got {}",
+            total_successes
+        );
     }
 
     #[test]
@@ -479,7 +483,7 @@ mod tests {
         // and does not go negative.
         let limiter = Arc::new(TokenBucketLimiter::new(1000));
         let mut handles = vec![];
-        
+
         // Spawn 10 threads, each consuming 200 tokens
         for _ in 0..10 {
             let limiter = Arc::clone(&limiter);
@@ -487,16 +491,23 @@ mod tests {
                 limiter.consume(200);
             }));
         }
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         // Available tokens should be 0, not negative
         let available = limiter.available();
-        assert!(available <= 1000, "Available tokens should not exceed limit");
+        assert!(
+            available <= 1000,
+            "Available tokens should not exceed limit"
+        );
         // With 2000 tokens consumed from 1000, we should be at 0
-        assert_eq!(available, 0, "Expected 0 available tokens, got {}", available);
+        assert_eq!(
+            available, 0,
+            "Expected 0 available tokens, got {}",
+            available
+        );
     }
 
     #[test]
@@ -504,7 +515,7 @@ mod tests {
         // Test the race between check() and consume()
         let limiter = Arc::new(TokenBucketLimiter::new(100));
         let mut handles = vec![];
-        
+
         // Multiple threads checking and consuming
         for _ in 0..20 {
             let limiter = Arc::clone(&limiter);
@@ -519,11 +530,15 @@ mod tests {
                 consumed
             }));
         }
-        
+
         let total_consumed: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        
+
         // Total consumed should be at most the limit
-        assert!(total_consumed <= 100, "Total consumed should not exceed 100, got {}", total_consumed);
+        assert!(
+            total_consumed <= 100,
+            "Total consumed should not exceed 100, got {}",
+            total_consumed
+        );
     }
 
     #[test]
@@ -532,7 +547,7 @@ mod tests {
         let limiter = Arc::new(RateLimiter::new());
         let key = "concurrent-rpd-test";
         let mut handles = vec![];
-        
+
         // Spawn 20 threads, each making 10 requests
         for _ in 0..20 {
             let limiter = Arc::clone(&limiter);
@@ -547,11 +562,19 @@ mod tests {
                 successes
             }));
         }
-        
+
         let total_successes: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        
+
         // Should not exceed the daily limit of 50
-        assert!(total_successes <= 50, "Expected at most 50 successes, got {}", total_successes);
-        assert_eq!(total_successes, 50, "Expected exactly 50 successes, got {}", total_successes);
+        assert!(
+            total_successes <= 50,
+            "Expected at most 50 successes, got {}",
+            total_successes
+        );
+        assert_eq!(
+            total_successes, 50,
+            "Expected exactly 50 successes, got {}",
+            total_successes
+        );
     }
 }

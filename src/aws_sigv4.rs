@@ -59,7 +59,11 @@ pub fn sign_request_headers(
     }
 
     // Canonical request pieces.
-    let canonical_uri = if url.path().is_empty() { "/" } else { url.path() };
+    let canonical_uri = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
     let canonical_query = canonical_query_string(&url);
 
     let (canonical_headers, signed_headers) = canonical_headers(headers);
@@ -158,7 +162,9 @@ fn collapse_spaces(s: &str) -> String {
 }
 
 fn aws_encode(input: &str) -> String {
-    url::form_urlencoded::byte_serialize(input.as_bytes()).collect::<String>().replace('+', "%20")
+    url::form_urlencoded::byte_serialize(input.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {

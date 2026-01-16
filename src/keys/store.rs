@@ -10,8 +10,8 @@
 //! - Batched SQLite writes via background task
 //! - Configurable sync intervals
 
+use crate::keys::generation::{generate_human_id, generate_key, hash_key};
 use crate::keys::types::*;
-use crate::keys::generation::{generate_key, generate_human_id, hash_key};
 use chrono::{DateTime, Datelike, Utc};
 use dashmap::DashMap;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
@@ -47,14 +47,14 @@ impl KeyStore {
     /// Create a new key store, initializing the database if needed.
     pub async fn new(db_path: impl AsRef<Path>) -> Result<Self, KeyStoreError> {
         let db_path = db_path.as_ref();
-        
+
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| KeyStoreError::Io(e.to_string()))?;
         }
 
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
-        
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&db_url)
@@ -67,13 +67,13 @@ impl KeyStore {
         let cache = Arc::new(DashMap::new());
         let human_id_index = Arc::new(DashMap::new());
         let pending_updates = Arc::new(AtomicU64::new(0));
-        
+
         // Start background sync task
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let pool_clone = pool.clone();
         let cache_clone = cache.clone();
         let pending_clone = pending_updates.clone();
-        
+
         tokio::spawn(async move {
             Self::background_sync_task(pool_clone, cache_clone, pending_clone, sync_rx).await;
         });
@@ -111,7 +111,7 @@ impl KeyStore {
             sync_tx: None, // No background task for tests (sync is immediate)
         })
     }
-    
+
     /// Background task that batches and syncs usage updates to SQLite.
     async fn background_sync_task(
         pool: Pool<Sqlite>,
@@ -121,10 +121,10 @@ impl KeyStore {
     ) {
         use std::collections::HashSet;
         use std::time::Duration;
-        
+
         let mut pending_keys: HashSet<String> = HashSet::new();
         let mut interval = tokio::time::interval(Duration::from_secs(5)); // Sync every 5 seconds
-        
+
         loop {
             tokio::select! {
                 // Receive sync requests
@@ -152,10 +152,10 @@ impl KeyStore {
                 }
             }
         }
-        
+
         tracing::debug!("Background sync task shutting down");
     }
-    
+
     /// Sync a batch of keys to the database.
     async fn sync_keys_to_db(
         pool: &Pool<Sqlite>,
@@ -171,7 +171,7 @@ impl KeyStore {
                         continue;
                     }
                 };
-                
+
                 if let Err(e) = sqlx::query("UPDATE virtual_keys SET usage = ? WHERE key_hash = ?")
                     .bind(&usage_json)
                     .bind(key_hash)
@@ -182,7 +182,7 @@ impl KeyStore {
                 }
             }
         }
-        
+
         tracing::debug!("Synced {} keys to database", key_hashes.len());
     }
 
@@ -293,7 +293,8 @@ impl KeyStore {
         for row in rows {
             if let Ok(key) = row.to_virtual_key() {
                 // Update secondary index for O(1) human ID lookups
-                self.human_id_index.insert(key.key_id.clone(), key.key_hash.clone());
+                self.human_id_index
+                    .insert(key.key_id.clone(), key.key_hash.clone());
                 self.cache.insert(key.key_hash.clone(), key);
             }
         }
@@ -310,7 +311,7 @@ impl KeyStore {
     ) -> Result<CreateKeyResponse, KeyStoreError> {
         let key = generate_key();
         let key_hash = hash_key(&key);
-        
+
         // Generate a unique human-readable ID (retry if collision)
         let key_id = self.generate_unique_human_id().await;
 
@@ -372,9 +373,9 @@ impl KeyStore {
             oauth_user: request.oauth_user,
         })
     }
-    
+
     /// Generate a unique human-readable ID.
-    /// 
+    ///
     /// Generates adjective-noun combinations until finding one not in use.
     /// With ~40,000 combinations (200 adj * 200 nouns), collisions are rare
     /// until the pool is substantially depleted.
@@ -382,27 +383,28 @@ impl KeyStore {
         // Try up to 100 times to find an unused ID
         for attempt in 0..100 {
             let id = generate_human_id();
-            
+
             // Check if this ID is already in use (including disabled keys)
-            let exists: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM virtual_keys WHERE key_id = ? LIMIT 1"
-            )
-            .bind(&id)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten();
-            
+            let exists: Option<(i32,)> =
+                sqlx::query_as("SELECT 1 FROM virtual_keys WHERE key_id = ? LIMIT 1")
+                    .bind(&id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+
             if exists.is_none() {
                 return id;
             }
-            
+
             // Log if we're having trouble finding IDs (pool getting full)
             if attempt == 50 {
-                tracing::warn!("Human ID pool getting depleted, took 50+ attempts to find unused ID");
+                tracing::warn!(
+                    "Human ID pool getting depleted, took 50+ attempts to find unused ID"
+                );
             }
         }
-        
+
         // Fallback: append timestamp suffix to guarantee uniqueness
         let base_id = generate_human_id();
         let suffix = Utc::now().timestamp_millis() % 10000;
@@ -423,7 +425,7 @@ impl KeyStore {
     }
 
     /// Look up a key by its human-readable ID (e.g., "cold-lamp").
-    /// 
+    ///
     /// Uses a secondary index for O(1) lookup instead of O(n) iteration.
     pub fn get_by_human_id(&self, key_id: &str) -> Option<VirtualKey> {
         // First look up the key_hash via secondary index
@@ -499,7 +501,7 @@ impl KeyStore {
             let _ = tx.send(SyncMessage::Shutdown);
         }
     }
-    
+
     /// Delete a key permanently.
     #[allow(dead_code)]
     pub async fn delete_key(&self, key_hash: &str) -> Result<bool, KeyStoreError> {
@@ -521,7 +523,7 @@ impl KeyStore {
     }
 
     /// Update usage stats for a key.
-    /// 
+    ///
     /// This is optimized for high-throughput:
     /// - Cache is updated immediately (in-memory, O(1))
     /// - Usage history is recorded asynchronously
@@ -545,7 +547,7 @@ impl KeyStore {
             key.usage.total_spend_usd += cost_usd;
             key.usage.window_spend_usd += cost_usd;
             key.usage.last_request_at = Some(Utc::now());
-            
+
             // Check if we need to reset the window
             // Use UTC timestamps consistently to avoid timezone edge cases
             if let Some(window) = &key.permissions.budget_window {
@@ -616,7 +618,7 @@ impl KeyStore {
             if let Some(key) = self.cache.get(key_hash) {
                 let usage_json = serde_json::to_string(&key.usage)
                     .map_err(|e| KeyStoreError::Serialization(e.to_string()))?;
-                
+
                 sqlx::query("UPDATE virtual_keys SET usage = ? WHERE key_hash = ?")
                     .bind(&usage_json)
                     .bind(key_hash)
@@ -636,7 +638,7 @@ impl KeyStore {
         limit: Option<u32>,
     ) -> Result<Vec<UsageRecord>, KeyStoreError> {
         let limit = limit.unwrap_or(100);
-        
+
         let rows: Vec<UsageRow> = sqlx::query_as(
             "SELECT timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd FROM usage_history WHERE key_hash = ? ORDER BY timestamp DESC LIMIT ?",
         )
@@ -896,16 +898,16 @@ mod tests {
         };
 
         let response = store.create_key(request).await.unwrap();
-        
+
         // Key should be the long eavs- format
         assert!(response.key.starts_with("eavs-"));
         assert!(response.key.len() > 30);
-        
+
         // key_id should be human-readable (adjective-noun format)
         assert!(response.key_id.contains('-'));
         let parts: Vec<_> = response.key_id.split('-').collect();
         assert_eq!(parts.len(), 2, "key_id should be adjective-noun format");
-        
+
         // Should be able to look up by human ID
         let key = store.get_by_human_id(&response.key_id).unwrap();
         assert_eq!(key.name, Some("Human ID Test".to_string()));
@@ -917,7 +919,7 @@ mod tests {
         let store = KeyStore::in_memory().await.unwrap();
 
         let mut ids = std::collections::HashSet::new();
-        
+
         // Create several keys and verify unique IDs
         for i in 0..10 {
             let request = CreateKeyRequest {
@@ -929,7 +931,10 @@ mod tests {
             };
 
             let response = store.create_key(request).await.unwrap();
-            assert!(ids.insert(response.key_id.clone()), "Duplicate key_id generated");
+            assert!(
+                ids.insert(response.key_id.clone()),
+                "Duplicate key_id generated"
+            );
         }
     }
 }

@@ -18,7 +18,10 @@ pub struct UpstreamResponse {
 }
 
 pub trait Upstream: Send + Sync {
-    fn send<'a>(&'a self, request: UpstreamRequest) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>>;
+    fn send<'a>(
+        &'a self,
+        request: UpstreamRequest,
+    ) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>>;
 
     fn get_bytes<'a>(
         &'a self,
@@ -73,7 +76,10 @@ impl ReqwestUpstream {
 }
 
 impl Upstream for ReqwestUpstream {
-    fn send<'a>(&'a self, request: UpstreamRequest) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+    fn send<'a>(
+        &'a self,
+        request: UpstreamRequest,
+    ) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
         Box::pin(async move {
             let method =
                 reqwest::Method::from_bytes(request.method.as_str().as_bytes()).map_err(|e| {
@@ -82,22 +88,22 @@ impl Upstream for ReqwestUpstream {
 
             let mut builder = self.client.request(method.clone(), &request.url);
             builder = builder.headers(request.headers.clone());
-            
+
             // Only add body for methods that support it and when body is non-empty.
             // GET, HEAD, OPTIONS, and TRACE should not have a body per HTTP spec.
             // Some providers (like OpenAI) reject GET requests with a body.
             let should_have_body = !matches!(
                 method,
-                reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS | reqwest::Method::TRACE
+                reqwest::Method::GET
+                    | reqwest::Method::HEAD
+                    | reqwest::Method::OPTIONS
+                    | reqwest::Method::TRACE
             );
             if should_have_body && !request.body.is_empty() {
                 builder = builder.body(request.body);
             }
 
-            let resp = builder
-                .send()
-                .await
-                .map_err(std::io::Error::other)?;
+            let resp = builder.send().await.map_err(std::io::Error::other)?;
 
             let status = resp.status();
             let headers = resp.headers().clone();

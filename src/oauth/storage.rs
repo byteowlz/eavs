@@ -116,14 +116,13 @@ impl OAuthStore {
         user_id: &str,
         provider: OAuthProvider,
     ) -> Result<bool, OAuthStoreError> {
-        let result = sqlx::query(
-            "DELETE FROM oauth_credentials WHERE user_id = ? AND provider = ?",
-        )
-        .bind(user_id)
-        .bind(provider.as_str())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
+        let result =
+            sqlx::query("DELETE FROM oauth_credentials WHERE user_id = ? AND provider = ?")
+                .bind(user_id)
+                .bind(provider.as_str())
+                .execute(&self.pool)
+                .await
+                .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
     }

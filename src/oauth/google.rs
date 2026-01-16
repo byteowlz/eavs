@@ -15,7 +15,10 @@ pub struct GoogleOAuthConfig {
     pub provider: OAuthProvider,
 }
 
-pub fn config_from_env(provider: OAuthProvider, redirect_uri: String) -> Result<GoogleOAuthConfig, String> {
+pub fn config_from_env(
+    provider: OAuthProvider,
+    redirect_uri: String,
+) -> Result<GoogleOAuthConfig, String> {
     let (client_id_var, secret_var, scope_var, default_scope) = match provider {
         OAuthProvider::GoogleGeminiCli => (
             "EAVS_OAUTH_GOOGLE_GEMINI_CLIENT_ID",
@@ -32,8 +35,8 @@ pub fn config_from_env(provider: OAuthProvider, redirect_uri: String) -> Result<
         _ => return Err("Unsupported Google provider".to_string()),
     };
 
-    let client_id = std::env::var(client_id_var)
-        .map_err(|_| format!("Missing {}", client_id_var))?;
+    let client_id =
+        std::env::var(client_id_var).map_err(|_| format!("Missing {}", client_id_var))?;
     let client_secret = std::env::var(secret_var).ok();
     let scope = std::env::var(scope_var).unwrap_or_else(|_| default_scope.to_string());
 
@@ -53,8 +56,9 @@ pub fn build_authorize_url(
 ) -> Result<String, String> {
     let challenge = code_challenge(code_verifier)?;
 
-    let mut url = url::Url::parse(AUTH_URL)
-        .unwrap_or_else(|_| url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap());
+    let mut url = url::Url::parse(AUTH_URL).unwrap_or_else(|_| {
+        url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap()
+    });
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", &config.client_id)

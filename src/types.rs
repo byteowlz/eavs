@@ -142,7 +142,11 @@ pub struct ToolResultMessage {
 
 impl ToolResultMessage {
     /// Create a text tool result.
-    pub fn text(tool_call_id: impl Into<String>, tool_name: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn text(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
@@ -153,7 +157,11 @@ impl ToolResultMessage {
     }
 
     /// Create an error tool result.
-    pub fn error(tool_call_id: impl Into<String>, tool_name: impl Into<String>, error: impl Into<String>) -> Self {
+    pub fn error(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
@@ -328,7 +336,11 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: serde_json::Value) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -356,7 +368,11 @@ pub struct Tool {
 }
 
 impl Tool {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: serde_json::Value) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
@@ -444,28 +460,18 @@ pub enum StreamEvent {
         partial: AssistantMessage,
     },
     /// Text content started at index
-    TextStart {
-        content_index: usize,
-    },
+    TextStart { content_index: usize },
     /// Text content delta
-    TextDelta {
-        content_index: usize,
-        delta: String,
-    },
+    TextDelta { content_index: usize, delta: String },
     /// Text content finished
     TextEnd {
         content_index: usize,
         content: String,
     },
     /// Thinking content started
-    ThinkingStart {
-        content_index: usize,
-    },
+    ThinkingStart { content_index: usize },
     /// Thinking content delta
-    ThinkingDelta {
-        content_index: usize,
-        delta: String,
-    },
+    ThinkingDelta { content_index: usize, delta: String },
     /// Thinking content finished
     ThinkingEnd {
         content_index: usize,
@@ -480,19 +486,14 @@ pub enum StreamEvent {
         name: String,
     },
     /// Tool call arguments delta
-    ToolCallDelta {
-        content_index: usize,
-        delta: String,
-    },
+    ToolCallDelta { content_index: usize, delta: String },
     /// Tool call finished
     ToolCallEnd {
         content_index: usize,
         tool_call: ToolCall,
     },
     /// Usage statistics update
-    Usage {
-        usage: Usage,
-    },
+    Usage { usage: Usage },
     /// Stream finished successfully
     Done {
         reason: StopReason,
@@ -606,7 +607,11 @@ mod tests {
 
     #[test]
     fn test_tool_call() {
-        let tc = ToolCall::new("call_123", "get_weather", serde_json::json!({"city": "NYC"}));
+        let tc = ToolCall::new(
+            "call_123",
+            "get_weather",
+            serde_json::json!({"city": "NYC"}),
+        );
         assert_eq!(tc.id, "call_123");
         assert_eq!(tc.name, "get_weather");
         assert_eq!(tc.arguments["city"], "NYC");

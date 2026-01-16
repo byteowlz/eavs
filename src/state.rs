@@ -94,7 +94,10 @@ impl WsSessionManager {
     }
 
     /// Register a WS session for a conversation.
-    pub fn register(&self, conversation_id: &str) -> (WsSessionToken, mpsc::UnboundedReceiver<Vec<Injection>>) {
+    pub fn register(
+        &self,
+        conversation_id: &str,
+    ) -> (WsSessionToken, mpsc::UnboundedReceiver<Vec<Injection>>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let id = WsSessionToken(self.next_id.fetch_add(1, Ordering::Relaxed));
 
@@ -264,7 +267,9 @@ impl ConversationStore {
         });
 
         if expired > 0 {
-            self.stats.total_expired.fetch_add(expired, Ordering::Relaxed);
+            self.stats
+                .total_expired
+                .fetch_add(expired, Ordering::Relaxed);
             tracing::debug!("Cleaned up {} expired conversations", expired);
         }
     }
@@ -535,6 +540,7 @@ mod tests {
             keys: KeysConfig::default(),
             state: StateConfig::default(),
             capture: Default::default(),
+            transform: Default::default(),
         }
     }
 

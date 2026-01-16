@@ -100,7 +100,6 @@ pub enum BudgetWindow {
     Monthly,
 }
 
-
 /// Usage tracking for a virtual key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeyUsage {
@@ -258,7 +257,7 @@ impl VirtualKey {
     }
 
     /// Get the key ID for display.
-    /// 
+    ///
     /// Since key_id is now a human-readable ID (e.g., "cold-lamp"),
     /// we return it as-is without masking.
     pub fn display_key_id(&self) -> String {

@@ -7,13 +7,14 @@ mod config;
 mod keys;
 mod logging;
 mod oauth;
-mod runtime_state;
+mod plugins;
 mod policy;
 mod provider;
-mod plugins;
 mod proxy;
+mod runtime_state;
 mod state;
 mod transform;
+mod transform_plugins;
 mod types;
 mod upstream;
 
@@ -21,10 +22,10 @@ mod upstream;
 mod integration_tests;
 
 use crate::cli::{
-    ensure_server_running, run_service_logs, run_service_restart, run_service_start, 
-    run_service_status, run_service_stop, run_test_bench, run_test_chat, run_test_health, 
-    run_test_rate_limit, run_test_routing, Cli, run_test_image, run_test_tool_call, 
-    Commands, EavsClient, KeyCommands, ProviderCommands, ServiceCommands, TestCommands,
+    ensure_server_running, run_service_logs, run_service_restart, run_service_start,
+    run_service_status, run_service_stop, run_test_bench, run_test_chat, run_test_health,
+    run_test_image, run_test_rate_limit, run_test_routing, run_test_tool_call, Cli, Commands,
+    EavsClient, KeyCommands, ProviderCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -181,13 +182,19 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/auth/poll/:provider", post(api::oauth_poll_handler))
         .route("/auth/code/:provider", post(api::oauth_code_handler))
         .route("/auth/status/:user_id", get(api::oauth_status_handler))
-        .route("/auth/:user_id/:provider", delete(api::oauth_delete_handler))
+        .route(
+            "/auth/:user_id/:provider",
+            delete(api::oauth_delete_handler),
+        )
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
         // WebSocket proxy (e.g. OpenAI Realtime) - default route
         .route("/v1/realtime", get(proxy::ws_proxy_handler))
         // Provider-prefixed WebSocket proxy (e.g. /openai/v1/realtime)
-        .route("/:provider/v1/realtime", get(proxy::provider_ws_proxy_handler))
+        .route(
+            "/:provider/v1/realtime",
+            get(proxy::provider_ws_proxy_handler),
+        )
         // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
         // This allows explicit provider selection via URL path
         .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
@@ -255,11 +262,11 @@ fn load_config(config_path: Option<&str>) -> crate::config::AppConfig {
 }
 
 async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
-    use crate::keys::KeyStore;
     use crate::cli::{
-        run_key_create_direct, run_key_list_direct, run_key_info_direct,
-        run_key_revoke_direct, run_key_usage_direct, run_key_bind_direct,
+        run_key_bind_direct, run_key_create_direct, run_key_info_direct, run_key_list_direct,
+        run_key_revoke_direct, run_key_usage_direct,
     };
+    use crate::keys::KeyStore;
 
     match action {
         KeyCommands::Create {
@@ -273,14 +280,14 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             budget,
             expires,
             format,
-            url: _,  // Not needed for direct DB access
+            url: _, // Not needed for direct DB access
             config,
         } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             run_key_create_direct(
                 &store,
                 name,
@@ -296,44 +303,71 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             )
             .await
         }
-        KeyCommands::List { all, format, url: _, config } => {
+        KeyCommands::List {
+            all,
+            format,
+            url: _,
+            config,
+        } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             run_key_list_direct(&store, all, format).await
         }
-        KeyCommands::Info { key, format, url: _, config } => {
+        KeyCommands::Info {
+            key,
+            format,
+            url: _,
+            config,
+        } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             run_key_info_direct(&store, &key, format).await
         }
-        KeyCommands::Revoke { key, yes, url: _, config } => {
+        KeyCommands::Revoke {
+            key,
+            yes,
+            url: _,
+            config,
+        } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             run_key_revoke_direct(&store, &key, yes).await
         }
-        KeyCommands::Usage { key, days, format, url: _, config } => {
+        KeyCommands::Usage {
+            key,
+            days,
+            format,
+            url: _,
+            config,
+        } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             run_key_usage_direct(&store, &key, days, format).await
         }
-        KeyCommands::Bind { key, oauth_user, clear, format, config } => {
+        KeyCommands::Bind {
+            key,
+            oauth_user,
+            clear,
+            format,
+            config,
+        } => {
             let app_config = load_config(config.as_deref());
             let db_path = app_config.keys.resolved_database_path();
-            let store = KeyStore::new(&db_path).await.map_err(|e| {
-                cli::CliError::Other(format!("Failed to open key database: {}", e))
-            })?;
+            let store = KeyStore::new(&db_path)
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
             let oauth_user = if clear { None } else { oauth_user };
             if !clear && oauth_user.is_none() {
                 return Err(cli::CliError::Other(
@@ -352,7 +386,9 @@ fn run_provider_command(action: ProviderCommands) -> Result<(), cli::CliError> {
 
     match action {
         ProviderCommands::Current => run_provider_current(),
-        ProviderCommands::Use { provider, config } => run_provider_use(&provider, config.as_deref()),
+        ProviderCommands::Use { provider, config } => {
+            run_provider_use(&provider, config.as_deref())
+        }
         ProviderCommands::Clear => run_provider_clear(),
         ProviderCommands::List { config } => run_provider_list(config.as_deref()),
     }
@@ -445,7 +481,11 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             )
             .await
         }
-        TestCommands::Health { url, format, config } => {
+        TestCommands::Health {
+            url,
+            format,
+            config,
+        } => {
             // Ensure server is running, auto-start if needed
             let server = ensure_server_running(&url, config.as_deref()).await?;
             let client = EavsClient::with_url(server.url);

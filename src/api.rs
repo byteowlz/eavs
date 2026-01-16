@@ -27,24 +27,32 @@ const MAX_INJECTION_MESSAGES: usize = 100;
 const VALID_INJECTION_ROLES: &[&str] = &["system", "user", "assistant"];
 
 /// Validate injection payload to prevent abuse.
-fn validate_injection_payload(payload: &InjectionPayload) -> Result<(), (StatusCode, &'static str)> {
+fn validate_injection_payload(
+    payload: &InjectionPayload,
+) -> Result<(), (StatusCode, &'static str)> {
     // Check total number of messages
     if payload.messages.len() > MAX_INJECTION_MESSAGES {
-        return Err((StatusCode::BAD_REQUEST, "Too many messages in injection payload"));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Too many messages in injection payload",
+        ));
     }
-    
+
     for injection in &payload.messages {
         // Validate role is one of the allowed values
         if !VALID_INJECTION_ROLES.contains(&injection.role.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, "Invalid role in injection. Allowed: system, user, assistant"));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid role in injection. Allowed: system, user, assistant",
+            ));
         }
-        
+
         // Validate content length
         if injection.content.len() > MAX_INJECTION_CONTENT_LENGTH {
             return Err((StatusCode::BAD_REQUEST, "Injection content too large"));
         }
     }
-    
+
     Ok(())
 }
 
@@ -56,7 +64,7 @@ pub async fn inject_handler(
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
     // Validate the injection payload
     validate_injection_payload(&payload)?;
-    
+
     // If a WS session is active for this conversation, deliver immediately (mid-stream).
     // Otherwise, queue for the next HTTP request (pre-request injection).
     let delivered = state
@@ -64,7 +72,9 @@ pub async fn inject_handler(
         .deliver_injections(&conversation_id, payload.messages.clone());
 
     if !delivered {
-        state.conversations.add_injections(&conversation_id, payload.messages);
+        state
+            .conversations
+            .add_injections(&conversation_id, payload.messages);
     }
     Ok(StatusCode::OK)
 }
@@ -227,9 +237,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Check master key authorization using constant-time comparison.
-fn check_master_key(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, Json<KeyApiError>)> {
+fn check_master_key(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<KeyApiError>)> {
     let master_key = state.config.keys.resolved_master_key();
-    
+
     // If no master key configured, admin API is disabled
     let expected_key = master_key.ok_or_else(|| {
         (
@@ -272,7 +285,7 @@ fn check_keys_enabled(state: &AppState) -> Result<(), (StatusCode, Json<KeyApiEr
 }
 
 /// Create a new virtual API key.
-/// 
+///
 /// POST /admin/keys
 /// Authorization: Bearer <master_key>
 pub async fn create_key_handler(
@@ -286,7 +299,10 @@ pub async fn create_key_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -310,7 +326,10 @@ pub async fn create_key_handler(
     let response = store.create_key(request).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to create key: {}", e), "create_failed")),
+            Json(KeyApiError::new(
+                format!("Failed to create key: {}", e),
+                "create_failed",
+            )),
         )
     })?;
 
@@ -328,7 +347,7 @@ pub struct CreateKeyApiRequest {
 }
 
 /// List all virtual API keys.
-/// 
+///
 /// GET /admin/keys
 /// Authorization: Bearer <master_key>
 pub async fn list_keys_handler(
@@ -341,14 +360,20 @@ pub async fn list_keys_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     let keys = store.list_keys().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to list keys: {}", e), "list_failed")),
+            Json(KeyApiError::new(
+                format!("Failed to list keys: {}", e),
+                "list_failed",
+            )),
         )
     })?;
 
@@ -356,7 +381,7 @@ pub async fn list_keys_handler(
 }
 
 /// Get info about a specific key.
-/// 
+///
 /// GET /admin/keys/:key_hash
 /// Authorization: Bearer <master_key>
 pub async fn get_key_handler(
@@ -370,7 +395,10 @@ pub async fn get_key_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -389,10 +417,10 @@ pub async fn get_key_handler(
 }
 
 /// Disable a virtual API key.
-/// 
+///
 /// DELETE /admin/keys/:key_id_or_hash
 /// Authorization: Bearer <master_key>
-/// 
+///
 /// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn delete_key_handler(
     State(state): State<AppState>,
@@ -405,7 +433,10 @@ pub async fn delete_key_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -419,7 +450,10 @@ pub async fn delete_key_handler(
     let deleted = store.disable_key(&key_hash).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to disable key: {}", e), "delete_failed")),
+            Json(KeyApiError::new(
+                format!("Failed to disable key: {}", e),
+                "delete_failed",
+            )),
         )
     })?;
 
@@ -436,10 +470,10 @@ pub async fn delete_key_handler(
 }
 
 /// Get usage history for a key.
-/// 
+///
 /// GET /admin/keys/:key_id_or_hash/usage
 /// Authorization: Bearer <master_key>
-/// 
+///
 /// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn key_usage_handler(
     State(state): State<AppState>,
@@ -452,7 +486,10 @@ pub async fn key_usage_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -463,18 +500,24 @@ pub async fn key_usage_handler(
         key_id_or_hash
     };
 
-    let history = store.get_usage_history(&key_hash, Some(100)).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to get usage: {}", e), "usage_failed")),
-        )
-    })?;
+    let history = store
+        .get_usage_history(&key_hash, Some(100))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(KeyApiError::new(
+                    format!("Failed to get usage: {}", e),
+                    "usage_failed",
+                )),
+            )
+        })?;
 
     Ok(Json(history))
 }
 
 /// Self-provisioning endpoint (if enabled).
-/// 
+///
 /// POST /keys/provision
 /// No auth required, but subject to config limits.
 pub async fn provision_key_handler(
@@ -496,7 +539,10 @@ pub async fn provision_key_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -518,7 +564,10 @@ pub async fn provision_key_handler(
     let response = store.create_key(request).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to create key: {}", e), "create_failed")),
+            Json(KeyApiError::new(
+                format!("Failed to create key: {}", e),
+                "create_failed",
+            )),
         )
     })?;
 
@@ -543,7 +592,7 @@ pub struct KeyStatsResponse {
 }
 
 /// Get key system stats.
-/// 
+///
 /// GET /admin/keys/stats
 /// Authorization: Bearer <master_key>
 pub async fn key_stats_handler(
@@ -556,7 +605,10 @@ pub async fn key_stats_handler(
     let store = state.get_key_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new("Key store not initialized", "internal_error")),
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -571,7 +623,7 @@ pub async fn key_stats_handler(
 }
 
 /// Update pricing from LiteLLM.
-/// 
+///
 /// POST /admin/pricing/update
 /// Authorization: Bearer <master_key>
 pub async fn update_pricing_handler(
@@ -584,7 +636,10 @@ pub async fn update_pricing_handler(
     let count = state.pricing.update_from_litellm().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KeyApiError::new(format!("Failed to update pricing: {}", e), "update_failed")),
+            Json(KeyApiError::new(
+                format!("Failed to update pricing: {}", e),
+                "update_failed",
+            )),
         )
     })?;
 
@@ -609,7 +664,10 @@ pub struct OAuthApiError {
     pub error: String,
 }
 
-fn oauth_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<OAuthApiError>) {
+fn oauth_error(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<OAuthApiError>) {
     (
         status,
         Json(OAuthApiError {
@@ -860,8 +918,8 @@ pub async fn oauth_callback_handler(
                 &state_value,
                 &code_verifier,
             )
-                .await
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+            .await
+            .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
         OAuthProvider::OpenAICodex => {
             let redirect_uri = resolve_redirect_uri(redirect_uri)?;
@@ -965,7 +1023,9 @@ pub async fn oauth_code_handler(
             let redirect_uri = redirect_uri.unwrap_or_else(anthropic::default_redirect_uri);
             let verifier = code_verifier
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
-            let state_str = state_override.as_deref().or(payload.state.as_deref())
+            let state_str = state_override
+                .as_deref()
+                .or(payload.state.as_deref())
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing state"))?;
             let config = anthropic::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
@@ -1044,17 +1104,12 @@ pub async fn oauth_poll_handler(
     }
 
     let client = reqwest::Client::new();
-    let config = github_copilot::config_from_env()
-        .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
+    let config =
+        github_copilot::config_from_env().map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
 
-    match github_copilot::poll_device_flow(
-        &client,
-        &config,
-        &payload.user_id,
-        &payload.device_code,
-    )
-    .await
-    .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
+    match github_copilot::poll_device_flow(&client, &config, &payload.user_id, &payload.device_code)
+        .await
+        .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
     {
         github_copilot::DevicePollResult::Pending { interval } => Ok(Json(OAuthPollResponse {
             status: "pending".to_string(),
@@ -1102,7 +1157,11 @@ pub async fn oauth_delete_handler(
         .await
         .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(if deleted { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND })
+    Ok(if deleted {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    })
 }
 
 #[cfg(test)]
@@ -1130,6 +1189,7 @@ mod tests {
             state: StateConfig::default(),
             keys: KeysConfig::default(),
             capture: Default::default(),
+            transform: Default::default(),
         };
         AppState::new(config)
     }
@@ -1165,6 +1225,7 @@ mod tests {
             state: StateConfig::default(),
             keys: KeysConfig::default(),
             capture: Default::default(),
+            transform: Default::default(),
         };
         AppState::new(config)
     }
@@ -1276,9 +1337,18 @@ mod tests {
     fn test_validate_injection_valid_roles() {
         let payload = InjectionPayload {
             messages: vec![
-                Injection { role: "system".to_string(), content: "Be helpful".to_string() },
-                Injection { role: "user".to_string(), content: "Hello".to_string() },
-                Injection { role: "assistant".to_string(), content: "Hi there".to_string() },
+                Injection {
+                    role: "system".to_string(),
+                    content: "Be helpful".to_string(),
+                },
+                Injection {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                },
+                Injection {
+                    role: "assistant".to_string(),
+                    content: "Hi there".to_string(),
+                },
             ],
         };
         assert!(validate_injection_payload(&payload).is_ok());
@@ -1287,33 +1357,44 @@ mod tests {
     #[test]
     fn test_validate_injection_invalid_role() {
         let payload = InjectionPayload {
-            messages: vec![
-                Injection { role: "tool".to_string(), content: "Bad role".to_string() },
-            ],
+            messages: vec![Injection {
+                role: "tool".to_string(),
+                content: "Bad role".to_string(),
+            }],
         };
         let result = validate_injection_payload(&payload);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().1, "Invalid role in injection. Allowed: system, user, assistant");
+        assert_eq!(
+            result.unwrap_err().1,
+            "Invalid role in injection. Allowed: system, user, assistant"
+        );
     }
 
     #[test]
     fn test_validate_injection_too_many_messages() {
         let messages: Vec<Injection> = (0..101)
-            .map(|i| Injection { role: "user".to_string(), content: format!("Message {}", i) })
+            .map(|i| Injection {
+                role: "user".to_string(),
+                content: format!("Message {}", i),
+            })
             .collect();
         let payload = InjectionPayload { messages };
         let result = validate_injection_payload(&payload);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().1, "Too many messages in injection payload");
+        assert_eq!(
+            result.unwrap_err().1,
+            "Too many messages in injection payload"
+        );
     }
 
     #[test]
     fn test_validate_injection_content_too_large() {
         let large_content = "x".repeat(MAX_INJECTION_CONTENT_LENGTH + 1);
         let payload = InjectionPayload {
-            messages: vec![
-                Injection { role: "user".to_string(), content: large_content },
-            ],
+            messages: vec![Injection {
+                role: "user".to_string(),
+                content: large_content,
+            }],
         };
         let result = validate_injection_payload(&payload);
         assert!(result.is_err());
@@ -1331,7 +1412,7 @@ mod tests {
         let a = vec![0u8, 255, 128, 64, 32];
         let b = vec![0u8, 255, 128, 64, 32];
         let c = vec![0u8, 255, 128, 64, 31];
-        
+
         assert!(constant_time_eq(&a, &b));
         assert!(!constant_time_eq(&a, &c));
     }

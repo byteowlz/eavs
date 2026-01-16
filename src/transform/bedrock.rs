@@ -1,5 +1,7 @@
 use crate::transform::{RequestTransformer, ResponseTransformer, TransformError};
-use crate::types::{ApiType, AssistantMessage, Context, StopReason, StreamEvent, StreamState, TextContent, Usage};
+use crate::types::{
+    ApiType, AssistantMessage, Context, StopReason, StreamEvent, StreamState, TextContent, Usage,
+};
 use serde_json::{json, Value};
 
 /// AWS Bedrock transformer.
@@ -49,8 +51,7 @@ impl RequestTransformer for BedrockTransformer {
             let mut req = anthropic.transform_request(context)?;
 
             // Bedrock uses model ID in the URL path, not in the body.
-            req.as_object_mut()
-                .map(|o| o.remove("model"));
+            req.as_object_mut().map(|o| o.remove("model"));
 
             // Bedrock requires anthropic_version for Claude models.
             req["anthropic_version"] = json!("bedrock-2023-05-31");
@@ -156,7 +157,8 @@ impl ResponseTransformer for BedrockTransformer {
                 stop_reason: StopReason::EndTurn,
                 ..Default::default()
             };
-            msg.content.push(crate::types::ContentBlock::Text(TextContent::new(text)));
+            msg.content
+                .push(crate::types::ContentBlock::Text(TextContent::new(text)));
             msg.usage = Usage::default();
 
             return Ok(vec![
@@ -219,7 +221,9 @@ mod tests {
         });
 
         let events = BedrockTransformer::new().parse_response(&body).unwrap();
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "ok")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "ok")));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
     }
 }

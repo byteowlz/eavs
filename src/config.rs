@@ -98,6 +98,9 @@ pub struct AppConfig {
     pub keys: KeysConfig,
     #[serde(default)]
     pub capture: CaptureConfig,
+    /// Request/response transform plugins
+    #[serde(default)]
+    pub transform: TransformConfig,
 }
 
 impl AppConfig {
@@ -113,6 +116,7 @@ impl AppConfig {
             state: StateConfig::default(),
             keys: KeysConfig::default(),
             capture: CaptureConfig::default(),
+            transform: TransformConfig::default(),
         }
     }
 }
@@ -141,25 +145,27 @@ impl Default for ServerConfig {
 }
 
 /// Redact sensitive information from URLs and strings.
-/// 
+///
 /// Redacts:
 /// - API keys in query parameters (api_key=xxx, key=xxx)
 /// - Bearer tokens (keeps prefix for debugging)
 /// - Common API key patterns (sk-, eavs-, etc.)
 pub fn redact_sensitive(input: &str) -> String {
     let mut result = input.to_string();
-    
+
     // Redact query parameters with sensitive names
-    for param_name in &["api_key", "key", "token", "secret", "password", "api-key", "apikey"] {
+    for param_name in &[
+        "api_key", "key", "token", "secret", "password", "api-key", "apikey",
+    ] {
         result = redact_query_param(&result, param_name);
     }
-    
+
     // Redact Bearer tokens (keep first 8 chars for debugging)
     result = redact_bearer_token(&result);
-    
+
     // Redact common API key patterns
     result = redact_api_key_patterns(&result);
-    
+
     result
 }
 
@@ -167,25 +173,25 @@ pub fn redact_sensitive(input: &str) -> String {
 fn redact_query_param(input: &str, param_name: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut remaining = input;
-    
+
     while let Some(idx) = remaining.find(&format!("{}=", param_name)) {
         // Check it's actually a parameter (preceded by ? or &)
         let prefix_ok = idx == 0 || {
             let prev_char = remaining.chars().nth(idx.saturating_sub(1));
             prev_char == Some('?') || prev_char == Some('&')
         };
-        
+
         if !prefix_ok {
             result.push_str(&remaining[..idx + param_name.len() + 1]);
             remaining = &remaining[idx + param_name.len() + 1..];
             continue;
         }
-        
+
         // Copy up to and including the =
         result.push_str(&remaining[..idx + param_name.len() + 1]);
         result.push_str("[REDACTED]");
         remaining = &remaining[idx + param_name.len() + 1..];
-        
+
         // Skip the actual value
         if let Some(end_idx) = remaining.find(['&', ' ', '\n']) {
             remaining = &remaining[end_idx..];
@@ -193,7 +199,7 @@ fn redact_query_param(input: &str, param_name: &str) -> String {
             remaining = "";
         }
     }
-    
+
     result.push_str(remaining);
     result
 }
@@ -202,27 +208,28 @@ fn redact_query_param(input: &str, param_name: &str) -> String {
 fn redact_bearer_token(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut remaining = input;
-    
+
     while let Some(idx) = remaining.to_lowercase().find("bearer ") {
         // Copy up to and including "Bearer "
         result.push_str(&remaining[..idx + 7]);
         remaining = &remaining[idx + 7..];
-        
+
         // Keep first 8 chars of the token for debugging, redact rest
-        let token_end = remaining.find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        let token_end = remaining
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
             .unwrap_or(remaining.len());
         let token = &remaining[..token_end];
-        
+
         if token.len() > 8 {
             result.push_str(&token[..8]);
             result.push_str("[REDACTED]");
         } else {
             result.push_str(token);
         }
-        
+
         remaining = &remaining[token_end..];
     }
-    
+
     result.push_str(remaining);
     result
 }
@@ -231,11 +238,11 @@ fn redact_bearer_token(input: &str) -> String {
 fn redact_api_key_patterns(input: &str) -> String {
     let prefixes = ["sk-", "eavs-", "api-", "key-", "pk-", "rk-"];
     let mut result = input.to_string();
-    
+
     for prefix in prefixes {
         result = redact_prefixed_key(&result, prefix);
     }
-    
+
     result
 }
 
@@ -243,17 +250,18 @@ fn redact_api_key_patterns(input: &str) -> String {
 fn redact_prefixed_key(input: &str, prefix: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut remaining = input;
-    
+
     while let Some(idx) = remaining.find(prefix) {
         // Copy up to and including the prefix
         result.push_str(&remaining[..idx + prefix.len()]);
         remaining = &remaining[idx + prefix.len()..];
-        
+
         // Find the end of the key (alphanumeric chars)
-        let key_len = remaining.chars()
+        let key_len = remaining
+            .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .count();
-        
+
         if key_len > 8 {
             // Keep first 8 chars, redact rest
             let key = &remaining[..key_len];
@@ -266,7 +274,7 @@ fn redact_prefixed_key(input: &str, prefix: &str) -> String {
             remaining = &remaining[key_len..];
         }
     }
-    
+
     result.push_str(remaining);
     result
 }
@@ -565,6 +573,53 @@ pub struct AnalysisPluginConfig {
     pub env: HashMap<String, String>,
 }
 
+/// Configuration for request/response transform plugins.
+///
+/// Transform plugins allow customizing requests and responses before/after
+/// they are sent to upstream providers. This is useful for:
+/// - Provider-specific quirks (e.g., OAuth token restrictions)
+/// - Custom header injection
+/// - Request/response logging and modification
+///
+/// Plugins are external scripts that receive JSON on stdin and output
+/// modified JSON on stdout.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct TransformConfig {
+    /// Enable transform plugins
+    pub enabled: bool,
+    /// Transform plugins for requests/responses
+    pub plugins: Vec<TransformPluginConfig>,
+}
+
+/// Transform plugin configuration.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct TransformPluginConfig {
+    /// Unique name for the plugin (for logs/observability).
+    pub name: String,
+    /// Executable to run (resolved via PATH unless absolute).
+    pub command: String,
+    /// Arguments to pass to the plugin.
+    pub args: Vec<String>,
+    /// Environment variables for the plugin (supports `env:VAR` values).
+    pub env: HashMap<String, String>,
+    /// Provider filter - only run for specific providers (e.g., ["anthropic", "openai"]).
+    /// Empty means run for all providers.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Whether to run for OAuth requests only
+    #[serde(default)]
+    pub oauth_only: bool,
+    /// Timeout in milliseconds for plugin execution (default: 5000)
+    #[serde(default = "default_transform_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_transform_timeout() -> u64 {
+    5000
+}
+
 /// Configuration for conversation state storage.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -585,10 +640,10 @@ impl Default for StateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            capture_all: false,         // Only track conversations with injections by default
-            ttl_secs: 3600,             // 1 hour default
-            cleanup_interval_secs: 60,  // Cleanup every minute
-            max_conversations: 10000,   // Max 10k conversations
+            capture_all: false, // Only track conversations with injections by default
+            ttl_secs: 3600,     // 1 hour default
+            cleanup_interval_secs: 60, // Cleanup every minute
+            max_conversations: 10000, // Max 10k conversations
         }
     }
 }
@@ -720,10 +775,7 @@ impl CaptureConfig {
 
     /// Build mitmproxy command arguments.
     pub fn build_mitmproxy_args(&self, eavs_port: u16) -> Vec<String> {
-        let mut args = vec![
-            "--mode".to_string(),
-            self.mode.clone(),
-        ];
+        let mut args = vec!["--mode".to_string(), self.mode.clone()];
 
         // Add addon script
         if let Some(addon_path) = self.resolved_addon_path() {
@@ -803,7 +855,9 @@ impl KeysConfig {
     fn get_xdg_data_path() -> PathBuf {
         let data_home = env_var_nonempty("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .or_else(|| env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .or_else(|| {
+                env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
             .unwrap_or_else(|| PathBuf::from("."));
 
         data_home.join("eavs").join("word_lists.toml")
@@ -829,7 +883,9 @@ impl AppConfig {
         Self::load_with_override_path(Some(path))
     }
 
-    fn finalize_config(builder: config::ConfigBuilder<config::builder::DefaultState>) -> Result<Self, ConfigError> {
+    fn finalize_config(
+        builder: config::ConfigBuilder<config::builder::DefaultState>,
+    ) -> Result<Self, ConfigError> {
         let mut config: AppConfig = builder.build()?.try_deserialize()?;
 
         // Merge legacy "upstream" into "providers" for backward compatibility
@@ -906,28 +962,36 @@ impl AppConfig {
         };
 
         std::fs::create_dir_all(dir).map_err(|e| {
-            ConfigError::Message(format!("Failed to create config dir {}: {}", dir.display(), e))
+            ConfigError::Message(format!(
+                "Failed to create config dir {}: {}",
+                dir.display(),
+                e
+            ))
         })?;
 
         let schema_path = dir.join("config.schema.json");
         if !schema_path.exists() {
-            std::fs::write(&schema_path, include_bytes!("../config/config.schema.json")).map_err(|e| {
-                ConfigError::Message(format!(
-                    "Failed to write schema file {}: {}",
-                    schema_path.display(),
-                    e
-                ))
-            })?;
+            std::fs::write(&schema_path, include_bytes!("../config/config.schema.json")).map_err(
+                |e| {
+                    ConfigError::Message(format!(
+                        "Failed to write schema file {}: {}",
+                        schema_path.display(),
+                        e
+                    ))
+                },
+            )?;
         }
 
         if !config_path.exists() {
-            std::fs::write(config_path, include_str!("../config/config.example.toml")).map_err(|e| {
-                ConfigError::Message(format!(
-                    "Failed to write default config file {}: {}",
-                    config_path.display(),
-                    e
-                ))
-            })?;
+            std::fs::write(config_path, include_str!("../config/config.example.toml")).map_err(
+                |e| {
+                    ConfigError::Message(format!(
+                        "Failed to write default config file {}: {}",
+                        config_path.display(),
+                        e
+                    ))
+                },
+            )?;
         }
 
         Ok(())
@@ -950,9 +1014,10 @@ impl AppConfig {
     /// Returns the config along with metadata about how it was resolved.
     pub fn resolve_provider(&self, name: &str) -> Option<ProviderLookupResult<'_>> {
         let name_lower = name.to_lowercase();
-        
+
         // First, try exact match (case-insensitive)
-        if let Some((resolved_name, config)) = self.providers
+        if let Some((resolved_name, config)) = self
+            .providers
             .iter()
             .find(|(k, _)| k.to_lowercase() == name_lower)
         {
@@ -962,7 +1027,7 @@ impl AppConfig {
                 was_fallback: false,
             });
         }
-        
+
         // If name is empty, fall back to default
         if name.is_empty() {
             if let Some(config) = self.providers.get("default") {
@@ -973,7 +1038,7 @@ impl AppConfig {
                 });
             }
         }
-        
+
         None
     }
 
@@ -1020,7 +1085,10 @@ mod tests {
     #[test]
     fn test_get_api_key_env() {
         env::set_var("TEST_API_KEY", "secret-value");
-        assert_eq!(get_api_key("env:TEST_API_KEY"), Some("secret-value".to_string()));
+        assert_eq!(
+            get_api_key("env:TEST_API_KEY"),
+            Some("secret-value".to_string())
+        );
         env::remove_var("TEST_API_KEY");
     }
 
@@ -1062,7 +1130,10 @@ mod tests {
             base_url: "env:TEST_BASE_URL".to_string(),
             ..Default::default()
         };
-        assert_eq!(config_with_env.resolved_base_url(), "https://env.api.test/v1");
+        assert_eq!(
+            config_with_env.resolved_base_url(),
+            "https://env.api.test/v1"
+        );
         env::remove_var("TEST_BASE_URL");
     }
 
@@ -1182,9 +1253,7 @@ mod tests {
 
         match &config.backends[3] {
             LogBackend::OpenTelemetry {
-                endpoint,
-                protocol,
-                ..
+                endpoint, protocol, ..
             } => {
                 assert_eq!(endpoint, "http://localhost:4317");
                 assert_eq!(protocol, "grpc");
