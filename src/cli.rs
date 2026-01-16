@@ -90,6 +90,63 @@ pub enum Commands {
         #[command(subcommand)]
         action: TestCommands,
     },
+
+    /// Authenticate with an OAuth provider (Anthropic, OpenAI, Google, GitHub Copilot)
+    Login {
+        /// Provider to authenticate with (anthropic, openai, google, github-copilot)
+        /// If not specified, shows an interactive selection menu
+        provider: Option<String>,
+
+        /// User ID for storing credentials (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+
+        /// Port for local callback server (PKCE flows)
+        #[arg(long, default_value = "8085")]
+        callback_port: u16,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Show OAuth authentication status
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommands {
+    /// List authenticated providers for a user
+    Status {
+        /// User ID to check (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Remove stored OAuth credentials
+    Logout {
+        /// Provider to logout from
+        provider: String,
+
+        /// User ID (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2957,6 +3014,473 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
             .map_err(|e| CliError::Other(format!("Failed to read logs: {}", e)))?;
 
         print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// OAuth Login Commands
+// =============================================================================
+
+use crate::oauth::{
+    anthropic, github_copilot, google, openai_codex, pkce, OAuthCredentials, OAuthProvider,
+    OAuthStore,
+};
+
+/// Available OAuth providers for interactive selection
+const OAUTH_PROVIDERS: &[(&str, &str)] = &[
+    ("anthropic", "Anthropic (Claude)"),
+    ("openai", "OpenAI (ChatGPT/Codex)"),
+    ("google", "Google (Gemini CLI)"),
+    ("github-copilot", "GitHub Copilot"),
+];
+
+/// Interactive provider selection
+fn select_provider_interactive() -> Result<OAuthProvider, CliError> {
+    use std::io::{self, Write};
+
+    println!("Select an OAuth provider to authenticate with:");
+    println!();
+    for (i, (_, name)) in OAUTH_PROVIDERS.iter().enumerate() {
+        println!("  {}. {}", i + 1, name);
+    }
+    println!();
+    print!("Enter selection (1-{}): ", OAUTH_PROVIDERS.len());
+    io::stdout().flush().map_err(|e| CliError::Io(e))?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| CliError::Io(e))?;
+
+    let selection: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Other("Invalid selection".to_string()))?;
+
+    if selection < 1 || selection > OAUTH_PROVIDERS.len() {
+        return Err(CliError::Other(format!(
+            "Selection must be between 1 and {}",
+            OAUTH_PROVIDERS.len()
+        )));
+    }
+
+    let (provider_str, _) = OAUTH_PROVIDERS[selection - 1];
+    OAuthProvider::from_str(provider_str)
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", provider_str)))
+}
+
+/// Open a URL in the default browser
+fn open_browser(url: &str) -> Result<(), CliError> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| CliError::Other(format!("Failed to open browser: {}", e)))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| CliError::Other(format!("Failed to open browser: {}", e)))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn()
+            .map_err(|e| CliError::Other(format!("Failed to open browser: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Run the OAuth login flow
+pub async fn run_login(
+    provider: Option<String>,
+    user_id: String,
+    callback_port: u16,
+    config_path: Option<&str>,
+) -> Result<(), CliError> {
+    // Determine provider
+    let provider = if let Some(p) = provider {
+        OAuthProvider::from_str(&p)
+            .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", p)))?
+    } else {
+        select_provider_interactive()?
+    };
+
+    println!();
+    println!("Authenticating with {}...", provider.as_str());
+
+    // Load config to get database path
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+    } else {
+        crate::config::AppConfig::load()
+            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+    };
+
+    let db_path = config.keys.resolved_database_path();
+    let store = OAuthStore::new(&db_path)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+
+    let client = reqwest::Client::new();
+
+    // Handle different providers
+    let credentials = match provider {
+        OAuthProvider::GithubCopilot => run_device_code_flow(&client, &user_id).await?,
+        OAuthProvider::Anthropic => {
+            run_pkce_flow_anthropic(&client, &user_id, callback_port).await?
+        }
+        OAuthProvider::OpenAICodex => {
+            run_pkce_flow_openai(&client, &user_id, callback_port).await?
+        }
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
+            run_pkce_flow_google(&client, &user_id, callback_port, provider).await?
+        }
+    };
+
+    // Store credentials
+    store
+        .upsert_credentials(&credentials)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to store credentials: {}", e)))?;
+
+    println!();
+    println!("Successfully authenticated with {}!", provider.as_str());
+    println!("Credentials stored for user: {}", user_id);
+
+    Ok(())
+}
+
+/// Run GitHub Copilot device code flow
+async fn run_device_code_flow(
+    client: &reqwest::Client,
+    user_id: &str,
+) -> Result<OAuthCredentials, CliError> {
+    let config = github_copilot::config_from_env()
+        .map_err(|e| CliError::Other(format!("GitHub Copilot config error: {}", e)))?;
+
+    let device = github_copilot::start_device_flow(client, &config)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to start device flow: {}", e)))?;
+
+    println!();
+    println!("To authenticate, open: {}", device.verification_uri);
+    println!();
+    println!("And enter code: {}", device.user_code);
+    println!();
+
+    // Try to open browser
+    let _ = open_browser(&device.verification_uri);
+
+    println!("Waiting for authorization...");
+
+    let interval = device.interval.unwrap_or(5);
+    let mut attempt = 0;
+    let max_attempts = device.expires_in / interval;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+        attempt += 1;
+
+        match github_copilot::poll_device_flow(client, &config, user_id, &device.device_code).await
+        {
+            Ok(github_copilot::DevicePollResult::Authorized(credentials)) => {
+                return Ok(credentials);
+            }
+            Ok(github_copilot::DevicePollResult::Pending {
+                interval: new_interval,
+            }) => {
+                if attempt >= max_attempts {
+                    return Err(CliError::Other("Device code expired".to_string()));
+                }
+                if let Some(i) = new_interval {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        i.saturating_sub(interval),
+                    ))
+                    .await;
+                }
+            }
+            Err(e) => {
+                return Err(CliError::Other(format!("Device flow error: {}", e)));
+            }
+        }
+    }
+}
+
+/// Run Anthropic PKCE flow with local callback server
+async fn run_pkce_flow_anthropic(
+    client: &reqwest::Client,
+    user_id: &str,
+    callback_port: u16,
+) -> Result<OAuthCredentials, CliError> {
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
+    let config = anthropic::config_from_env(redirect_uri.clone())
+        .map_err(|e| CliError::Other(format!("Anthropic config error: {}", e)))?;
+
+    let (code_verifier, _) = pkce::generate_pkce_pair();
+    let state = code_verifier.clone();
+
+    let auth_url = anthropic::build_authorize_url(&config, &state, &code_verifier)
+        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
+
+    println!();
+    println!("Opening browser for authentication...");
+    println!();
+    println!("If the browser doesn't open, visit:");
+    println!("{}", auth_url);
+    println!();
+
+    let _ = open_browser(&auth_url);
+
+    // Start local callback server
+    let code = wait_for_oauth_callback(callback_port).await?;
+
+    println!("Authorization code received, exchanging for tokens...");
+
+    let credentials =
+        anthropic::exchange_code(client, &config, user_id, &code, &state, &code_verifier)
+            .await
+            .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+
+    Ok(credentials)
+}
+
+/// Run OpenAI PKCE flow with local callback server
+async fn run_pkce_flow_openai(
+    client: &reqwest::Client,
+    user_id: &str,
+    callback_port: u16,
+) -> Result<OAuthCredentials, CliError> {
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
+    let config = openai_codex::config_from_env(redirect_uri.clone())
+        .map_err(|e| CliError::Other(format!("OpenAI config error: {}", e)))?;
+
+    let (code_verifier, _) = pkce::generate_pkce_pair();
+    let state = uuid::Uuid::new_v4().to_string();
+
+    let auth_url = openai_codex::build_authorize_url(&config, &state, &code_verifier)
+        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
+
+    println!();
+    println!("Opening browser for authentication...");
+    println!();
+    println!("If the browser doesn't open, visit:");
+    println!("{}", auth_url);
+    println!();
+
+    let _ = open_browser(&auth_url);
+
+    // Start local callback server
+    let code = wait_for_oauth_callback(callback_port).await?;
+
+    println!("Authorization code received, exchanging for tokens...");
+
+    let credentials = openai_codex::exchange_code(client, &config, user_id, &code, &code_verifier)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+
+    Ok(credentials)
+}
+
+/// Run Google PKCE flow with local callback server
+async fn run_pkce_flow_google(
+    client: &reqwest::Client,
+    user_id: &str,
+    callback_port: u16,
+    provider: OAuthProvider,
+) -> Result<OAuthCredentials, CliError> {
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
+    let config = google::config_from_env(provider, redirect_uri.clone())
+        .map_err(|e| CliError::Other(format!("Google config error: {}", e)))?;
+
+    let (code_verifier, _) = pkce::generate_pkce_pair();
+    let state = uuid::Uuid::new_v4().to_string();
+
+    let auth_url = google::build_authorize_url(&config, &state, &code_verifier)
+        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
+
+    println!();
+    println!("Opening browser for authentication...");
+    println!();
+    println!("If the browser doesn't open, visit:");
+    println!("{}", auth_url);
+    println!();
+
+    let _ = open_browser(&auth_url);
+
+    // Start local callback server
+    let code = wait_for_oauth_callback(callback_port).await?;
+
+    println!("Authorization code received, exchanging for tokens...");
+
+    let credentials = google::exchange_code(client, &config, user_id, &code, &code_verifier)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+
+    Ok(credentials)
+}
+
+/// Wait for OAuth callback on local server
+async fn wait_for_oauth_callback(port: u16) -> Result<String, CliError> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| {
+            CliError::Other(format!(
+                "Failed to bind callback server on port {}: {}",
+                port, e
+            ))
+        })?;
+
+    println!("Waiting for OAuth callback on http://127.0.0.1:{}...", port);
+
+    let (mut socket, _) = listener
+        .accept()
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to accept connection: {}", e)))?;
+
+    let mut reader = BufReader::new(&mut socket);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to read request: {}", e)))?;
+
+    // Parse the request line: GET /callback?code=xxx&state=yyy HTTP/1.1
+    let code = request_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|path| url::Url::parse(&format!("http://localhost{}", path)).ok())
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.to_string())
+        })
+        .ok_or_else(|| CliError::Other("No authorization code in callback".to_string()))?;
+
+    // Send success response
+    let response = r#"HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Connection: close
+
+<!DOCTYPE html>
+<html>
+<head><title>Authentication Successful</title></head>
+<body style="font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5;">
+<div style="text-align: center; padding: 40px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+<h1 style="color: #22c55e; margin-bottom: 16px;">Authentication Successful</h1>
+<p style="color: #666;">You can close this window and return to the terminal.</p>
+</div>
+</body>
+</html>"#;
+
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to send response: {}", e)))?;
+
+    Ok(code)
+}
+
+/// List authenticated providers for a user
+pub async fn run_auth_status(user_id: &str, config_path: Option<&str>) -> Result<(), CliError> {
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+    } else {
+        crate::config::AppConfig::load()
+            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+    };
+
+    let db_path = config.keys.resolved_database_path();
+    let store = OAuthStore::new(&db_path)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+
+    let providers = store
+        .list_providers(user_id)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to list providers: {}", e)))?;
+
+    if providers.is_empty() {
+        println!("No OAuth providers authenticated for user '{}'.", user_id);
+        println!();
+        println!("Run 'eavs login' to authenticate with a provider.");
+    } else {
+        println!("Authenticated providers for user '{}':", user_id);
+        for provider in providers {
+            println!("  - {}", provider);
+        }
+    }
+
+    Ok(())
+}
+
+/// Logout from an OAuth provider
+pub async fn run_auth_logout(
+    provider: &str,
+    user_id: &str,
+    yes: bool,
+    config_path: Option<&str>,
+) -> Result<(), CliError> {
+    let oauth_provider = OAuthProvider::from_str(provider)
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", provider)))?;
+
+    if !yes {
+        use std::io::{self, Write};
+        eprint!(
+            "Are you sure you want to logout from {} for user '{}'? [y/N] ",
+            provider, user_id
+        );
+        io::stdout().flush().map_err(|e| CliError::Io(e))?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| CliError::Io(e))?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+    } else {
+        crate::config::AppConfig::load()
+            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+    };
+
+    let db_path = config.keys.resolved_database_path();
+    let store = OAuthStore::new(&db_path)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+
+    let deleted = store
+        .delete_credentials(user_id, oauth_provider)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to delete credentials: {}", e)))?;
+
+    if deleted {
+        println!(
+            "Successfully logged out from {} for user '{}'.",
+            provider, user_id
+        );
+    } else {
+        println!(
+            "No credentials found for {} (user '{}').",
+            provider, user_id
+        );
     }
 
     Ok(())
