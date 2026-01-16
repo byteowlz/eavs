@@ -75,7 +75,7 @@ impl CostCalculator {
     }
 
     /// Count tokens in a chat message (approximation).
-    /// 
+    ///
     /// This accounts for message framing overhead (role, separators, etc.)
     pub fn count_message_tokens(&self, role: &str, content: &str, model: &str) -> u32 {
         let tokenizer = self.get_tokenizer(model);
@@ -110,7 +110,7 @@ impl CostCalculator {
         if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
             for msg in messages {
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                
+
                 // Handle string content
                 if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
                     total += self.count_message_tokens(role, content, model);
@@ -393,7 +393,9 @@ mod tests {
             }
         });
 
-        let stats = calc.calculate_actual_cost_with_stats(&usage, "gpt-4o", "openai").await;
+        let stats = calc
+            .calculate_actual_cost_with_stats(&usage, "gpt-4o", "openai")
+            .await;
 
         assert_eq!(stats.input_tokens, 1000);
         assert_eq!(stats.cached_tokens, 800);

@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, ProviderConfig};
-use crate::{api, proxy};
 use crate::state::AppState;
+use crate::{api, proxy};
 use axum::{
     routing::{any, get, post},
     Router,
@@ -50,7 +50,8 @@ async fn integration_openai_chat() {
         return;
     }
 
-    let model = std::env::var("EAVS_INTEGRATION_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_OPENAI_MODEL")
+        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -93,7 +94,8 @@ async fn integration_openai_streaming() {
         return;
     }
 
-    let model = std::env::var("EAVS_INTEGRATION_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_OPENAI_MODEL")
+        .unwrap_or_else(|_| "gpt-4o-mini".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -135,8 +137,8 @@ async fn integration_anthropic_via_provider_header() {
         return;
     }
 
-    let model =
-        std::env::var("EAVS_INTEGRATION_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-5-sonnet-20240620".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_ANTHROPIC_MODEL")
+        .unwrap_or_else(|_| "claude-3-5-sonnet-20240620".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -183,8 +185,8 @@ async fn integration_anthropic_streaming() {
         return;
     }
 
-    let model =
-        std::env::var("EAVS_INTEGRATION_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-5-sonnet-20240620".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_ANTHROPIC_MODEL")
+        .unwrap_or_else(|_| "claude-3-5-sonnet-20240620".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -229,8 +231,10 @@ async fn integration_ollama_if_available() {
         return;
     }
 
-    let base_url = std::env::var("EAVS_INTEGRATION_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434/v1".to_string());
-    let model = std::env::var("EAVS_INTEGRATION_OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string());
+    let base_url = std::env::var("EAVS_INTEGRATION_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".to_string());
+    let model =
+        std::env::var("EAVS_INTEGRATION_OLLAMA_MODEL").unwrap_or_else(|_| "llama3".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -348,8 +352,8 @@ async fn integration_mistral_chat_and_streaming() {
         return;
     }
 
-    let model =
-        std::env::var("EAVS_INTEGRATION_MISTRAL_MODEL").unwrap_or_else(|_| "mistral-large-latest".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_MISTRAL_MODEL")
+        .unwrap_or_else(|_| "mistral-large-latest".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -414,8 +418,8 @@ async fn integration_tool_calls_mistral_required_translates_to_any() {
         return;
     }
 
-    let model =
-        std::env::var("EAVS_INTEGRATION_MISTRAL_MODEL").unwrap_or_else(|_| "mistral-large-latest".to_string());
+    let model = std::env::var("EAVS_INTEGRATION_MISTRAL_MODEL")
+        .unwrap_or_else(|_| "mistral-large-latest".to_string());
 
     let mut providers = HashMap::new();
     providers.insert(

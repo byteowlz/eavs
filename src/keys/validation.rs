@@ -20,7 +20,10 @@ pub struct KeyValidator {
 
 impl KeyValidator {
     pub fn new(store: Arc<KeyStore>, rate_limiter: Arc<RateLimiter>) -> Self {
-        Self { store, rate_limiter }
+        Self {
+            store,
+            rate_limiter,
+        }
     }
 
     /// Validate an API key for a request.
@@ -119,8 +122,11 @@ impl KeyValidator {
     ) {
         // Update rate limiter with actual token usage
         if let Some(key) = self.store.get_by_hash(key_hash) {
-            self.rate_limiter
-                .record_tokens(key_hash, input_tokens + output_tokens, key.permissions.tpm_limit);
+            self.rate_limiter.record_tokens(
+                key_hash,
+                input_tokens + output_tokens,
+                key.permissions.tpm_limit,
+            );
         }
 
         // Update store (async, non-blocking)
@@ -276,7 +282,12 @@ mod tests {
         let (_, _, validator) = setup().await;
 
         let result = validator
-            .validate("eavs-invalidkey123456789012345678901234", "gpt-4", "openai", None)
+            .validate(
+                "eavs-invalidkey123456789012345678901234",
+                "gpt-4",
+                "openai",
+                None,
+            )
             .await;
 
         assert!(matches!(result, Err(KeyValidationError::InvalidKey)));

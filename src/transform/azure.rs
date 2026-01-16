@@ -78,9 +78,7 @@ impl RequestTransformer for AzureTransformer {
     fn endpoint_path(&self, context: &Context) -> String {
         // Azure uses deployment-based URLs:
         // /openai/deployments/{deployment}/chat/completions?api-version=2024-02-15-preview
-        let deployment = self
-            .deployment.as_deref()
-            .unwrap_or(&context.model);
+        let deployment = self.deployment.as_deref().unwrap_or(&context.model);
 
         format!(
             "/openai/deployments/{}/chat/completions?api-version={}",
@@ -133,8 +131,12 @@ mod tests {
         let transformer = AzureTransformer::new();
         let headers = transformer.headers("my-azure-key");
 
-        assert!(headers.iter().any(|(k, v)| k == "api-key" && v == "my-azure-key"));
-        assert!(headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "api-key" && v == "my-azure-key"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
         // Should NOT have Authorization header
         assert!(!headers.iter().any(|(k, _)| k == "Authorization"));
     }
@@ -213,8 +215,12 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
 
         let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Start { .. })));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Start { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
     }
 
     #[test]

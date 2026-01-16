@@ -1,10 +1,12 @@
+use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::oauth::{
     anthropic as oauth_anthropic, google as oauth_google, openai_codex as oauth_openai,
     OAuthProvider as OAuthProviderKind,
 };
-use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
-use crate::provider::{detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType};
+use crate::provider::{
+    detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType,
+};
 use crate::state::{AnalysisEvent, AppState, Injection};
 use crate::transform::{
     build_openai_sse_response, parse_incoming_request, ProviderTransformer, TransformError,
@@ -25,9 +27,9 @@ use base64::Engine;
 use bytes::Bytes;
 use futures::{stream::StreamExt, SinkExt};
 use serde::Serialize;
-use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
@@ -65,7 +67,7 @@ impl ProxyError {
 }
 
 /// Handler for provider-prefixed routes: /{provider}/v1/*
-/// 
+///
 /// This allows clients to explicitly select a provider via the URL path:
 /// - POST /openai/v1/chat/completions
 /// - POST /anthropic/v1/chat/completions
@@ -79,7 +81,7 @@ pub async fn provider_proxy_handler(
 }
 
 /// Handler for the default /v1/* route.
-/// 
+///
 /// Provider selection priority:
 /// 1. X-Provider header
 /// 2. X-Original-Host header (mitmproxy capture mode)
@@ -127,21 +129,20 @@ async fn proxy_handler_inner(
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    
+
     let original_host = req
         .headers()
         .get("X-Original-Host")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    
+
     // Initial provider from path/header/host (model-based comes later)
     let pre_body_provider = path_provider
         .as_deref()
         .or(header_provider.as_deref())
         .or_else(|| {
             // Try to detect provider from X-Original-Host (mitmproxy capture mode)
-            original_host.as_deref()
-                .and_then(detect_provider_from_host)
+            original_host.as_deref().and_then(detect_provider_from_host)
         });
 
     // 2. Read and modify body if needed (Pre-request Injection)
@@ -152,14 +153,14 @@ async fn proxy_handler_inner(
         .and_then(|h| h.to_str().ok())
         .map(|v| v.split(',').any(|p| p.trim() == "claude-code-20250219"))
         .unwrap_or(false);
-    
+
     // Use configurable max body size to prevent DoS attacks
     let max_body_size = if state.config.server.max_body_size > 0 {
         state.config.server.max_body_size
     } else {
         usize::MAX // Unlimited if explicitly set to 0
     };
-    
+
     let bytes = axum::body::to_bytes(body, max_body_size)
         .await
         .map_err(|e| {
@@ -169,7 +170,10 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(ProxyError::new(
-                        format!("Request body too large. Maximum size: {} bytes", max_body_size),
+                        format!(
+                            "Request body too large. Maximum size: {} bytes",
+                            max_body_size
+                        ),
                         "payload_too_large",
                     )),
                 )
@@ -177,7 +181,10 @@ async fn proxy_handler_inner(
             } else {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(ProxyError::new("Failed to read request body", "invalid_request")),
+                    Json(ProxyError::new(
+                        "Failed to read request body",
+                        "invalid_request",
+                    )),
                 )
                     .into_response()
             }
@@ -250,8 +257,9 @@ async fn proxy_handler_inner(
     //
     // If the provider was auto-detected from the model but isn't configured, fall back to
     // the configured "default" provider (backwards compatible with older configs).
-    let provider_selected_by_model =
-        pre_body_provider.is_none() && runtime_default_provider.is_none() && model_detected_provider.is_some();
+    let provider_selected_by_model = pre_body_provider.is_none()
+        && runtime_default_provider.is_none()
+        && model_detected_provider.is_some();
     let provider_lookup = state
         .config
         .resolve_provider(&provider_name_requested)
@@ -298,7 +306,7 @@ async fn proxy_handler_inner(
     // 3. Validate virtual API key if present (or required)
     // Note: validated_key is used for tracking usage after response completes
     let require_key = state.config.keys.enabled && state.config.keys.require_key;
-    
+
     #[allow(unused_variables)]
     let validated_key: Option<ValidatedKey> = if let Some(ref key) = auth_header {
         if is_virtual_key(key) {
@@ -317,9 +325,12 @@ async fn proxy_handler_inner(
                     Ok(validated) => Some(validated),
                     Err(e) => {
                         return Err((
-                            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
-                            Json(ProxyError::new(e.to_string(), "authentication_error")
-                                .with_code(e.error_code())),
+                            StatusCode::from_u16(e.status_code())
+                                .unwrap_or(StatusCode::UNAUTHORIZED),
+                            Json(
+                                ProxyError::new(e.to_string(), "authentication_error")
+                                    .with_code(e.error_code()),
+                            ),
                         )
                             .into_response());
                     }
@@ -339,10 +350,13 @@ async fn proxy_handler_inner(
             // Not a virtual key but require_key is enabled - reject
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(ProxyError::new(
-                    "A valid virtual API key is required. Keys must start with 'eavs_'",
-                    "authentication_error",
-                ).with_code("invalid_api_key")),
+                Json(
+                    ProxyError::new(
+                        "A valid virtual API key is required. Keys must start with 'eavs_'",
+                        "authentication_error",
+                    )
+                    .with_code("invalid_api_key"),
+                ),
             )
                 .into_response());
         } else {
@@ -353,10 +367,13 @@ async fn proxy_handler_inner(
         // No key provided but require_key is enabled - reject
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(ProxyError::new(
-                "Authorization header with a valid virtual API key is required",
-                "authentication_error",
-            ).with_code("missing_api_key")),
+            Json(
+                ProxyError::new(
+                    "Authorization header with a valid virtual API key is required",
+                    "authentication_error",
+                )
+                .with_code("missing_api_key"),
+            ),
         )
             .into_response());
     } else {
@@ -366,11 +383,13 @@ async fn proxy_handler_inner(
     // Register/update conversation in store if capture_all is enabled
     if state.config.state.capture_all {
         let _ = state.conversations.get_or_create(&conversation_id);
-        state.conversations.update_metadata(&conversation_id, |meta| {
-            meta.provider = Some(provider_name.clone());
-            meta.model = Some(model.clone());
-            meta.request_count += 1;
-        });
+        state
+            .conversations
+            .update_metadata(&conversation_id, |meta| {
+                meta.provider = Some(provider_name.clone());
+                meta.model = Some(model.clone());
+                meta.request_count += 1;
+            });
     }
 
     // Check for injections (new conversation store)
@@ -418,18 +437,26 @@ async fn proxy_handler_inner(
             tracing::info!("OAuth user: {}, provider: {}", oauth_user, provider_name);
             api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
                 Ok(token) => {
-                    tracing::info!("Got OAuth token starting with: {}...", &token[..20.min(token.len())]);
+                    tracing::info!(
+                        "Got OAuth token starting with: {}...",
+                        &token[..20.min(token.len())]
+                    );
                     // Check if this is an Anthropic OAuth token
-                    if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&token) {
+                    if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&token)
+                    {
                         is_anthropic_oauth = true;
-                        tracing::info!("Detected Anthropic OAuth token, will inject Claude Code identity");
+                        tracing::info!(
+                            "Detected Anthropic OAuth token, will inject Claude Code identity"
+                        );
                     }
                     // Check if this is an OpenAI Codex OAuth token
                     if is_openai_codex_oauth_token(&token) {
                         is_openai_codex_oauth = true;
                         // Override provider type to use Codex (ChatGPT backend + Responses API)
                         provider_type = ProviderType::OpenAICodex;
-                        tracing::info!("Detected OpenAI Codex OAuth token, switching to OpenAICodex provider");
+                        tracing::info!(
+                            "Detected OpenAI Codex OAuth token, switching to OpenAICodex provider"
+                        );
                     }
                     token
                 }
@@ -448,11 +475,15 @@ async fn proxy_handler_inner(
     // Determine the actual API path (strip provider prefix if using provider-prefixed routing)
     let api_path = if let Some(ref provider) = path_provider {
         let prefix = format!("/{}", provider);
-        parts.uri.path().strip_prefix(&prefix).unwrap_or(parts.uri.path())
+        parts
+            .uri
+            .path()
+            .strip_prefix(&prefix)
+            .unwrap_or(parts.uri.path())
     } else {
         parts.uri.path()
     };
-    
+
     // Handle /v1/models endpoint for providers that don't support it natively
     // Return a synthetic response with known models for that provider
     if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
@@ -461,7 +492,7 @@ async fn proxy_handler_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        
+
         let models_response = serde_json::json!({
             "object": "list",
             "data": models.iter().map(|m| {
@@ -473,41 +504,40 @@ async fn proxy_handler_inner(
                 })
             }).collect::<Vec<_>>()
         });
-        
+
         let mut response = Json(models_response).into_response();
         response.headers_mut().insert(
             http::header::HeaderName::from_static("x-eavs-provider"),
-            http::HeaderValue::from_str(&provider_name).unwrap_or_else(|_| http::HeaderValue::from_static("unknown")),
+            http::HeaderValue::from_str(&provider_name)
+                .unwrap_or_else(|_| http::HeaderValue::from_static("unknown")),
         );
         response.headers_mut().insert(
             http::header::HeaderName::from_static("x-eavs-synthetic"),
             http::HeaderValue::from_static("true"),
         );
-        
+
         return Ok(response);
     }
-    
+
     // Check if this is a pass-through endpoint that doesn't need transformation
     // (e.g., /v1/models, /v1/embeddings for providers that support them natively)
-    let is_passthrough_endpoint = api_path == "/v1/models" 
+    let is_passthrough_endpoint = api_path == "/v1/models"
         || api_path.starts_with("/v1/models/")
         || api_path == "/v1/embeddings";
-    
+
     // Check if client is sending Responses API format directly
     // This allows clients to use the Responses API natively with EAVS just handling OAuth
-    let is_responses_api_request = api_path == "/v1/responses" 
-        || api_path == "/responses"
-        || api_path == "/codex/responses";
-    
+    let is_responses_api_request =
+        api_path == "/v1/responses" || api_path == "/responses" || api_path == "/codex/responses";
+
     // Check if we need format translation
     // Skip transformation for pass-through endpoints and native Responses API requests
-    let needs_transform = provider_type.needs_transform() 
-        && !is_passthrough_endpoint 
-        && !is_responses_api_request;
-    
+    let needs_transform =
+        provider_type.needs_transform() && !is_passthrough_endpoint && !is_responses_api_request;
+
     // Get the transformer for this provider
     let transformer = ProviderTransformer::for_provider(provider_type);
-    
+
     // 4. Build request body - transform if needed
     let mut transformed_endpoint_path: Option<String> = None;
     let mut request_stream = false;
@@ -519,7 +549,10 @@ async fn proxy_handler_inner(
             tracing::error!("Failed to parse request: {}", e);
             (
                 StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(format!("Failed to parse request: {}", e), "invalid_request")),
+                Json(ProxyError::new(
+                    format!("Failed to parse request: {}", e),
+                    "invalid_request",
+                )),
             )
                 .into_response()
         })?;
@@ -557,10 +590,10 @@ async fn proxy_handler_inner(
                         .into_response()
                 })?;
         }
-        
+
         let model = context.model.clone();
         transformed_endpoint_path = Some(transformer.endpoint_path(&context));
-        
+
         // Transform to target provider format
         let mut transformed = transformer.transform_request(&context).map_err(|e| {
             let status = match e {
@@ -580,14 +613,18 @@ async fn proxy_handler_inner(
 
         if is_anthropic_oauth {
             prefix_anthropic_oauth_tools(&mut transformed);
+            apply_anthropic_oauth_body_transforms(&mut transformed);
         }
 
         beta_scan_body = Some(transformed.clone());
-        
+
         let body = serde_json::to_vec(&transformed).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProxyError::new(format!("Failed to serialize request: {}", e), "internal_error")),
+                Json(ProxyError::new(
+                    format!("Failed to serialize request: {}", e),
+                    "internal_error",
+                )),
             )
                 .into_response()
         })?;
@@ -595,24 +632,28 @@ async fn proxy_handler_inner(
     } else {
         // Pass through for OpenAI-compatible providers
         if provider_type == ProviderType::Mistral && api_path == "/v1/chat/completions" {
-            crate::transform::mistral::transform_openai_request_for_mistral(&mut json_body).map_err(|e| {
-                tracing::error!("Failed to apply Mistral request quirks: {}", e);
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ProxyError::new(
-                        format!("Failed to transform request for Mistral: {}", e),
-                        "invalid_request",
-                    )),
-                )
-                    .into_response()
-            })?;
+            crate::transform::mistral::transform_openai_request_for_mistral(&mut json_body)
+                .map_err(|e| {
+                    tracing::error!("Failed to apply Mistral request quirks: {}", e);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ProxyError::new(
+                            format!("Failed to transform request for Mistral: {}", e),
+                            "invalid_request",
+                        )),
+                    )
+                        .into_response()
+                })?;
         }
 
         let model = json_body["model"].as_str().unwrap_or("unknown").to_string();
         let body = serde_json::to_vec(&json_body).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProxyError::new(format!("Failed to serialize request: {}", e), "internal_error")),
+                Json(ProxyError::new(
+                    format!("Failed to serialize request: {}", e),
+                    "internal_error",
+                )),
             )
                 .into_response()
         })?;
@@ -627,7 +668,7 @@ async fn proxy_handler_inner(
         provider_config.resolved_base_url()
     };
     let base = base.trim_end_matches('/');
-    
+
     let path = if needs_transform {
         // Use transformer's endpoint path for non-OpenAI providers
         transformed_endpoint_path.unwrap_or_else(|| "/v1/chat/completions".to_string())
@@ -636,7 +677,7 @@ async fn proxy_handler_inner(
         // Azure OpenAI is deployment-based; treat `model` as deployment name when base_url is
         // the resource endpoint (no `/openai/deployments/...` path).
         let request_path = parts.uri.path();
-        
+
         // If using provider-prefixed routing (e.g., /openai/v1/models), strip the provider prefix
         // to get the actual API path (e.g., /v1/models)
         let request_path = if let Some(ref provider) = path_provider {
@@ -645,7 +686,7 @@ async fn proxy_handler_inner(
         } else {
             request_path
         };
-        
+
         let stripped_path = if (provider_type == ProviderType::Azure || base.ends_with("/v1"))
             && request_path.starts_with("/v1")
         {
@@ -671,7 +712,7 @@ async fn proxy_handler_inner(
             stripped_path.to_string()
         }
     };
-    
+
     let mut url = format!("{}{}", base, path);
 
     // Handle Query Parameters (Original + API Version for Azure)
@@ -695,9 +736,7 @@ async fn proxy_handler_inner(
 
     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&api_key) {
         if let Ok(mut parsed) = url::Url::parse(&url) {
-            if parsed.path() == "/v1/messages"
-                && !parsed.query_pairs().any(|(k, _)| k == "beta")
-            {
+            if parsed.path() == "/v1/messages" && !parsed.query_pairs().any(|(k, _)| k == "beta") {
                 parsed.query_pairs_mut().append_pair("beta", "true");
                 url = parsed.to_string();
             }
@@ -763,20 +802,26 @@ async fn proxy_handler_inner(
         );
     }
 
+    // Add x-stainless-helper-method: stream for OAuth streaming requests
+    if is_anthropic_oauth && request_stream {
+        upstream_headers.insert(
+            http::header::HeaderName::from_static("x-stainless-helper-method"),
+            http::HeaderValue::from_static("stream"),
+        );
+    }
+
     if provider_type == ProviderType::Bedrock {
-        let region = provider_config
-            .resolved_aws_region()
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ProxyError::new(
-                        "Bedrock provider requires aws_region (or AWS_REGION)".to_string(),
-                        "invalid_request",
-                    )),
-                )
-                    .into_response()
-            })?;
-        
+        let region = provider_config.resolved_aws_region().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    "Bedrock provider requires aws_region (or AWS_REGION)".to_string(),
+                    "invalid_request",
+                )),
+            )
+                .into_response()
+        })?;
+
         let creds = resolve_bedrock_aws_credentials(state.upstream.as_ref(), provider_config)
             .await
             .map_err(|msg| {
@@ -829,7 +874,10 @@ async fn proxy_handler_inner(
     if provider_type.is_mock() {
         return handle_mock_response(
             &model_name,
-            json_body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+            json_body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             &correlation_id,
             state.analysis_tx.clone(),
         )
@@ -851,7 +899,11 @@ async fn proxy_handler_inner(
 
     // 5. Stream Response with optional transformation
     // Destructure to take ownership without cloning
-    let UpstreamResponse { status, headers, body: stream } = upstream_res;
+    let UpstreamResponse {
+        status,
+        headers,
+        body: stream,
+    } = upstream_res;
 
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
@@ -887,14 +939,11 @@ async fn proxy_handler_inner(
             http::HeaderValue::from_static("application/json"),
         );
         if let Some(v) = headers.get(http::header::RETRY_AFTER).cloned() {
-            response
-                .headers_mut()
-                .insert(http::header::RETRY_AFTER, v);
+            response.headers_mut().insert(http::header::RETRY_AFTER, v);
         }
-        response.headers_mut().insert(
-            "x-eavs-provider",
-            resolved_provider.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert("x-eavs-provider", resolved_provider.parse().unwrap());
         return Ok(response);
     }
 
@@ -979,10 +1028,9 @@ async fn proxy_handler_inner(
             response
                 .headers_mut()
                 .insert("cache-control", "no-cache".parse().unwrap());
-            response.headers_mut().insert(
-                "x-eavs-provider",
-                resolved_provider.parse().unwrap(),
-            );
+            response
+                .headers_mut()
+                .insert("x-eavs-provider", resolved_provider.parse().unwrap());
 
             // Record usage asynchronously when stream completes
             // Use a lighter-weight approach than spawning a delayed task for every request
@@ -1071,10 +1119,9 @@ async fn proxy_handler_inner(
             response
                 .headers_mut()
                 .insert("cache-control", "no-cache".parse().unwrap());
-            response.headers_mut().insert(
-                "x-eavs-provider",
-                resolved_provider.parse().unwrap(),
-            );
+            response
+                .headers_mut()
+                .insert("x-eavs-provider", resolved_provider.parse().unwrap());
 
             if let Some(tracker) = usage_tracker.clone() {
                 let state_clone = state.clone();
@@ -1146,24 +1193,21 @@ async fn proxy_handler_inner(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/json"),
             );
-            response.headers_mut().insert(
-                "x-eavs-provider",
-                resolved_provider.parse().unwrap(),
-            );
+            response
+                .headers_mut()
+                .insert("x-eavs-provider", resolved_provider.parse().unwrap());
 
             if let Some(tracker) = usage_tracker.clone() {
                 if let Some(usage) = response_json.get("usage") {
                     if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
-                        tracker.input_tokens.store(
-                            input as u32,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
+                        tracker
+                            .input_tokens
+                            .store(input as u32, std::sync::atomic::Ordering::SeqCst);
                     }
                     if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
-                        tracker.output_tokens.store(
-                            output as u32,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
+                        tracker
+                            .output_tokens
+                            .store(output as u32, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
 
@@ -1182,12 +1226,12 @@ async fn proxy_handler_inner(
         let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
             Ok(chunk) => {
                 let text = String::from_utf8_lossy(&chunk).to_string();
-                
+
                 // Try to extract usage from OpenAI-format streaming responses
                 if let Some(tracker) = &tracker_clone {
                     extract_openai_usage(&text, tracker);
                 }
-                
+
                 let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
                     timestamp: chrono::Utc::now().timestamp_millis(),
                     id: correlation_id_clone.clone(),
@@ -1202,10 +1246,9 @@ async fn proxy_handler_inner(
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         // Add header indicating which provider was used
-        response.headers_mut().insert(
-            "x-eavs-provider",
-            resolved_provider.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert("x-eavs-provider", resolved_provider.parse().unwrap());
 
         // Record usage asynchronously - batched KeyStore handles SQLite writes efficiently
         if let Some(tracker) = usage_tracker {
@@ -1239,7 +1282,7 @@ async fn handle_mock_response(
     analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
 ) -> Result<Response, Response> {
     let timestamp = chrono::Utc::now().timestamp();
-    
+
     if stream {
         // Return streaming SSE response
         let chunks = vec![
@@ -1266,7 +1309,9 @@ async fn handle_mock_response(
         });
 
         let stream = futures::stream::iter(
-            chunks.into_iter().map(|c| Ok::<_, std::io::Error>(Bytes::from(c)))
+            chunks
+                .into_iter()
+                .map(|c| Ok::<_, std::io::Error>(Bytes::from(c))),
         );
 
         Ok(Response::builder()
@@ -1323,17 +1368,23 @@ fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
             if let Ok(json) = serde_json::from_str::<Value>(data) {
                 if let Some(usage) = json.get("usage") {
                     if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
-                        tracker.input_tokens.store(input as u32, std::sync::atomic::Ordering::SeqCst);
+                        tracker
+                            .input_tokens
+                            .store(input as u32, std::sync::atomic::Ordering::SeqCst);
                     }
                     if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
-                        tracker.output_tokens.store(output as u32, std::sync::atomic::Ordering::SeqCst);
+                        tracker
+                            .output_tokens
+                            .store(output as u32, std::sync::atomic::Ordering::SeqCst);
                     }
                     if let Some(cached) = usage
                         .get("prompt_tokens_details")
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
                     {
-                        tracker.cached_tokens.store(cached as u32, std::sync::atomic::Ordering::SeqCst);
+                        tracker
+                            .cached_tokens
+                            .store(cached as u32, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -1343,22 +1394,29 @@ fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
 
 /// Record usage from tracker to the key validator.
 async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
-    let input = tracker.input_tokens.load(std::sync::atomic::Ordering::SeqCst);
-    let output = tracker.output_tokens.load(std::sync::atomic::Ordering::SeqCst);
-    let cached = tracker.cached_tokens.load(std::sync::atomic::Ordering::SeqCst);
-    
+    let input = tracker
+        .input_tokens
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let output = tracker
+        .output_tokens
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let cached = tracker
+        .cached_tokens
+        .load(std::sync::atomic::Ordering::SeqCst);
+
     // Only record if we have any usage data
     if input == 0 && output == 0 {
         return;
     }
-    
+
     // Calculate cost
     let cost = if let Some(calc) = state.get_cost_calculator() {
-        calc.calculate_actual_cost(&tracker.model, input, output, cached).await
+        calc.calculate_actual_cost(&tracker.model, input, output, cached)
+            .await
     } else {
         0.0
     };
-    
+
     // Record to validator
     if let Some(validator) = state.get_key_validator() {
         validator
@@ -1372,7 +1430,7 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
                 &tracker.provider,
             )
             .await;
-        
+
         tracing::debug!(
             key_hash = %tracker.key_hash,
             input_tokens = input,
@@ -1395,7 +1453,11 @@ async fn collect_stream_bytes(
     Ok(Bytes::from(collected))
 }
 
-fn build_openai_chat_completion_from_events(events: &[crate::types::StreamEvent], request_id: &str, model: &str) -> Value {
+fn build_openai_chat_completion_from_events(
+    events: &[crate::types::StreamEvent],
+    request_id: &str,
+    model: &str,
+) -> Value {
     use crate::types::{StopReason, StreamEvent};
 
     let mut assistant = crate::types::AssistantMessage::default();
@@ -1483,7 +1545,8 @@ fn build_fake_openai_sse_from_events(
         }
     }
 
-    let (stop_reason, message) = done.unwrap_or_else(|| (crate::types::StopReason::Other, AssistantMessage::default()));
+    let (stop_reason, message) =
+        done.unwrap_or_else(|| (crate::types::StopReason::Other, AssistantMessage::default()));
 
     let mut out_events: Vec<StreamEvent> = Vec::new();
     out_events.push(StreamEvent::Start {
@@ -1518,7 +1581,8 @@ fn build_fake_openai_sse_from_events(
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                 });
-                let args = serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".to_string());
+                let args =
+                    serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".to_string());
                 out_events.push(StreamEvent::ToolCallDelta {
                     content_index: tool_index,
                     delta: args,
@@ -1529,7 +1593,9 @@ fn build_fake_openai_sse_from_events(
         }
     }
 
-    out_events.push(StreamEvent::Usage { usage: message.usage.clone() });
+    out_events.push(StreamEvent::Usage {
+        usage: message.usage.clone(),
+    });
     out_events.push(StreamEvent::Done {
         reason: stop_reason,
         message,
@@ -1542,14 +1608,11 @@ fn build_fake_openai_sse_from_events(
 }
 
 fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
-    if let Some(messages) = json_body
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())
-    {
+    if let Some(messages) = json_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         // Collect system and non-system injections separately to maintain order
         let mut system_injections: Vec<Value> = Vec::new();
         let mut other_injections: Vec<Value> = Vec::new();
-        
+
         for injection in injections {
             let obj = serde_json::json!({
                 "role": injection.role,
@@ -1561,13 +1624,13 @@ fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
                 other_injections.push(obj);
             }
         }
-        
+
         // Insert all system messages at the beginning in their original order
         // by using splice to insert all at once
         if !system_injections.is_empty() {
             messages.splice(0..0, system_injections);
         }
-        
+
         // Append non-system messages at the end
         messages.extend(other_injections);
     }
@@ -1613,7 +1676,7 @@ async fn ws_proxy_handler_inner(
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    
+
     let provider_name = path_provider
         .or(header_provider)
         .unwrap_or_else(|| "default".to_string());
@@ -1642,9 +1705,12 @@ async fn ws_proxy_handler_inner(
                     }
                     Err(e) => {
                         return (
-                            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
-                            Json(ProxyError::new(e.to_string(), "authentication_error")
-                                .with_code(e.error_code())),
+                            StatusCode::from_u16(e.status_code())
+                                .unwrap_or(StatusCode::UNAUTHORIZED),
+                            Json(
+                                ProxyError::new(e.to_string(), "authentication_error")
+                                    .with_code(e.error_code()),
+                            ),
                         )
                             .into_response();
                     }
@@ -1664,10 +1730,13 @@ async fn ws_proxy_handler_inner(
             // Not a virtual key but require_key is enabled - reject
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(ProxyError::new(
-                    "A valid virtual API key is required. Keys must start with 'eavs_'",
-                    "authentication_error",
-                ).with_code("invalid_api_key")),
+                Json(
+                    ProxyError::new(
+                        "A valid virtual API key is required. Keys must start with 'eavs_'",
+                        "authentication_error",
+                    )
+                    .with_code("invalid_api_key"),
+                ),
             )
                 .into_response();
         }
@@ -1675,10 +1744,13 @@ async fn ws_proxy_handler_inner(
         // No key provided but require_key is enabled - reject
         return (
             StatusCode::UNAUTHORIZED,
-            Json(ProxyError::new(
-                "Authorization header with a valid virtual API key is required",
-                "authentication_error",
-            ).with_code("missing_api_key")),
+            Json(
+                ProxyError::new(
+                    "Authorization header with a valid virtual API key is required",
+                    "authentication_error",
+                )
+                .with_code("missing_api_key"),
+            ),
         )
             .into_response();
     }
@@ -1686,11 +1758,13 @@ async fn ws_proxy_handler_inner(
     // Register/update conversation in store if capture_all is enabled
     if state.config.state.capture_all {
         let _ = state.conversations.get_or_create(&conversation_id);
-        state.conversations.update_metadata(&conversation_id, |meta| {
-            meta.provider = Some(provider_name.clone());
-            meta.model = Some("websocket".to_string());
-            meta.request_count += 1;
-        });
+        state
+            .conversations
+            .update_metadata(&conversation_id, |meta| {
+                meta.provider = Some(provider_name.clone());
+                meta.model = Some("websocket".to_string());
+                meta.request_count += 1;
+            });
     }
 
     let provider_lookup = match state.config.resolve_provider(&provider_name) {
@@ -1851,7 +1925,12 @@ async fn ws_proxy_handler_inner(
             }
         });
 
-        let _ = tokio::join!(upstream_write, client_to_upstream, upstream_to_client, inject_to_upstream);
+        let _ = tokio::join!(
+            upstream_write,
+            client_to_upstream,
+            upstream_to_client,
+            inject_to_upstream
+        );
     })
     .into_response()
 }
@@ -1919,7 +1998,10 @@ fn build_ws_upstream_url(
     } else if base.starts_with("ws://") || base.starts_with("wss://") {
         Ok(base)
     } else {
-        Err(format!("Unsupported upstream base_url scheme: {}", base_url))
+        Err(format!(
+            "Unsupported upstream base_url scheme: {}",
+            base_url
+        ))
     }
 }
 
@@ -1960,7 +2042,7 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
     if parts.len() != 3 {
         return None;
     }
-    
+
     // Decode the payload (second part)
     let payload = parts[1];
     // JWT uses base64url encoding, need to handle padding
@@ -1969,20 +2051,21 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
         3 => format!("{}=", payload),
         _ => payload.to_string(),
     };
-    
+
     // Replace URL-safe chars with standard base64
     let standard_b64 = padded.replace('-', "+").replace('_', "/");
-    
-    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &standard_b64) {
-        Ok(bytes) => bytes,
-        Err(_) => return None,
-    };
-    
+
+    let decoded =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &standard_b64) {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+
     let json: serde_json::Value = match serde_json::from_slice(&decoded) {
         Ok(v) => v,
         Err(_) => return None,
     };
-    
+
     // Look for account ID in the standard OpenAI claim path
     json.get("https://api.openai.com/auth")
         .and_then(|auth| auth.get("org_id").or_else(|| auth.get("account_id")))
@@ -2017,14 +2100,15 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
         for tool in tools {
             if let Some(name) = tool.get_mut("name").and_then(|v| v.as_str()) {
                 if !name.starts_with(TOOL_PREFIX) {
-                    *tool
-                        .get_mut("name")
-                        .unwrap() = Value::String(format!("{}{}", TOOL_PREFIX, name));
+                    *tool.get_mut("name").unwrap() =
+                        Value::String(format!("{}{}", TOOL_PREFIX, name));
                 }
             }
         }
     }
 
+    // Note: tool_choice is removed by apply_anthropic_oauth_body_transforms()
+    // but we still need to prefix tool names in case the removal fails
     if let Some(choice) = body.get_mut("tool_choice") {
         if let Some(obj) = choice.as_object_mut() {
             if let Some(name_value) = obj.get_mut("name") {
@@ -2038,6 +2122,93 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
     }
 }
 
+/// Resolve Claude Code metadata.user_id from ~/.claude.json for OAuth validation.
+///
+/// Anthropic OAuth tokens now require requests to include metadata.user_id in the format:
+/// `user_{userID}_account_{accountUuid}_session_{lastSessionId}`
+///
+/// This reads from the Claude Code config file which is created when authenticating
+/// with Claude Code CLI.
+fn resolve_claude_metadata_user_id() -> Option<String> {
+    use std::path::PathBuf;
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+
+    let config_path = std::env::var("EAVS_CLAUDE_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(&home).join(".claude.json"));
+
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let data: Value = serde_json::from_str(&content).ok()?;
+
+    let user_id = data.get("userID")?.as_str()?;
+    let account_uuid = data
+        .get("oauthAccount")
+        .and_then(|a| a.get("accountUuid"))
+        .and_then(|v| v.as_str())?;
+
+    // Try to find a session ID from projects
+    let session_id = data
+        .get("projects")
+        .and_then(|p| p.as_object())
+        .and_then(|projects| {
+            // First try current working directory
+            if let Ok(cwd) = std::env::current_dir() {
+                let cwd_str = cwd.to_string_lossy();
+                if let Some(project) = projects.get(cwd_str.as_ref()) {
+                    if let Some(session) = project.get("lastSessionId").and_then(|v| v.as_str()) {
+                        return Some(session.to_string());
+                    }
+                }
+            }
+            // Fall back to any project with a session ID
+            projects
+                .values()
+                .filter_map(|v| v.get("lastSessionId").and_then(|s| s.as_str()))
+                .next()
+                .map(String::from)
+        })?;
+
+    Some(format!(
+        "user_{}_account_{}_session_{}",
+        user_id, account_uuid, session_id
+    ))
+}
+
+/// Apply Anthropic OAuth-specific body transformations.
+///
+/// This includes:
+/// - Injecting metadata.user_id from ~/.claude.json
+/// - Removing tool_choice (not supported with OAuth tokens)
+fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
+    // Inject metadata.user_id if we can resolve it
+    if let Some(metadata_user_id) = resolve_claude_metadata_user_id() {
+        let metadata = body.as_object_mut().and_then(|obj| {
+            if !obj.contains_key("metadata") {
+                obj.insert("metadata".to_string(), json!({}));
+            }
+            obj.get_mut("metadata").and_then(|m| m.as_object_mut())
+        });
+
+        if let Some(metadata) = metadata {
+            // Only set if not already present
+            if !metadata.contains_key("user_id") {
+                metadata.insert("user_id".to_string(), Value::String(metadata_user_id));
+            }
+        }
+    }
+
+    // Remove tool_choice - not supported with OAuth tokens
+    if let Some(obj) = body.as_object_mut() {
+        if obj.contains_key("tool_choice") {
+            tracing::debug!("Removing tool_choice from Anthropic OAuth request (not supported)");
+            obj.remove("tool_choice");
+        }
+    }
+}
+
 /// Apply authentication headers to any header container.
 /// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
 fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType, api_key: &str) {
@@ -2046,6 +2217,8 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
     }
 
     // Special handling for Anthropic OAuth tokens - they use Bearer auth + special headers
+    // Anthropic now validates Claude Code-specific request shape for OAuth tokens.
+    // This includes headers, betas, metadata, and SDK fingerprints.
     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(api_key) {
         if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
             headers.insert_header(http::header::AUTHORIZATION, value);
@@ -2063,6 +2236,52 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
             http::header::HeaderName::from_static("user-agent"),
             http::HeaderValue::from_static("claude-cli/2.1.2 (external, cli)"),
         );
+        // Claude Code SDK fingerprint headers (x-stainless-*)
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-app"),
+            http::HeaderValue::from_static("cli"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-arch"),
+            http::HeaderValue::from_static(std::env::consts::ARCH),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-lang"),
+            http::HeaderValue::from_static("rust"),
+        );
+        // Determine OS name in Claude Code format
+        let os_name = match std::env::consts::OS {
+            "macos" => "Darwin",
+            "windows" => "Windows",
+            "linux" => "Linux",
+            other => other,
+        };
+        if let Ok(value) = http::HeaderValue::from_str(os_name) {
+            headers.insert_header(
+                http::header::HeaderName::from_static("x-stainless-os"),
+                value,
+            );
+        }
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-package-version"),
+            http::HeaderValue::from_static("0.70.0"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-runtime"),
+            http::HeaderValue::from_static("native"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-runtime-version"),
+            http::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-retry-count"),
+            http::HeaderValue::from_static("0"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-stainless-timeout"),
+            http::HeaderValue::from_static("600"),
+        );
         return;
     }
 
@@ -2071,7 +2290,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
             headers.insert_header(http::header::AUTHORIZATION, value);
         }
-        
+
         // Extract and set account ID from JWT
         if let Some(account_id) = extract_openai_account_id(api_key) {
             if let Ok(value) = http::HeaderValue::from_str(&account_id) {
@@ -2081,7 +2300,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
                 );
             }
         }
-        
+
         // Add required Codex headers
         headers.insert_header(
             http::header::HeaderName::from_static("openai-beta"),
@@ -2110,15 +2329,15 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
             if let Ok(value) = http::HeaderValue::from_str(api_key) {
                 headers.insert_header(hname, value);
             } else {
-                tracing::warn!("Failed to create {} header: invalid API key characters", name);
+                tracing::warn!(
+                    "Failed to create {} header: invalid API key characters",
+                    name
+                );
             }
         }
         AuthStyle::AzureApiKey => {
             if let Ok(value) = http::HeaderValue::from_str(api_key) {
-                headers.insert_header(
-                    http::header::HeaderName::from_static("api-key"),
-                    value,
-                );
+                headers.insert_header(http::header::HeaderName::from_static("api-key"), value);
             } else {
                 tracing::warn!("Failed to create api-key header: invalid API key characters");
             }
@@ -2148,7 +2367,11 @@ fn apply_extra_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTy
 }
 
 // Backwards-compatible wrappers (can be removed once all call sites are updated)
-fn apply_ws_auth_headers(request: &mut http::Request<()>, provider_type: ProviderType, api_key: &str) {
+fn apply_ws_auth_headers(
+    request: &mut http::Request<()>,
+    provider_type: ProviderType,
+    api_key: &str,
+) {
     apply_auth_headers(request, provider_type, api_key);
 }
 
@@ -2199,8 +2422,8 @@ async fn resolve_oauth_access_token(
 
         credentials = match provider {
             OAuthProviderKind::Anthropic => {
-                let config = oauth_anthropic::config_from_env(redirect_uri)
-                    .map_err(|e| e.to_string())?;
+                let config =
+                    oauth_anthropic::config_from_env(redirect_uri).map_err(|e| e.to_string())?;
                 oauth_anthropic::refresh_token(
                     &client,
                     &config,
@@ -2211,8 +2434,8 @@ async fn resolve_oauth_access_token(
                 .map_err(|e| e.to_string())?
             }
             OAuthProviderKind::OpenAICodex => {
-                let config = oauth_openai::config_from_env(redirect_uri)
-                    .map_err(|e| e.to_string())?;
+                let config =
+                    oauth_openai::config_from_env(redirect_uri).map_err(|e| e.to_string())?;
                 oauth_openai::refresh_token(
                     &client,
                     &config,
@@ -2359,7 +2582,9 @@ fn anthropic_beta_scan_value(v: &Value, out: &mut BTreeSet<String>) {
             if map
                 .get("type")
                 .and_then(|t| t.as_str())
-                .map(|t| t.eq_ignore_ascii_case("computer_use") || t.eq_ignore_ascii_case("computer"))
+                .map(|t| {
+                    t.eq_ignore_ascii_case("computer_use") || t.eq_ignore_ascii_case("computer")
+                })
                 .unwrap_or(false)
             {
                 out.insert("computer-use-2024-10-22".to_string());
@@ -2399,11 +2624,7 @@ fn anthropic_beta_scan_value(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-fn upsert_csv_header(
-    headers: &mut HeaderMap,
-    name: http::header::HeaderName,
-    values: Vec<String>,
-) {
+fn upsert_csv_header(headers: &mut HeaderMap, name: http::header::HeaderName, values: Vec<String>) {
     if values.is_empty() {
         return;
     }
@@ -2442,7 +2663,11 @@ fn normalize_upstream_error(
             v.pointer("/error").and_then(|v| v.as_str()),
             v.pointer("/Message").and_then(|v| v.as_str()),
         ];
-        message = candidates.into_iter().flatten().next().map(|s| s.to_string());
+        message = candidates
+            .into_iter()
+            .flatten()
+            .next()
+            .map(|s| s.to_string());
 
         let code_candidates = [
             v.pointer("/error/code").and_then(|v| v.as_str()),
@@ -2450,7 +2675,11 @@ fn normalize_upstream_error(
             v.pointer("/error/type").and_then(|v| v.as_str()),
             v.pointer("/__type").and_then(|v| v.as_str()),
         ];
-        code = code_candidates.into_iter().flatten().next().map(|s| s.to_string());
+        code = code_candidates
+            .into_iter()
+            .flatten()
+            .next()
+            .map(|s| s.to_string());
     }
 
     if message
@@ -2472,7 +2701,10 @@ fn normalize_upstream_error(
             || lower.contains("max context")
         {
             error_type = "context_length_exceeded";
-        } else if lower.contains("content policy") || lower.contains("safety") || lower.contains("policy") {
+        } else if lower.contains("content policy")
+            || lower.contains("safety")
+            || lower.contains("policy")
+        {
             error_type = "content_policy_violation";
         }
     }
@@ -2553,26 +2785,28 @@ async fn resolve_image_urls_in_context(
 /// This prevents SSRF (Server-Side Request Forgery) attacks.
 fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
     let host_str = url.host_str().ok_or("URL has no host")?;
-    
+
     // Strip brackets from IPv6 addresses for consistent handling
     // url::Url.host_str() returns IPv6 addresses with brackets like "[::1]"
     let host = host_str.trim_start_matches('[').trim_end_matches(']');
-    
+
     // Block localhost and loopback
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
         return Err(format!("blocked internal URL: {}", host));
     }
-    
+
     // Block common internal hostnames
     let blocked_hostnames = [
-        "metadata", "metadata.google.internal", "instance-data",
+        "metadata",
+        "metadata.google.internal",
+        "instance-data",
         "169.254.169.254", // AWS/GCP/Azure metadata service
         "fd00:ec2::254",   // AWS IMDSv2 IPv6
     ];
     if blocked_hostnames.contains(&host) {
         return Err(format!("blocked internal URL: {}", host));
     }
-    
+
     // Parse IP address if host is an IP
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         // Block private IP ranges (RFC 1918)
@@ -2598,12 +2832,12 @@ fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
                 }
             }
         };
-        
+
         if is_private {
             return Err(format!("blocked private/internal IP address: {}", ip));
         }
     }
-    
+
     Ok(())
 }
 
@@ -2619,7 +2853,7 @@ async fn fetch_image_to_base64(
         "http" | "https" => {}
         _ => return Err(format!("unsupported image url scheme: {}", parsed.scheme())),
     }
-    
+
     // SSRF protection: block internal/private network URLs
     validate_url_not_internal(&parsed)?;
 
@@ -2667,17 +2901,17 @@ mod tests {
     use super::*;
     use crate::api;
     use crate::config::{AppConfig, ProviderConfig};
-    use crate::upstream::{UpstreamResponse};
+    use crate::upstream::UpstreamResponse;
     use axum::routing::{any, post};
     use axum::Router;
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use http::{HeaderMap, Method, StatusCode};
+    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use tower::util::ServiceExt;
-    use serde_json::json;
 
     #[test]
     fn test_apply_injections() {
@@ -2774,10 +3008,18 @@ mod tests {
 
     #[test]
     fn test_bedrock_is_claude_model_with_regional_prefix() {
-        assert!(bedrock_is_claude_model("anthropic.claude-3-opus-20240229-v1:0"));
-        assert!(bedrock_is_claude_model("us.anthropic.claude-3-opus-20240229-v1:0"));
-        assert!(bedrock_is_claude_model("eu.anthropic.claude-3-opus-20240229-v1:0"));
-        assert!(bedrock_is_claude_model("apac.anthropic.claude-3-opus-20240229-v1:0"));
+        assert!(bedrock_is_claude_model(
+            "anthropic.claude-3-opus-20240229-v1:0"
+        ));
+        assert!(bedrock_is_claude_model(
+            "us.anthropic.claude-3-opus-20240229-v1:0"
+        ));
+        assert!(bedrock_is_claude_model(
+            "eu.anthropic.claude-3-opus-20240229-v1:0"
+        ));
+        assert!(bedrock_is_claude_model(
+            "apac.anthropic.claude-3-opus-20240229-v1:0"
+        ));
         assert!(!bedrock_is_claude_model("meta.llama3-70b-instruct-v1:0"));
     }
 
@@ -3134,6 +3376,7 @@ mod tests {
             state: Default::default(),
             keys: Default::default(),
             capture: Default::default(),
+            transform: Default::default(),
         }
     }
 
@@ -3319,7 +3562,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("data: [DONE]"));
         assert!(text.contains("\"hi\""));
@@ -3330,7 +3575,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::TOO_MANY_REQUESTS,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from_static(b"{\"error\":{\"message\":\"rate limited\"}}")],
+            chunks: vec![Bytes::from_static(
+                b"{\"error\":{\"message\":\"rate limited\"}}",
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -3357,7 +3604,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("rate limited"));
     }
 
@@ -3415,7 +3664,9 @@ mod tests {
                 .unwrap_or(""),
             "text/event-stream"
         );
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("[DONE]"));
         assert!(text.contains("\"ok\""));
@@ -3454,7 +3705,9 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
 
         let mut saw_request = false;
         let mut saw_chunk = false;
@@ -3487,7 +3740,11 @@ mod tests {
         let mut images = HashMap::new();
         images.insert(
             img_url.clone(),
-            (img_headers, Bytes::from_static(&[1u8, 2, 3]), StatusCode::OK),
+            (
+                img_headers,
+                Bytes::from_static(&[1u8, 2, 3]),
+                StatusCode::OK,
+            ),
         );
 
         let anthropic_response = json!({
@@ -3503,7 +3760,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&anthropic_response).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&anthropic_response).unwrap(),
+            )],
         }])
         .with_images(images);
 
@@ -3544,7 +3803,9 @@ mod tests {
 
         // Ensure upstream request to Anthropic had base64 inline image data (AQID for [1,2,3]).
         let requests = mock.take_requests().await;
-        assert!(requests.iter().any(|r| r.method == Method::GET && r.url == "http://images.test/img.png"));
+        assert!(requests
+            .iter()
+            .any(|r| r.method == Method::GET && r.url == "http://images.test/img.png"));
 
         let post = requests.iter().find(|r| r.method == Method::POST).unwrap();
         let sent: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
@@ -3567,7 +3828,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&anthropic_response).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&anthropic_response).unwrap(),
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -3599,7 +3862,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["choices"][0]["message"]["content"], "ok");
     }
@@ -3654,7 +3919,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["choices"][0]["message"]["content"], "ok");
 
@@ -3678,7 +3945,9 @@ mod tests {
             .contains_key(http::header::HeaderName::from_static("x-amz-date")));
         assert!(requests[0]
             .headers
-            .contains_key(http::header::HeaderName::from_static("x-amz-content-sha256")));
+            .contains_key(http::header::HeaderName::from_static(
+                "x-amz-content-sha256"
+            )));
 
         let sent: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(sent["anthropic_version"], "bedrock-2023-05-31");
@@ -3853,7 +4122,9 @@ mod tests {
                     .unwrap();
                 let resp = app.oneshot(req).await.unwrap();
                 let status = resp.status();
-                let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
                 status
             }
         });
@@ -3884,7 +4155,9 @@ mod tests {
                 status: StatusCode::OK,
                 headers: upstream_headers.clone(),
                 chunks: vec![
-                    Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"),
+                    Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                    ),
                     Bytes::from_static(b"data: [DONE]\n\n"),
                 ],
             });
@@ -3924,7 +4197,9 @@ mod tests {
                     .unwrap();
                 let resp = app.oneshot(req).await.unwrap();
                 assert_eq!(resp.status(), StatusCode::OK);
-                let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
                 let text = String::from_utf8_lossy(&body);
                 assert!(text.contains("data: [DONE]"));
             }
@@ -4001,7 +4276,9 @@ mod tests {
         for _ in 0..20 {
             let mut chunks = Vec::new();
             for _ in 0..200 {
-                chunks.push(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\".\"}}]}\n\n"));
+                chunks.push(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\".\"}}]}\n\n",
+                ));
             }
             chunks.push(Bytes::from_static(b"data: [DONE]\n\n"));
             responses.push(ResponseSpec {
@@ -4049,7 +4326,9 @@ mod tests {
                     .unwrap();
                 let resp = app.oneshot(req).await.unwrap();
                 assert_eq!(resp.status(), StatusCode::OK);
-                let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
             }
         });
 
@@ -4069,12 +4348,9 @@ mod tests {
             }
         };
 
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            async move {
-                tokio::join!(futures::future::join_all(stream_tasks), inject_task);
-            },
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            tokio::join!(futures::future::join_all(stream_tasks), inject_task);
+        })
         .await
         .unwrap();
 
@@ -4125,8 +4401,12 @@ mod tests {
 
     #[test]
     fn ws_upstream_url_builder_converts_http_to_ws() {
-        let url = build_ws_upstream_url("https://api.example.com/v1", "/v1/realtime", Some("model=x"))
-            .unwrap();
+        let url = build_ws_upstream_url(
+            "https://api.example.com/v1",
+            "/v1/realtime",
+            Some("model=x"),
+        )
+        .unwrap();
         assert_eq!(url, "wss://api.example.com/v1/realtime?model=x");
     }
 
@@ -4165,10 +4445,7 @@ mod tests {
 
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("x-mock-response").unwrap(),
-            "true"
-        );
+        assert_eq!(resp.headers().get("x-mock-response").unwrap(), "true");
 
         let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -4184,7 +4461,11 @@ mod tests {
 
         // Verify no upstream requests were made
         let requests = mock.take_requests().await;
-        assert_eq!(requests.len(), 0, "Mock provider should not make upstream requests");
+        assert_eq!(
+            requests.len(),
+            0,
+            "Mock provider should not make upstream requests"
+        );
     }
 
     #[tokio::test]

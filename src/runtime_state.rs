@@ -13,7 +13,8 @@ pub fn load_runtime_state() -> Option<RuntimeState> {
 }
 
 pub fn save_runtime_state(state: &RuntimeState) -> Result<(), String> {
-    let path = runtime_state_path().ok_or_else(|| "Failed to resolve XDG state path".to_string())?;
+    let path =
+        runtime_state_path().ok_or_else(|| "Failed to resolve XDG state path".to_string())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create state dir {}: {}", parent.display(), e))?;

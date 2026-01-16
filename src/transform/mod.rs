@@ -118,7 +118,10 @@ impl ProviderTransformer {
     }
 
     /// Transform canonical context to provider-specific request body.
-    pub fn transform_request(&self, context: &Context) -> Result<serde_json::Value, TransformError> {
+    pub fn transform_request(
+        &self,
+        context: &Context,
+    ) -> Result<serde_json::Value, TransformError> {
         self.inner.transform_request(context)
     }
 
@@ -142,7 +145,10 @@ impl ProviderTransformer {
     }
 
     /// Parse a complete (non-streaming) response.
-    pub fn parse_response(&self, body: &serde_json::Value) -> Result<Vec<StreamEvent>, TransformError> {
+    pub fn parse_response(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<Vec<StreamEvent>, TransformError> {
         self.inner.parse_response(body)
     }
 }
@@ -245,7 +251,7 @@ mod tests {
         assert!(anthropic_request["system"].is_array());
         let system = anthropic_request["system"].as_array().unwrap();
         assert_eq!(system[0]["text"], "You are helpful");
-        
+
         assert!(anthropic_request["messages"].is_array());
         let messages = anthropic_request["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);

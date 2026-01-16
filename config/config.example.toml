@@ -256,3 +256,40 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 # api_only = false                       # Only capture API traffic (skip desktop app domains)
 # addon_path = "/path/to/eavs_capture.py"  # Custom path to addon script (usually auto-detected)
 # extra_args = []                        # Additional mitmproxy arguments (e.g., ["--quiet"])
+
+# =============================================================================
+# Transform Plugins
+# =============================================================================
+# Transform plugins are external scripts that can modify request/response JSON
+# before/after it's sent to upstream providers. This is useful for:
+#   - Provider-specific quirks (e.g., OAuth token restrictions)
+#   - Custom header injection
+#   - Request/response logging and modification
+#
+# Plugin Protocol:
+# Plugins receive JSON on stdin:
+#   {
+#     "type": "request" | "response",
+#     "provider": "anthropic" | "openai" | ...,
+#     "is_oauth": true | false,
+#     "headers": { "header-name": "value", ... },
+#     "body": { ... request/response body ... }
+#   }
+#
+# Plugins output modified JSON on stdout:
+#   {
+#     "headers": { "header-name": "value", ... },  // optional
+#     "body": { ... modified body ... }            // optional
+#   }
+
+# [transform]
+# enabled = true
+#
+# [[transform.plugins]]
+# name = "anthropic-oauth-fix"
+# command = "my-transform-script"
+# args = ["--mode", "transform"]
+# env = { MY_API_KEY = "env:MY_API_KEY" }
+# providers = ["anthropic"]  # Only run for Anthropic (empty = all providers)
+# oauth_only = true          # Only run for OAuth requests
+# timeout_ms = 5000          # 5 second timeout (default)

@@ -6,8 +6,8 @@
 use crate::transform::{RequestTransformer, ResponseTransformer, TransformError};
 use crate::types::{
     ApiType, AssistantMessage, ContentBlock, ContentBlockState, ContentBlockType, Context,
-    ImageContent, Message, StopReason, StreamEvent, StreamState, TextContent,
-    Tool, ToolCall, ToolResultMessage, Usage, UserMessage,
+    ImageContent, Message, StopReason, StreamEvent, StreamState, TextContent, Tool, ToolCall,
+    ToolResultMessage, Usage, UserMessage,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,7 +29,12 @@ impl OpenAITransformer {
     }
 
     /// Configure for specific compat settings.
-    pub fn with_compat(mut self, supports_developer_role: bool, use_max_tokens: bool, supports_store: bool) -> Self {
+    pub fn with_compat(
+        mut self,
+        supports_developer_role: bool,
+        use_max_tokens: bool,
+        supports_store: bool,
+    ) -> Self {
         self.use_developer_role = !supports_developer_role;
         self.use_max_tokens = use_max_tokens;
         self.supports_store = supports_store;
@@ -145,9 +150,10 @@ impl ResponseTransformer for OpenAITransformer {
         let mut events = Vec::new();
 
         // Get the first choice
-        let choice = response.choices.first().ok_or_else(|| {
-            TransformError::InvalidJson("No choices in response".to_string())
-        })?;
+        let choice = response
+            .choices
+            .first()
+            .ok_or_else(|| TransformError::InvalidJson("No choices in response".to_string()))?;
 
         // Build message
         let mut message = AssistantMessage {
@@ -165,7 +171,9 @@ impl ResponseTransformer for OpenAITransformer {
 
         // Parse content
         if let Some(ref content) = choice.message.content {
-            message.content.push(ContentBlock::Text(TextContent::new(content)));
+            message
+                .content
+                .push(ContentBlock::Text(TextContent::new(content)));
             events.push(StreamEvent::TextEnd {
                 content_index: 0,
                 content: content.clone(),
@@ -180,7 +188,9 @@ impl ResponseTransformer for OpenAITransformer {
                     &tc.function.name,
                     serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null),
                 );
-                message.content.push(ContentBlock::ToolCall(tool_call.clone()));
+                message
+                    .content
+                    .push(ContentBlock::ToolCall(tool_call.clone()));
                 events.push(StreamEvent::ToolCallEnd {
                     content_index: idx + 1,
                     tool_call,
@@ -218,10 +228,7 @@ pub fn parse_openai_request(body: &Value) -> Result<Context, TransformError> {
 
         match role {
             "system" | "developer" => {
-                let content = msg["content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+                let content = msg["content"].as_str().unwrap_or_default().to_string();
                 context.system_prompt = Some(content);
             }
             "user" => {
@@ -319,7 +326,11 @@ pub fn build_openai_sse(event: &StreamEvent, request_id: &str, model: &str) -> S
             });
             format!("data: {}\n\n", chunk)
         }
-        StreamEvent::ToolCallStart { id, name, content_index } => {
+        StreamEvent::ToolCallStart {
+            id,
+            name,
+            content_index,
+        } => {
             let chunk = json!({
                 "id": request_id,
                 "object": "chat.completion.chunk",
@@ -340,7 +351,10 @@ pub fn build_openai_sse(event: &StreamEvent, request_id: &str, model: &str) -> S
             });
             format!("data: {}\n\n", chunk)
         }
-        StreamEvent::ToolCallDelta { delta, content_index } => {
+        StreamEvent::ToolCallDelta {
+            delta,
+            content_index,
+        } => {
             let chunk = json!({
                 "id": request_id,
                 "object": "chat.completion.chunk",
@@ -466,7 +480,10 @@ fn parse_assistant_message(msg: &Value) -> Result<AssistantMessage, TransformErr
     if let Some(tool_calls) = msg["tool_calls"].as_array() {
         for tc in tool_calls {
             let id = tc["id"].as_str().unwrap_or_default().to_string();
-            let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
+            let name = tc["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let arguments: Value = tc["function"]["arguments"]
                 .as_str()
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -506,7 +523,10 @@ fn parse_tool(tool: &Value) -> Result<Tool, TransformError> {
         .as_str()
         .ok_or_else(|| TransformError::MissingField("function.name".to_string()))?
         .to_string();
-    let description = function["description"].as_str().unwrap_or_default().to_string();
+    let description = function["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let parameters = function["parameters"].clone();
 
     Ok(Tool::new(name, description, parameters))
@@ -528,7 +548,11 @@ fn build_openai_messages(context: &Context, use_developer_role: bool) -> Vec<Val
 
     // Add system prompt
     if let Some(ref system) = context.system_prompt {
-        let role = if use_developer_role { "developer" } else { "system" };
+        let role = if use_developer_role {
+            "developer"
+        } else {
+            "system"
+        };
         messages.push(json!({
             "role": role,
             "content": system
@@ -869,7 +893,10 @@ fn process_openai_chunk(
                             block.tool_name.as_deref().unwrap_or_default(),
                             serde_json::from_str(&block.text).unwrap_or(Value::Null),
                         );
-                        state.message.content.push(ContentBlock::ToolCall(tool_call.clone()));
+                        state
+                            .message
+                            .content
+                            .push(ContentBlock::ToolCall(tool_call.clone()));
                         events.push(StreamEvent::ToolCallEnd {
                             content_index: idx,
                             tool_call,
@@ -1099,8 +1126,12 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
 
         let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Start { .. })));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Start { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
     }
 
     #[test]
@@ -1161,22 +1192,27 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
 
         let events = transformer.parse_response(&body).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "Hello!")));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { reason: StopReason::EndTurn, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "Hello!")));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::Done {
+                reason: StopReason::EndTurn,
+                ..
+            }
+        )));
     }
 
     #[test]
     fn test_build_openai_messages_with_thinking() {
-        let ctx = Context::new("gpt-4")
-            .with_messages(vec![
-                Message::Assistant(AssistantMessage {
-                    content: vec![
-                        ContentBlock::Thinking(ThinkingContent::new("Let me think...")),
-                        ContentBlock::Text(TextContent::new("Here's my answer")),
-                    ],
-                    ..Default::default()
-                }),
-            ]);
+        let ctx = Context::new("gpt-4").with_messages(vec![Message::Assistant(AssistantMessage {
+            content: vec![
+                ContentBlock::Thinking(ThinkingContent::new("Let me think...")),
+                ContentBlock::Text(TextContent::new("Here's my answer")),
+            ],
+            ..Default::default()
+        })]);
 
         let messages = build_openai_messages(&ctx, false);
 

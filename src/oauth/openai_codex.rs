@@ -146,8 +146,6 @@ fn token_to_credentials(user_id: &str, token: TokenResponse) -> OAuthCredentials
         access_token: token.access_token,
         refresh_token: token.refresh_token.unwrap_or_default(),
         expires_at,
-        extra_data: token
-            .id_token
-            .map(|id| serde_json::json!({"id_token": id})),
+        extra_data: token.id_token.map(|id| serde_json::json!({"id_token": id})),
     }
 }

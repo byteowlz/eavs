@@ -136,10 +136,12 @@ pub async fn assume_role_with_web_identity(
         return Err(format!("STS returned {}: {}", resp.status, xml));
     }
 
-    let access_key_id = xml_tag_value(&xml, "AccessKeyId").ok_or_else(|| "missing AccessKeyId".to_string())?;
-    let secret_access_key =
-        xml_tag_value(&xml, "SecretAccessKey").ok_or_else(|| "missing SecretAccessKey".to_string())?;
-    let session_token = xml_tag_value(&xml, "SessionToken").ok_or_else(|| "missing SessionToken".to_string())?;
+    let access_key_id =
+        xml_tag_value(&xml, "AccessKeyId").ok_or_else(|| "missing AccessKeyId".to_string())?;
+    let secret_access_key = xml_tag_value(&xml, "SecretAccessKey")
+        .ok_or_else(|| "missing SecretAccessKey".to_string())?;
+    let session_token =
+        xml_tag_value(&xml, "SessionToken").ok_or_else(|| "missing SessionToken".to_string())?;
     let expires_at = xml_tag_value(&xml, "Expiration")
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
@@ -192,7 +194,10 @@ mod tests {
     #[test]
     fn xml_tag_value_extracts() {
         let xml = "<Root><AccessKeyId>A</AccessKeyId></Root>";
-        assert_eq!(super::xml_tag_value(xml, "AccessKeyId").as_deref(), Some("A"));
+        assert_eq!(
+            super::xml_tag_value(xml, "AccessKeyId").as_deref(),
+            Some("A")
+        );
     }
 
     #[tokio::test]
@@ -204,7 +209,8 @@ mod tests {
             fn send<'a>(
                 &'a self,
                 _request: UpstreamRequest,
-            ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+            ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>>
+            {
                 Box::pin(async move {
                     let xml = r#"
                         <AssumeRoleWithWebIdentityResponse>
@@ -227,9 +233,10 @@ mod tests {
             }
         }
 
-        let res = assume_role_with_web_identity(&TestUpstream, "arn:aws:iam::123:role/r", "jwt", "sess")
-            .await
-            .unwrap();
+        let res =
+            assume_role_with_web_identity(&TestUpstream, "arn:aws:iam::123:role/r", "jwt", "sess")
+                .await
+                .unwrap();
         assert_eq!(res.creds.access_key_id, "AKIA123");
         assert_eq!(res.creds.secret_access_key, "SECRET123");
         assert_eq!(res.creds.session_token.as_deref(), Some("TOKEN123"));

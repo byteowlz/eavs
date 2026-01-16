@@ -118,11 +118,7 @@ impl FileSink {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
+        OpenOptions::new().create(true).append(true).open(path).ok()
     }
 }
 
@@ -200,7 +196,8 @@ impl WebhookSink {
         let interval = self.flush_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval_timer = tokio::time::interval(tokio::time::Duration::from_secs(interval));
+            let mut interval_timer =
+                tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
                 tokio::select! {
                     _ = interval_timer.tick() => {
@@ -322,7 +319,11 @@ impl Logger {
                     sink.start_flush_task();
                     sinks.push(Box::new(sink));
                 }
-                LogBackend::OpenTelemetry { endpoint, protocol, service_name } => {
+                LogBackend::OpenTelemetry {
+                    endpoint,
+                    protocol,
+                    service_name,
+                } => {
                     // OTEL support is a future enhancement
                     tracing::info!(
                         "OpenTelemetry logging configured (endpoint={}, protocol={}, service={}), but not yet implemented",
@@ -465,7 +466,10 @@ mod tests {
         std::env::set_var("TEST_WEBHOOK_KEY", "secret123");
 
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), "env:TEST_WEBHOOK_KEY".to_string());
+        headers.insert(
+            "Authorization".to_string(),
+            "env:TEST_WEBHOOK_KEY".to_string(),
+        );
         headers.insert("X-Custom".to_string(), "static-value".to_string());
 
         let sink = WebhookSink::new("https://example.com/logs", &headers, 10, 5);
