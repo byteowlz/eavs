@@ -597,6 +597,48 @@ pub enum TestCommands {
         #[arg(long, env = "EAVS_CONFIG")]
         config: Option<String>,
     },
+
+    /// Test OAuth authentication end-to-end
+    ///
+    /// Creates a temporary virtual key bound to an OAuth user and sends a test request.
+    /// This validates the complete OAuth flow: stored credentials -> token resolution -> API call.
+    Oauth {
+        /// OAuth user ID to test (must have authenticated with 'eavs login')
+        #[arg(short, long, default_value = "default")]
+        user: String,
+
+        /// Provider to test (anthropic, openai, google, github-copilot)
+        /// If not specified, uses the first authenticated provider for the user
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model to use (auto-detected based on provider if not specified)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Message to send
+        #[arg(
+            long,
+            default_value = "Say 'OAuth test successful!' in exactly those words."
+        )]
+        message: String,
+
+        /// Use streaming
+        #[arg(short, long)]
+        stream: bool,
+
+        /// EAVS server URL
+        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
+        url: String,
+
+        /// Output format (text or json)
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+
+        /// Path to config file
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
@@ -1819,6 +1861,195 @@ fn print_routing_result(result: &RoutingTestResult) {
     }
 
     println!();
+}
+
+/// Test OAuth authentication end-to-end
+///
+/// This creates a temporary virtual key bound to the OAuth user,
+/// sends a test request, and validates the response.
+pub async fn run_test_oauth(
+    user_id: &str,
+    provider: Option<String>,
+    model: Option<String>,
+    message: String,
+    stream: bool,
+    server_url: &str,
+    format: OutputFormat,
+    config_path: Option<&str>,
+) -> Result<(), CliError> {
+    use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore};
+
+    // Load config
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+    } else {
+        crate::config::AppConfig::load()
+            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+    };
+
+    let db_path = config.keys.resolved_database_path();
+
+    // Check OAuth store for authenticated providers
+    let oauth_store = OAuthStore::new(&db_path)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+
+    let authenticated_providers = oauth_store
+        .list_providers(user_id)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to list providers: {}", e)))?;
+
+    if authenticated_providers.is_empty() {
+        return Err(CliError::Other(format!(
+            "No OAuth providers authenticated for user '{}'. Run 'eavs login' first.",
+            user_id
+        )));
+    }
+
+    // Determine which provider to test
+    let oauth_provider_str = if let Some(ref p) = provider {
+        if !authenticated_providers.iter().any(|ap| ap == p) {
+            return Err(CliError::Other(format!(
+                "Provider '{}' not authenticated for user '{}'. Authenticated: {:?}",
+                p, user_id, authenticated_providers
+            )));
+        }
+        p.clone()
+    } else {
+        authenticated_providers[0].clone()
+    };
+
+    let oauth_provider = OAuthProvider::from_str(&oauth_provider_str)
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", oauth_provider_str)))?;
+
+    // Determine model based on provider if not specified
+    let model = model.unwrap_or_else(|| match oauth_provider {
+        OAuthProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
+        OAuthProvider::OpenAICodex => "gpt-4o".to_string(),
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
+            "gemini-1.5-flash".to_string()
+        }
+        OAuthProvider::GithubCopilot => "gpt-4o".to_string(),
+    });
+
+    // Map OAuth provider to EAVS provider name
+    let eavs_provider = match oauth_provider {
+        OAuthProvider::Anthropic => "anthropic",
+        OAuthProvider::OpenAICodex => "openai",
+        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => "google",
+        OAuthProvider::GithubCopilot => "openai", // GitHub Copilot uses OpenAI-compatible API
+    };
+
+    println!("Testing OAuth Authentication");
+    println!("{}", "=".repeat(50));
+    println!("User:     {}", user_id);
+    println!("Provider: {} ({})", oauth_provider_str, eavs_provider);
+    println!("Model:    {}", model);
+    println!("Stream:   {}", stream);
+    println!();
+
+    // Create a temporary virtual key bound to the OAuth user
+    let key_store = KeyStore::new(&db_path)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to open key store: {}", e)))?;
+
+    let key_request = CreateKeyRequest {
+        name: Some(format!("oauth-test-{}", chrono::Utc::now().timestamp())),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        permissions: KeyPermissions::default(),
+        metadata: serde_json::Value::Null,
+        oauth_user: Some(user_id.to_string()),
+    };
+
+    let key_response = key_store
+        .create_key(key_request)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to create test key: {}", e)))?;
+
+    println!("Created temporary key: {}", key_response.key_id);
+    println!();
+
+    // Send test request
+    let start = std::time::Instant::now();
+    println!("Sending test request...");
+
+    let client = EavsClient::with_url(server_url.to_string());
+    let result = client
+        .chat(
+            &message,
+            &model,
+            eavs_provider,
+            Some(&key_response.key),
+            stream,
+        )
+        .await;
+
+    // Clean up: disable the temporary key
+    let _ = key_store.disable_key(&key_response.key_hash).await;
+
+    let elapsed = start.elapsed();
+
+    match result {
+        Ok(response) => {
+            println!();
+            match format {
+                OutputFormat::Json => {
+                    let usage_json = response.usage.as_ref().map(|u| {
+                        serde_json::json!({
+                            "prompt_tokens": u.prompt_tokens,
+                            "completion_tokens": u.completion_tokens
+                        })
+                    });
+                    let output = serde_json::json!({
+                        "success": true,
+                        "user": user_id,
+                        "provider": oauth_provider_str,
+                        "model": model,
+                        "elapsed_ms": elapsed.as_millis(),
+                        "response": response.content,
+                        "usage": usage_json,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                }
+                OutputFormat::Text => {
+                    println!("Response:");
+                    println!("{}", response.content);
+                    println!();
+                    println!("Timing: {:.2?}", elapsed);
+                    if let Some(usage) = response.usage {
+                        println!(
+                            "Usage: {} prompt + {} completion tokens",
+                            usage.prompt_tokens, usage.completion_tokens
+                        );
+                    }
+                    println!();
+                    println!("OAuth test PASSED");
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            match format {
+                OutputFormat::Json => {
+                    let output = serde_json::json!({
+                        "success": false,
+                        "user": user_id,
+                        "provider": oauth_provider_str,
+                        "model": model,
+                        "elapsed_ms": elapsed.as_millis(),
+                        "error": e.to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                }
+                OutputFormat::Text => {
+                    println!();
+                    println!("OAuth test FAILED: {}", e);
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Run a single timed request

@@ -24,9 +24,9 @@ mod integration_tests;
 use crate::cli::{
     ensure_server_running, run_auth_logout, run_auth_status, run_login, run_service_logs,
     run_service_restart, run_service_start, run_service_status, run_service_stop, run_test_bench,
-    run_test_chat, run_test_health, run_test_image, run_test_rate_limit, run_test_routing,
-    run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ProviderCommands,
-    ServiceCommands, TestCommands,
+    run_test_chat, run_test_health, run_test_image, run_test_oauth, run_test_rate_limit,
+    run_test_routing, run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands,
+    ProviderCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -531,6 +531,30 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             // Ensure server is running, auto-start if needed
             let server = ensure_server_running(&url, config.as_deref()).await?;
             run_test_routing(&server.url, &provider, model, format).await
+        }
+        TestCommands::Oauth {
+            user,
+            provider,
+            model,
+            message,
+            stream,
+            url,
+            format,
+            config,
+        } => {
+            // Ensure server is running, auto-start if needed
+            let server = ensure_server_running(&url, config.as_deref()).await?;
+            run_test_oauth(
+                &user,
+                provider,
+                model,
+                message,
+                stream,
+                &server.url,
+                format,
+                config.as_deref(),
+            )
+            .await
         }
     }
 }
