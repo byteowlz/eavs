@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 const AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 pub struct OpenAICodexConfig {
     pub client_id: String,
@@ -16,7 +17,9 @@ pub struct OpenAICodexConfig {
 
 pub fn config_from_env(redirect_uri: String) -> Result<OpenAICodexConfig, String> {
     let client_id = std::env::var("EAVS_OAUTH_OPENAI_CLIENT_ID")
-        .map_err(|_| "Missing EAVS_OAUTH_OPENAI_CLIENT_ID".to_string())?;
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
     let client_secret = std::env::var("EAVS_OAUTH_OPENAI_CLIENT_SECRET").ok();
     let scope = std::env::var("EAVS_OAUTH_OPENAI_SCOPE")
         .unwrap_or_else(|_| "openid profile email offline_access".to_string());
