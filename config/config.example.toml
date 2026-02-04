@@ -69,6 +69,21 @@ type = "xai"
 api_key = "env:XAI_API_KEY"
 # base_url defaults to https://api.x.ai/v1
 
+# Microsoft Foundry / Azure AI Foundry
+[providers.foundry]
+type = "foundry"
+api_key = "env:FOUNDRY_API_KEY"
+# Base URL format: https://{resource-name}.services.ai.azure.com/api/projects/{project-name}/openai
+# base_url defaults to None (must be specified)
+# api_version = "2024-02-15-preview"  # Optional: API version
+#
+# Example:
+# base_url = "https://my-resource.services.ai.azure.com/api/projects/my-project/openai"
+#
+# Foundry supports both v1 chat completions and Responses API formats:
+#   - /v1/chat/completions - Standard OpenAI format
+#   - /v1/responses - Responses API format (model + input fields)
+
 # OpenRouter (unified API for many models)
 [providers.openrouter]
 type = "openrouter"

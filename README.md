@@ -4,7 +4,7 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 
 ## Features
 
-- **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Azure, AWS Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
+- **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Microsoft Foundry, Azure, AWS Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
 - **Transparent Traffic Capture**: Automatically intercept LLM API calls from any app via mitmproxy integration
 - **Virtual API Keys**: Issue keys with rate limits, budgets, and model restrictions
 - **Cost Tracking**: Automatic token counting and cost calculation per key
@@ -74,6 +74,7 @@ Supported providers:
 - `cerebras` - Cerebras
 - `xai` - xAI (Grok)
 - `openrouter` - OpenRouter
+- `foundry` - Microsoft Foundry / Azure AI Foundry
 - `azure` - Azure OpenAI
 - `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
