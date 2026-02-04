@@ -15,6 +15,8 @@ pub enum ProviderType {
     XAI,
     OpenRouter,
     Bedrock,
+    /// Microsoft Foundry (AI Foundry / Azure AI Foundry)
+    Foundry,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
     /// OpenAI Codex CLI (ChatGPT backend via OAuth) - uses Responses API
@@ -65,6 +67,7 @@ impl ProviderType {
             "xai" | "grok" => Self::XAI,
             "openrouter" => Self::OpenRouter,
             "bedrock" | "aws-bedrock" => Self::Bedrock,
+            "foundry" | "azure-foundry" | "ai-foundry" | "microsoft-foundry" => Self::Foundry,
             "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible" => {
                 Self::OpenAICompatible
             }
@@ -138,6 +141,12 @@ impl ProviderType {
                 env_key_name: None,
                 auth_style: AuthStyle::None,
             },
+            Self::Foundry => ProviderInfo {
+                provider_type: *self,
+                default_base_url: None, // Must be specified: https://{resource}.services.ai.azure.com/api/projects/{project}/openai
+                env_key_name: Some("FOUNDRY_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::OpenAICompatible => ProviderInfo {
                 provider_type: *self,
                 default_base_url: None, // Must be specified
@@ -182,6 +191,7 @@ impl ProviderType {
                 | Self::Cerebras
                 | Self::XAI
                 | Self::OpenRouter
+                | Self::Foundry
                 | Self::OpenAICompatible
         )
     }
@@ -216,6 +226,7 @@ impl ProviderType {
                 | Self::Groq
                 | Self::XAI
                 | Self::OpenRouter
+                | Self::Foundry
                 | Self::OpenAICompatible
                 | Self::OpenAIResponses
         )
@@ -354,6 +365,14 @@ pub fn detect_provider_from_host(host: &str) -> Option<&'static str> {
         return Some("replicate");
     }
 
+    // Microsoft Foundry / Azure AI Foundry
+    if host_lower.contains("services.ai.azure.com")
+        || host_lower.contains("foundry.azure.com")
+        || host_lower.contains("ai.azure.com")
+    {
+        return Some("foundry");
+    }
+
     None
 }
 
@@ -463,6 +482,17 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("deepseek");
     }
 
+    // Microsoft Foundry models
+    // Foundry uses various model prefixes including MAI (Microsoft AI) and others
+    if model_lower.starts_with("mai-")
+        || model_lower.contains("foundry")
+        || model_lower.starts_with("microsoft/")
+        || model_lower.starts_with("phi-")
+        || model_lower.starts_with("r1")
+    {
+        return Some("foundry");
+    }
+
     None
 }
 
@@ -568,6 +598,15 @@ mod tests {
         assert_eq!(
             ProviderType::from_str("openrouter"),
             ProviderType::OpenRouter
+        );
+        assert_eq!(ProviderType::from_str("foundry"), ProviderType::Foundry);
+        assert_eq!(
+            ProviderType::from_str("azure-foundry"),
+            ProviderType::Foundry
+        );
+        assert_eq!(
+            ProviderType::from_str("ai-foundry"),
+            ProviderType::Foundry
         );
         assert_eq!(
             ProviderType::from_str("openai-responses"),
@@ -712,6 +751,20 @@ mod tests {
             Some("deepseek")
         );
 
+        // Microsoft Foundry
+        assert_eq!(
+            detect_provider_from_host("my-resource.services.ai.azure.com"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_host("foundry.azure.com"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_host("ai.azure.com"),
+            Some("foundry")
+        );
+
         // Unknown hosts
         assert_eq!(detect_provider_from_host("example.com"), None);
         assert_eq!(detect_provider_from_host("localhost"), None);
@@ -851,6 +904,31 @@ mod tests {
         assert_eq!(
             detect_provider_from_model("deepseek-chat"),
             Some("deepseek")
+        );
+    }
+
+    #[test]
+    fn test_detect_provider_from_model_foundry() {
+        // Microsoft Foundry model patterns
+        assert_eq!(
+            detect_provider_from_model("MAI-DS-R1"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_model("mai-gpt-4"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_model("phi-3-mini"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_model("microsoft/phi-3"),
+            Some("foundry")
+        );
+        assert_eq!(
+            detect_provider_from_model("R1-preview"),
+            Some("foundry")
         );
     }
 
