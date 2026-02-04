@@ -17,18 +17,18 @@ Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR
 ### [eavs-6yxf] Add GitHub CLI (gh) credential proxy for secure agent access to GitHub (P2, feature)
 Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub tokens.
 
-**gh CLI token storage:**
-- macOS: System Keychain (service: gh:github.com, base64 encoded)
-- Linux: GNOME Keyring / libsecret, or ~/.config/gh/hosts.yml plaintext fallback
+**Use case:** Sandboxed agents need GitHub access but shouldn't have direct access to credentials.
+
+**gh CLI token storage (for reference):**
 ...
 
 
 ### [eavs-7qma] Improve GitHub Copilot OAuth: add Copilot token exchange, dynamic base URL, and header injection (P2, feature)
-Borrow improvements from pi-mono's GitHub Copilot implementation:
+Improve GitHub Copilot OAuth by borrowing from pi-mono implementation.
 
-1. **Copilot token exchange** - After GitHub OAuth, exchange token via /copilot_internal/v2/token to get Copilot-specific token
-2. **Dynamic base URL** - Parse proxy-ep from Copilot token to determine correct API endpoint (api.individual.githubcopilot.com vs enterprise)
-3. **Header injection** - Add Copilot-specific headers based on request context:
+**Reference:** ~/repos/pi-mono/packages/ai/src/utils/oauth/github-copilot.ts
+
+**Current EAVS implementation gaps:**
 ...
 
 
