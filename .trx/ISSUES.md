@@ -11,3 +11,6 @@ Support allowlist/denylist controls for EAVS proxy routing (configurable hosts/d
 ### [eavs-rca1] Add domain allow/deny lists to EAVS proxy (P2, feature)
 Extend EAVS config and proxy to support domain allowlist/denylist for network proxy mode. Include config schema updates, enforcement logic, and tests.
 
+## Closed
+
+- [eavs-pyz3] Remove foundry provider type - Azure AI Foundry is a hosting platform, not a distinct API (closed 2026-02-04)
