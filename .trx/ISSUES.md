@@ -8,9 +8,9 @@ Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR
 ### [eavs-6yxf] Add GitHub CLI (gh) credential proxy for secure agent access to GitHub (P2, feature)
 Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub tokens.
 
-**Key finding:** gh CLI respects HTTPS_PROXY environment variable!
-
-```bash
+**gh CLI token storage:**
+- macOS: System Keychain (service: gh:github.com, base64 encoded)
+- Linux: GNOME Keyring / libsecret, or ~/.config/gh/hosts.yml plaintext fallback
 ...
 
 
