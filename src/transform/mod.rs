@@ -103,7 +103,6 @@ impl ProviderTransformer {
             | ProviderType::Cerebras
             | ProviderType::XAI
             | ProviderType::OpenRouter
-            | ProviderType::Foundry
             | ProviderType::OpenAICompatible
             | ProviderType::Mock => Box::new(OpenAITransformer::new()), // Mock uses OpenAI format
             ProviderType::Anthropic => Box::new(AnthropicTransformer::new()),
