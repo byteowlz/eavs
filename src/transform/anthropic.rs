@@ -211,7 +211,7 @@ impl ResponseTransformer for AnthropicTransformer {
                 "tool_use" => {
                     let tool_call = ToolCall::new(
                         content.id.as_deref().unwrap_or_default(),
-                        &strip_oauth_tool_prefix(content.name.as_deref().unwrap_or_default()),
+                        strip_oauth_tool_prefix(content.name.as_deref().unwrap_or_default()),
                         content.input.clone().unwrap_or(Value::Null),
                     );
                     message

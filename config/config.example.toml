@@ -265,6 +265,16 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 # - macOS: ~/Library/Application Support/eavs/word_lists.toml
 # word_lists_path = "~/.config/eavs/word_lists.toml"
 
+#
+# OAuth credential storage backend: "keychain" (default) or "sqlite".
+# "keychain" uses the system keychain:
+#   - macOS: Keychain
+#   - Linux: Kernel keyutils (works on headless servers, no DBus needed)
+#   - Windows: Credential Manager
+#   Falls back to SQLite automatically if the keychain is unavailable.
+# "sqlite" stores tokens in the same database as virtual API keys (plaintext).
+# oauth_backend = "keychain"
+
 # =============================================================================
 # OAuth (Claude Code + OpenAI Codex)
 # =============================================================================
@@ -273,7 +283,8 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 #   - EAVS_OAUTH_ANTHROPIC_CLIENT_ID / _SECRET / _SCOPE
 #   - EAVS_OAUTH_OPENAI_CLIENT_ID / _SECRET / _SCOPE
 #
-# OAuth tokens are stored in the keys database, so [keys].enabled must be true.
+# OAuth tokens are stored securely via the configured backend (see oauth_backend above).
+# Requires [keys].enabled = true.
 
 # =============================================================================
 # Transparent Traffic Capture (via mitmproxy)

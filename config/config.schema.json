@@ -197,6 +197,12 @@
           "type": ["string", "null"],
           "description": "Path to word lists TOML file for human-readable key IDs. If not specified, downloads to XDG data directory.",
           "examples": ["~/.config/eavs/word_lists.toml", null]
+        },
+        "oauth_backend": {
+          "type": "string",
+          "description": "OAuth credential storage backend. 'keychain' uses the system keychain (macOS Keychain, Linux kernel keyutils for headless support, Windows Credential Manager) with automatic fallback to SQLite if unavailable. 'sqlite' stores tokens in plaintext in the same database as virtual API keys.",
+          "default": "keychain",
+          "enum": ["keychain", "sqlite"]
         }
       },
       "additionalProperties": false
