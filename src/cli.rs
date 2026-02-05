@@ -3445,17 +3445,18 @@ async fn run_device_code_flow(
     }
 }
 
-/// Run Anthropic PKCE flow with local callback server
+/// Run Anthropic PKCE flow with code-paste (user copies code from browser)
 async fn run_pkce_flow_anthropic(
     client: &reqwest::Client,
     user_id: &str,
-    callback_port: u16,
+    _callback_port: u16,
 ) -> Result<OAuthCredentials, CliError> {
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
-    let config = anthropic::config_from_env(redirect_uri.clone())
+    // Use the default redirect URI for code-paste flow (no local server needed)
+    let config = anthropic::config_from_env(anthropic::default_redirect_uri())
         .map_err(|e| CliError::Other(format!("Anthropic config error: {}", e)))?;
 
     let (code_verifier, _) = pkce::generate_pkce_pair();
+    // The opencode plugin sets state = code_verifier
     let state = code_verifier.clone();
 
     let auth_url = anthropic::build_authorize_url(&config, &state, &code_verifier)
@@ -3470,15 +3471,53 @@ async fn run_pkce_flow_anthropic(
 
     let _ = open_browser(&auth_url);
 
-    // Start local callback server
-    let code = wait_for_oauth_callback(callback_port).await?;
+    // Prompt user to paste the authorization code from the browser
+    println!("After authorizing, paste the code shown in your browser below.");
+    print!("Authorization code: ");
+    use std::io::Write;
+    std::io::stdout()
+        .flush()
+        .map_err(|e| CliError::Other(format!("Failed to flush stdout: {}", e)))?;
+
+    let mut pasted = String::new();
+    std::io::stdin()
+        .read_line(&mut pasted)
+        .map_err(|e| CliError::Other(format!("Failed to read input: {}", e)))?;
+    let pasted = pasted.trim();
+
+    if pasted.is_empty() {
+        return Err(CliError::Other(
+            "No authorization code provided".to_string(),
+        ));
+    }
+
+    // The pasted value is "code#state" - split on '#'
+    // First part is the authorization code, second part is the state
+    let (auth_code, pasted_state) = if let Some(idx) = pasted.find('#') {
+        (&pasted[..idx], &pasted[idx + 1..])
+    } else {
+        // If no '#' separator, treat the entire value as the code
+        (pasted, "")
+    };
+
+    let effective_state = if pasted_state.is_empty() {
+        &state
+    } else {
+        pasted_state
+    };
 
     println!("Authorization code received, exchanging for tokens...");
 
-    let credentials =
-        anthropic::exchange_code(client, &config, user_id, &code, &state, &code_verifier)
-            .await
-            .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+    let credentials = anthropic::exchange_code(
+        client,
+        &config,
+        user_id,
+        auth_code,
+        effective_state,
+        &code_verifier,
+    )
+    .await
+    .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
 
     Ok(credentials)
 }

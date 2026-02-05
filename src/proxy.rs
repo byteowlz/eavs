@@ -802,14 +802,6 @@ async fn proxy_handler_inner(
         );
     }
 
-    // Add x-stainless-helper-method: stream for OAuth streaming requests
-    if is_anthropic_oauth && request_stream {
-        upstream_headers.insert(
-            http::header::HeaderName::from_static("x-stainless-helper-method"),
-            http::HeaderValue::from_static("stream"),
-        );
-    }
-
     if provider_type == ProviderType::Bedrock {
         let region = provider_config.resolved_aws_region().ok_or_else(|| {
             (
@@ -2094,8 +2086,9 @@ fn inject_claude_code_identity_into_context(context: &mut crate::types::Context)
 }
 
 fn prefix_anthropic_oauth_tools(body: &mut Value) {
-    const TOOL_PREFIX: &str = "oc_";
+    const TOOL_PREFIX: &str = "mcp_";
 
+    // Prefix tool names in tools[] definitions
     if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
         for tool in tools {
             if let Some(name) = tool.get_mut("name").and_then(|v| v.as_str()) {
@@ -2107,8 +2100,30 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
         }
     }
 
-    // Note: tool_choice is removed by apply_anthropic_oauth_body_transforms()
-    // but we still need to prefix tool names in case the removal fails
+    // Prefix tool names in messages[].content[].tool_use blocks
+    if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
+        for message in messages {
+            if let Some(content) = message.get_mut("content").and_then(|v| v.as_array_mut()) {
+                for block in content {
+                    let is_tool_use = block
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "tool_use")
+                        .unwrap_or(false);
+                    if is_tool_use {
+                        if let Some(name) = block.get_mut("name").and_then(|v| v.as_str()) {
+                            if !name.starts_with(TOOL_PREFIX) {
+                                *block.get_mut("name").unwrap() =
+                                    Value::String(format!("{}{}", TOOL_PREFIX, name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Prefix tool names in tool_choice
     if let Some(choice) = body.get_mut("tool_choice") {
         if let Some(obj) = choice.as_object_mut() {
             if let Some(name_value) = obj.get_mut("name") {
@@ -2122,91 +2137,60 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
     }
 }
 
-/// Resolve Claude Code metadata.user_id from ~/.claude.json for OAuth validation.
+/// Apply Anthropic OAuth-specific body transformations.
 ///
-/// Anthropic OAuth tokens now require requests to include metadata.user_id in the format:
-/// `user_{userID}_account_{accountUuid}_session_{lastSessionId}`
-///
-/// This reads from the Claude Code config file which is created when authenticating
-/// with Claude Code CLI.
-fn resolve_claude_metadata_user_id() -> Option<String> {
-    use std::path::PathBuf;
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
-
-    let config_path = std::env::var("EAVS_CLAUDE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(&home).join(".claude.json"));
-
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let data: Value = serde_json::from_str(&content).ok()?;
-
-    let user_id = data.get("userID")?.as_str()?;
-    let account_uuid = data
-        .get("oauthAccount")
-        .and_then(|a| a.get("accountUuid"))
-        .and_then(|v| v.as_str())?;
-
-    // Try to find a session ID from projects
-    let session_id = data
-        .get("projects")
-        .and_then(|p| p.as_object())
-        .and_then(|projects| {
-            // First try current working directory
-            if let Ok(cwd) = std::env::current_dir() {
-                let cwd_str = cwd.to_string_lossy();
-                if let Some(project) = projects.get(cwd_str.as_ref()) {
-                    if let Some(session) = project.get("lastSessionId").and_then(|v| v.as_str()) {
-                        return Some(session.to_string());
+/// Sanitizes system prompt text to replace "OpenCode" with "Claude Code" and
+/// "opencode" (case-insensitive) with "Claude", matching the opencode-anthropic-auth
+/// plugin behavior. The Anthropic server blocks requests containing "OpenCode" in
+/// system prompts when using OAuth tokens.
+fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
+    // Sanitize system prompt - server blocks 'OpenCode' string
+    if let Some(system) = body.get_mut("system") {
+        if let Some(arr) = system.as_array_mut() {
+            for item in arr {
+                if item
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "text")
+                    .unwrap_or(false)
+                {
+                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                        let sanitized = sanitize_system_prompt(text);
+                        if sanitized != text {
+                            *item.get_mut("text").unwrap() = Value::String(sanitized);
+                        }
                     }
                 }
             }
-            // Fall back to any project with a session ID
-            projects
-                .values()
-                .filter_map(|v| v.get("lastSessionId").and_then(|s| s.as_str()))
-                .next()
-                .map(String::from)
-        })?;
-
-    Some(format!(
-        "user_{}_account_{}_session_{}",
-        user_id, account_uuid, session_id
-    ))
+        } else if let Some(text) = system.as_str() {
+            let sanitized = sanitize_system_prompt(text);
+            if sanitized != text {
+                *system = Value::String(sanitized);
+            }
+        }
+    }
 }
 
-/// Apply Anthropic OAuth-specific body transformations.
-///
-/// This includes:
-/// - Injecting metadata.user_id from ~/.claude.json
-/// - Removing tool_choice (not supported with OAuth tokens)
-fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
-    // Inject metadata.user_id if we can resolve it
-    if let Some(metadata_user_id) = resolve_claude_metadata_user_id() {
-        let metadata = body.as_object_mut().and_then(|obj| {
-            if !obj.contains_key("metadata") {
-                obj.insert("metadata".to_string(), json!({}));
-            }
-            obj.get_mut("metadata").and_then(|m| m.as_object_mut())
-        });
-
-        if let Some(metadata) = metadata {
-            // Only set if not already present
-            if !metadata.contains_key("user_id") {
-                metadata.insert("user_id".to_string(), Value::String(metadata_user_id));
-            }
+/// Sanitize system prompt for Anthropic OAuth: replace "OpenCode" -> "Claude Code"
+/// and "opencode" (case-insensitive) -> "Claude".
+fn sanitize_system_prompt(text: &str) -> String {
+    // First replace case-sensitive "OpenCode" with "Claude Code"
+    let result = text.replace("OpenCode", "Claude Code");
+    // Then replace remaining case-insensitive "opencode" with "Claude"
+    // Use a simple approach: find and replace case-insensitively
+    let mut output = String::with_capacity(result.len());
+    let lower = result.to_lowercase();
+    let mut i = 0;
+    while i < result.len() {
+        if i + 8 <= lower.len() && &lower[i..i + 8] == "opencode" {
+            output.push_str("Claude");
+            i += 8;
+        } else {
+            output.push(result.as_bytes()[i] as char);
+            i += 1;
         }
     }
-
-    // Remove tool_choice - not supported with OAuth tokens
-    if let Some(obj) = body.as_object_mut() {
-        if obj.contains_key("tool_choice") {
-            tracing::debug!("Removing tool_choice from Anthropic OAuth request (not supported)");
-            obj.remove("tool_choice");
-        }
-    }
+    output
 }
 
 /// Apply authentication headers to any header container.
@@ -2216,71 +2200,21 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         return;
     }
 
-    // Special handling for Anthropic OAuth tokens - they use Bearer auth + special headers
-    // Anthropic now validates Claude Code-specific request shape for OAuth tokens.
-    // This includes headers, betas, metadata, and SDK fingerprints.
+    // Special handling for Anthropic OAuth tokens - they use Bearer auth + specific headers.
+    // Matches the opencode-anthropic-auth plugin: only Authorization, anthropic-beta, and
+    // user-agent are set. The underlying Anthropic SDK (not us) handles x-stainless-* headers.
     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(api_key) {
         if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
             headers.insert_header(http::header::AUTHORIZATION, value);
         }
-        // Add required OAuth beta header
+        // Required OAuth beta headers
         headers.insert_header(
             http::header::HeaderName::from_static("anthropic-beta"),
             http::HeaderValue::from_static("oauth-2025-04-20, interleaved-thinking-2025-05-14"),
         );
         headers.insert_header(
-            http::header::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
-            http::HeaderValue::from_static("true"),
-        );
-        headers.insert_header(
             http::header::HeaderName::from_static("user-agent"),
             http::HeaderValue::from_static("claude-cli/2.1.2 (external, cli)"),
-        );
-        // Claude Code SDK fingerprint headers (x-stainless-*)
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-app"),
-            http::HeaderValue::from_static("cli"),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-arch"),
-            http::HeaderValue::from_static(std::env::consts::ARCH),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-lang"),
-            http::HeaderValue::from_static("rust"),
-        );
-        // Determine OS name in Claude Code format
-        let os_name = match std::env::consts::OS {
-            "macos" => "Darwin",
-            "windows" => "Windows",
-            "linux" => "Linux",
-            other => other,
-        };
-        if let Ok(value) = http::HeaderValue::from_str(os_name) {
-            headers.insert_header(
-                http::header::HeaderName::from_static("x-stainless-os"),
-                value,
-            );
-        }
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-package-version"),
-            http::HeaderValue::from_static("0.70.0"),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-runtime"),
-            http::HeaderValue::from_static("native"),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-runtime-version"),
-            http::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-retry-count"),
-            http::HeaderValue::from_static("0"),
-        );
-        headers.insert_header(
-            http::header::HeaderName::from_static("x-stainless-timeout"),
-            http::HeaderValue::from_static("600"),
         );
         return;
     }
