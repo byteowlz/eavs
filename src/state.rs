@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, StateConfig};
 use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
-use crate::oauth::{OAuthPendingAuth, OAuthStore};
+use crate::oauth::{OAuthBackend, OAuthPendingAuth, OAuthStore};
 use crate::upstream::{ReqwestUpstream, Upstream};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -471,9 +471,15 @@ impl AppState {
         }
 
         let db_path = self.config.keys.resolved_database_path();
-        tracing::info!("Initializing OAuth store at {:?}", db_path);
+        let backend = OAuthBackend::from_str(&self.config.keys.oauth_backend)
+            .unwrap_or(OAuthBackend::Keychain);
+        tracing::info!(
+            "Initializing OAuth store at {:?} (backend: {})",
+            db_path,
+            backend.as_str()
+        );
 
-        let store = OAuthStore::new(&db_path)
+        let store = OAuthStore::new(&db_path, backend)
             .await
             .map_err(|e| format!("Failed to initialize OAuth store: {}", e))?;
 

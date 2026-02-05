@@ -1889,9 +1889,10 @@ pub async fn run_test_oauth(
     };
 
     let db_path = config.keys.resolved_database_path();
+    let backend = resolve_oauth_backend(&config);
 
     // Check OAuth store for authenticated providers
-    let oauth_store = OAuthStore::new(&db_path)
+    let oauth_store = OAuthStore::new(&db_path, backend)
         .await
         .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
 
@@ -3255,9 +3256,14 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
 // =============================================================================
 
 use crate::oauth::{
-    anthropic, github_copilot, google, openai_codex, pkce, OAuthCredentials, OAuthProvider,
-    OAuthStore,
+    anthropic, github_copilot, google, openai_codex, pkce, OAuthBackend, OAuthCredentials,
+    OAuthProvider, OAuthStore,
 };
+
+/// Resolve the OAuth backend from config.
+fn resolve_oauth_backend(config: &crate::config::AppConfig) -> OAuthBackend {
+    OAuthBackend::from_str(&config.keys.oauth_backend).unwrap_or(OAuthBackend::Keychain)
+}
 
 /// Available OAuth providers for interactive selection
 const OAUTH_PROVIDERS: &[(&str, &str)] = &[
@@ -3278,12 +3284,10 @@ fn select_provider_interactive() -> Result<OAuthProvider, CliError> {
     }
     println!();
     print!("Enter selection (1-{}): ", OAUTH_PROVIDERS.len());
-    io::stdout().flush().map_err(|e| CliError::Io(e))?;
+    io::stdout().flush().map_err(CliError::Io)?;
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| CliError::Io(e))?;
+    io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
     let selection: usize = input
         .trim()
@@ -3356,7 +3360,8 @@ pub async fn run_login(
     };
 
     let db_path = config.keys.resolved_database_path();
-    let store = OAuthStore::new(&db_path)
+    let backend = resolve_oauth_backend(&config);
+    let store = OAuthStore::new(&db_path, backend)
         .await
         .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
 
@@ -3384,7 +3389,11 @@ pub async fn run_login(
 
     println!();
     println!("Successfully authenticated with {}!", provider.as_str());
-    println!("Credentials stored for user: {}", user_id);
+    println!(
+        "Credentials stored for user: {} (backend: {})",
+        user_id,
+        store.backend_name()
+    );
 
     Ok(())
 }
@@ -3672,7 +3681,8 @@ pub async fn run_auth_status(user_id: &str, config_path: Option<&str>) -> Result
     };
 
     let db_path = config.keys.resolved_database_path();
-    let store = OAuthStore::new(&db_path)
+    let backend = resolve_oauth_backend(&config);
+    let store = OAuthStore::new(&db_path, backend)
         .await
         .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
 
@@ -3680,6 +3690,9 @@ pub async fn run_auth_status(user_id: &str, config_path: Option<&str>) -> Result
         .list_providers(user_id)
         .await
         .map_err(|e| CliError::Other(format!("Failed to list providers: {}", e)))?;
+
+    println!("Storage backend: {}", store.backend_name());
+    println!();
 
     if providers.is_empty() {
         println!("No OAuth providers authenticated for user '{}'.", user_id);
@@ -3711,12 +3724,10 @@ pub async fn run_auth_logout(
             "Are you sure you want to logout from {} for user '{}'? [y/N] ",
             provider, user_id
         );
-        io::stdout().flush().map_err(|e| CliError::Io(e))?;
+        io::stdout().flush().map_err(CliError::Io)?;
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| CliError::Io(e))?;
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Cancelled.");
             return Ok(());
@@ -3732,7 +3743,8 @@ pub async fn run_auth_logout(
     };
 
     let db_path = config.keys.resolved_database_path();
-    let store = OAuthStore::new(&db_path)
+    let backend = resolve_oauth_backend(&config);
+    let store = OAuthStore::new(&db_path, backend)
         .await
         .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
 

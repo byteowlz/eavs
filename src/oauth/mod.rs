@@ -6,5 +6,5 @@ pub mod pkce;
 pub mod storage;
 pub mod types;
 
-pub use storage::OAuthStore;
+pub use storage::{OAuthBackend, OAuthStore};
 pub use types::{OAuthCredentials, OAuthLoginResponse, OAuthPendingAuth, OAuthProvider};

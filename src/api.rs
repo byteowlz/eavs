@@ -719,7 +719,7 @@ fn resolve_anthropic_redirect_uri(request_uri: Option<String>) -> String {
     std::env::var("EAVS_OAUTH_REDIRECT_URI")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| anthropic::default_redirect_uri())
+        .unwrap_or_else(anthropic::default_redirect_uri)
 }
 
 fn split_oauth_code(code: &str) -> (String, Option<String>) {

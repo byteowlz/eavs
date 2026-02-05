@@ -673,6 +673,16 @@ pub struct KeysConfig {
     /// Path to word lists TOML file for human-readable key IDs.
     /// If not specified, downloads from eavs GitHub repo to XDG data directory.
     pub word_lists_path: Option<String>,
+    /// OAuth credential storage backend: "keychain" (default) or "sqlite".
+    /// "keychain" uses the system keychain (macOS Keychain, libsecret, Windows
+    /// Credential Manager) and falls back to "sqlite" if unavailable.
+    /// "sqlite" stores tokens in the same database as virtual API keys.
+    #[serde(default = "default_oauth_backend")]
+    pub oauth_backend: String,
+}
+
+fn default_oauth_backend() -> String {
+    "keychain".to_string()
 }
 
 impl Default for KeysConfig {
@@ -686,7 +696,8 @@ impl Default for KeysConfig {
             default_rpm_limit: None,
             default_budget_usd: None,
             update_pricing_on_startup: false,
-            word_lists_path: None, // Uses XDG data directory by default
+            word_lists_path: None,
+            oauth_backend: default_oauth_backend(),
         }
     }
 }
