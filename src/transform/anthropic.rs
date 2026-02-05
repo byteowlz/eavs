@@ -658,7 +658,7 @@ fn parse_anthropic_tool(tool: &Value) -> Result<Tool, TransformError> {
 }
 
 fn strip_oauth_tool_prefix(name: &str) -> String {
-    name.strip_prefix("oc_").unwrap_or(name).to_string()
+    name.strip_prefix("mcp_").unwrap_or(name).to_string()
 }
 
 fn tool_to_anthropic(tool: &Tool) -> Value {

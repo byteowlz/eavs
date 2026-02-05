@@ -113,34 +113,38 @@ pub async fn refresh_token(
     user_id: &str,
     refresh_token: &str,
 ) -> Result<OAuthCredentials, String> {
-    let mut params = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.to_string()),
-        ("client_id", config.client_id.clone()),
-    ];
+    let mut body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": config.client_id,
+    });
 
     if let Some(secret) = &config.client_secret {
-        params.push(("client_secret", secret.clone()));
+        body["client_secret"] = serde_json::Value::String(secret.clone());
     }
 
     let resp = client
         .post(TOKEN_URL)
-        .form(&params)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("Refresh request failed: {}", e))?;
 
     let status = resp.status();
-    let body = resp
-        .json::<TokenResponse>()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("Refresh parse failed: {}", e))?;
+        .map_err(|e| format!("Failed to read refresh response: {}", e))?;
 
     if !status.is_success() {
-        return Err(format!("Token refresh failed with status {}", status));
+        return Err(format!("Token refresh failed ({}): {}", status, text));
     }
 
-    Ok(token_to_credentials(user_id, body))
+    let token: TokenResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("Refresh parse failed: {} - body: {}", e, text))?;
+
+    Ok(token_to_credentials(user_id, token))
 }
 
 #[derive(Deserialize)]
