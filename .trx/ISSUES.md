@@ -2,15 +2,6 @@
 
 ## Open
 
-### [eavs-86bw] Add secure credential storage using system keychain (macOS Keychain, libsecret, Windows Credential Manager) (P1, feature)
-Currently EAVS stores API keys in:
-- config.toml (plaintext, supports env: prefix)
-- SQLite database for OAuth tokens (plaintext)
-
-**Problem:** In sandboxed agent environments, we want EAVS to have access to credentials but NOT the agent. If credentials are in plaintext files, a sandboxed agent could potentially read them.
-...
-
-
 ### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
 Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
 
@@ -40,4 +31,5 @@ Extend EAVS config and proxy to support domain allowlist/denylist for network pr
 
 ## Closed
 
+- [eavs-86bw] Add secure credential storage using system keychain (macOS Keychain, libsecret, Windows Credential Manager) (closed 2026-02-10)
 - [eavs-pyz3] Remove foundry provider type - Azure AI Foundry is a hosting platform, not a distinct API (closed 2026-02-04)

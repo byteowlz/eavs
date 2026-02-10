@@ -115,6 +115,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: AuthCommands,
     },
+
+    /// Manage secrets in the system keychain
+    Secret {
+        #[command(subcommand)]
+        action: SecretCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +152,50 @@ pub enum AuthCommands {
         /// Path to config file
         #[arg(short, long, env = "EAVS_CONFIG")]
         config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecretCommands {
+    /// Store a secret in the system keychain
+    Set {
+        /// Account name (used as keychain account, referenced in config as "keychain:<account>")
+        account: String,
+
+        /// Secret value (if omitted, reads interactively from terminal)
+        #[arg(short, long)]
+        value: Option<String>,
+    },
+
+    /// Read a secret from the system keychain
+    Get {
+        /// Account name
+        account: String,
+
+        /// Show the secret value (default: masked)
+        #[arg(long)]
+        reveal: bool,
+    },
+
+    /// Delete a secret from the system keychain
+    Delete {
+        /// Account name
+        account: String,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// List known keychain references from the current config
+    List {
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+
+        /// Check whether each entry actually exists in the keychain
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -3766,6 +3816,169 @@ pub async fn run_auth_logout(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Secret (Keychain) Commands
+// =============================================================================
+
+/// Store a secret in the system keychain.
+pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError> {
+    let secret = if let Some(v) = value {
+        v.to_string()
+    } else {
+        // Read interactively
+        eprint!("Enter secret for '{}': ", account);
+        let secret = rpassword::read_password().map_err(|e| {
+            CliError::Other(format!(
+                "Failed to read secret from terminal: {}. Use --value instead.",
+                e
+            ))
+        })?;
+        if secret.is_empty() {
+            return Err(CliError::Other("Secret cannot be empty.".to_string()));
+        }
+        secret
+    };
+
+    crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
+    println!("Stored secret for account '{}' in system keychain.", account);
+    println!(
+        "Reference it in config.toml as: api_key = \"keychain:{}\"",
+        account
+    );
+    Ok(())
+}
+
+/// Read a secret from the system keychain.
+pub fn run_secret_get(account: &str, reveal: bool) -> Result<(), CliError> {
+    let secret = crate::config::get_keychain_secret(account).ok_or_else(|| {
+        CliError::Other(format!(
+            "No keychain entry found for account '{}' (service: '{}').",
+            account,
+            crate::config::KEYCHAIN_SERVICE,
+        ))
+    })?;
+
+    if reveal {
+        println!("{}", secret);
+    } else {
+        // Show masked version: first 4 chars + asterisks
+        let masked = if secret.len() > 4 {
+            format!("{}****", &secret[..4])
+        } else {
+            "****".to_string()
+        };
+        println!("{} (use --reveal to show full value)", masked);
+    }
+    Ok(())
+}
+
+/// Delete a secret from the system keychain.
+pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
+    if !yes {
+        use std::io::{self, Write};
+        eprint!(
+            "Delete keychain entry for account '{}'? [y/N] ",
+            account
+        );
+        io::stdout().flush().map_err(CliError::Io)?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    match crate::config::delete_keychain_secret(account) {
+        Ok(true) => println!("Deleted keychain entry for account '{}'.", account),
+        Ok(false) => println!("No keychain entry found for account '{}'.", account),
+        Err(e) => return Err(CliError::Other(e)),
+    }
+    Ok(())
+}
+
+/// List keychain references found in config.
+pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), CliError> {
+    let config = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+    } else {
+        crate::config::AppConfig::load()
+            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+    };
+
+    // Collect all fields that could use keychain: prefix
+    let mut entries: Vec<(String, String, String)> = Vec::new(); // (provider, field, account)
+
+    for (name, prov) in &config.providers {
+        collect_keychain_ref(&mut entries, name, "api_key", &prov.api_key);
+        collect_keychain_ref(&mut entries, name, "base_url", &prov.base_url);
+        collect_keychain_ref(&mut entries, name, "aws_access_key_id", &prov.aws_access_key_id);
+        collect_keychain_ref(
+            &mut entries,
+            name,
+            "aws_secret_access_key",
+            &prov.aws_secret_access_key,
+        );
+        collect_keychain_ref(&mut entries, name, "aws_session_token", &prov.aws_session_token);
+        if let Some(ref v) = prov.api_version {
+            collect_keychain_ref(&mut entries, name, "api_version", v);
+        }
+        collect_keychain_ref(&mut entries, name, "deployment", &prov.deployment);
+    }
+
+    if let Some(ref mk) = config.keys.master_key {
+        collect_keychain_ref(&mut entries, "keys", "master_key", mk);
+    }
+
+    if entries.is_empty() {
+        println!("No keychain: references found in config.");
+        println!();
+        println!("To use keychain storage, set a provider API key like:");
+        println!("  [providers.openai]");
+        println!("  api_key = \"keychain:openai\"");
+        println!();
+        println!("Then store the secret:");
+        println!("  eavs secret set openai");
+        return Ok(());
+    }
+
+    println!(
+        "{:<20} {:<25} {:<25} {}",
+        "SECTION", "FIELD", "ACCOUNT", if check { "STATUS" } else { "" }
+    );
+    println!("{}", "-".repeat(if check { 80 } else { 70 }));
+
+    for (section, field, account) in &entries {
+        let status = if check {
+            match crate::config::get_keychain_secret(account) {
+                Some(_) => "ok",
+                None => "MISSING",
+            }
+        } else {
+            ""
+        };
+        println!("{:<20} {:<25} {:<25} {}", section, field, account, status);
+    }
+
+    Ok(())
+}
+
+/// Helper: if a value starts with `keychain:`, add it to the list.
+fn collect_keychain_ref(
+    entries: &mut Vec<(String, String, String)>,
+    section: &str,
+    field: &str,
+    value: &str,
+) {
+    if let Some(account) = value.strip_prefix("keychain:") {
+        if !account.is_empty() {
+            entries.push((section.to_string(), field.to_string(), account.to_string()));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -62,6 +62,16 @@ type = "ollama"
 base_url = "http://localhost:11434/v1"
 ```
 
+API key values support three resolution methods:
+
+| Syntax | Source | Example |
+|--------|--------|---------|
+| `env:VAR_NAME` | Environment variable | `api_key = "env:OPENAI_API_KEY"` |
+| `keychain:account` | System keychain | `api_key = "keychain:openai"` |
+| literal value | Config file (plaintext) | `api_key = "sk-..."` |
+
+The `keychain:` prefix reads from the OS-native credential store (macOS Keychain, libsecret on Linux, Windows Credential Manager). Store secrets with `eavs secret set <account>` and reference them in config. This keeps credentials out of plaintext files -- useful for sandboxed environments where agents should not have direct access to secrets.
+
 Supported providers:
 
 - `openai` - OpenAI API
@@ -232,6 +242,14 @@ eavs service stop
 eavs service restart
 eavs service status
 eavs service logs
+
+# Manage secrets in the system keychain
+eavs secret set openai                # Store interactively (hidden input)
+eavs secret set anthropic --value sk-ant-...
+eavs secret get openai                # Show masked value
+eavs secret get openai --reveal       # Show full value
+eavs secret delete openai             # Remove from keychain
+eavs secret list --check              # List keychain refs from config + check availability
 ```
 
 ## API Reference

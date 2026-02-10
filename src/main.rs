@@ -22,11 +22,12 @@ mod upstream;
 mod integration_tests;
 
 use crate::cli::{
-    ensure_server_running, run_auth_logout, run_auth_status, run_login, run_service_logs,
-    run_service_restart, run_service_start, run_service_status, run_service_stop, run_test_bench,
-    run_test_chat, run_test_health, run_test_image, run_test_oauth, run_test_rate_limit,
-    run_test_routing, run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands,
-    ProviderCommands, ServiceCommands, TestCommands,
+    ensure_server_running, run_auth_logout, run_auth_status, run_login, run_secret_delete,
+    run_secret_get, run_secret_list, run_secret_set, run_service_logs, run_service_restart,
+    run_service_start, run_service_status, run_service_stop, run_test_bench, run_test_chat,
+    run_test_health, run_test_image, run_test_oauth, run_test_rate_limit, run_test_routing,
+    run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ProviderCommands,
+    SecretCommands, ServiceCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -90,6 +91,23 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Secret { action } => {
+            if let Err(e) = run_secret_command(action) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
+    match action {
+        SecretCommands::Set { account, value } => {
+            run_secret_set(&account, value.as_deref())
+        }
+        SecretCommands::Get { account, reveal } => run_secret_get(&account, reveal),
+        SecretCommands::Delete { account, yes } => run_secret_delete(&account, yes),
+        SecretCommands::List { config, check } => run_secret_list(config.as_deref(), check),
     }
 }
 

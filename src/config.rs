@@ -831,13 +831,7 @@ impl KeysConfig {
 
     /// Get the master key (from env if specified).
     pub fn resolved_master_key(&self) -> Option<String> {
-        self.master_key.as_ref().and_then(|k| {
-            if let Some(var_name) = k.strip_prefix("env:") {
-                std::env::var(var_name).ok()
-            } else {
-                Some(k.clone())
-            }
-        })
+        self.master_key.as_ref().and_then(|k| get_api_key(k))
     }
 
     /// Get the resolved word lists path.
@@ -1068,8 +1062,20 @@ pub struct ProviderLookupResult<'a> {
     pub was_fallback: bool,
 }
 
+/// Keychain service name used for provider API keys stored via `keychain:` syntax.
+pub const KEYCHAIN_SERVICE: &str = "eavs";
+
 /// Resolve API key from config value.
-/// Supports "env:VAR_NAME" syntax to read from environment variables.
+///
+/// Supports three syntaxes:
+/// - `"env:VAR_NAME"` -- read from environment variable
+/// - `"keychain:account"` -- read from system keychain (service: "eavs", account: the value after the prefix)
+/// - anything else -- used as a literal value
+///
+/// Keychain uses the OS-native credential store:
+/// - macOS: Keychain
+/// - Linux: libsecret / kernel keyutils
+/// - Windows: Credential Manager
 pub fn get_api_key(config_key: &str) -> Option<String> {
     if config_key.is_empty() {
         return None;
@@ -1077,8 +1083,68 @@ pub fn get_api_key(config_key: &str) -> Option<String> {
 
     if let Some(var_name) = config_key.strip_prefix("env:") {
         std::env::var(var_name).ok()
+    } else if let Some(account) = config_key.strip_prefix("keychain:") {
+        get_keychain_secret(account)
     } else {
         Some(config_key.to_string())
+    }
+}
+
+/// Read a secret from the system keychain.
+///
+/// Returns `None` if the entry doesn't exist or the keychain is inaccessible,
+/// logging a warning on errors other than "not found".
+pub fn get_keychain_secret(account: &str) -> Option<String> {
+    match keyring::Entry::new(KEYCHAIN_SERVICE, account) {
+        Ok(entry) => match entry.get_password() {
+            Ok(secret) => Some(secret),
+            Err(keyring::Error::NoEntry) => {
+                tracing::warn!(
+                    "Keychain entry not found: service={}, account={}. Use 'eavs secret set {}' to store it.",
+                    KEYCHAIN_SERVICE,
+                    account,
+                    account,
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read keychain entry (service={}, account={}): {}",
+                    KEYCHAIN_SERVICE,
+                    account,
+                    e,
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to access keychain: {}", e);
+            None
+        }
+    }
+}
+
+/// Store a secret in the system keychain.
+///
+/// Creates or updates the entry under service "eavs" with the given account name.
+pub fn set_keychain_secret(account: &str, secret: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
+        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+    entry
+        .set_password(secret)
+        .map_err(|e| format!("Failed to store keychain entry: {}", e))
+}
+
+/// Delete a secret from the system keychain.
+///
+/// Returns `true` if the entry was deleted, `false` if it didn't exist.
+pub fn delete_keychain_secret(account: &str) -> Result<bool, String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
+        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(format!("Failed to delete keychain entry: {}", e)),
     }
 }
 
@@ -1111,6 +1177,27 @@ mod tests {
     #[test]
     fn test_get_api_key_empty_string() {
         assert_eq!(get_api_key(""), None);
+    }
+
+    #[test]
+    fn test_get_api_key_keychain_prefix_parsed() {
+        // We can't reliably test actual keychain access in CI, but we can
+        // verify the prefix is recognised and doesn't fall through to literal.
+        let result = get_api_key("keychain:test-account");
+        // On systems without a keychain or where the entry doesn't exist,
+        // this returns None (not the literal string "keychain:test-account").
+        assert_ne!(
+            result,
+            Some("keychain:test-account".to_string()),
+            "keychain: prefix should be parsed, not returned as literal"
+        );
+    }
+
+    #[test]
+    fn test_get_api_key_keychain_empty_account() {
+        // "keychain:" with empty account should still trigger keychain path
+        let result = get_api_key("keychain:");
+        assert_ne!(result, Some("keychain:".to_string()));
     }
 
     #[test]
