@@ -79,12 +79,14 @@ Supported providers:
 - `openai-codex` - OpenAI Codex/ChatGPT backend via OAuth
 - `anthropic` - Anthropic Claude
 - `google` - Google Gemini
+- `google-vertex` - Google Vertex AI (ADC or API key, requires `gcp_project` + `gcp_location`)
+- `google-gemini-cli` - Google Cloud Code Assist / Gemini CLI (OAuth, free tier)
+- `github-copilot` - GitHub Copilot (device code OAuth, auto token exchange + dynamic base URL)
 - `mistral` - Mistral AI
 - `groq` - Groq (fast inference)
 - `cerebras` - Cerebras
 - `xai` - xAI (Grok)
 - `openrouter` - OpenRouter
-- `foundry` - Microsoft Foundry / Azure AI Foundry
 - `azure` - Azure OpenAI
 - `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs

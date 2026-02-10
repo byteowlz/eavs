@@ -318,6 +318,12 @@ pub struct ProviderConfig {
     /// Supports `env:VAR_NAME` syntax.
     #[serde(default)]
     pub deployment: String,
+    /// Google Cloud project ID (Vertex AI only). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub gcp_project: String,
+    /// Google Cloud location/region (Vertex AI only). Supports `env:VAR_NAME` syntax.
+    #[serde(default)]
+    pub gcp_location: String,
 }
 
 impl Default for ProviderConfig {
@@ -335,6 +341,8 @@ impl Default for ProviderConfig {
             aws_session_token: String::new(),
             aws_service: String::new(),
             deployment: String::new(),
+            gcp_project: String::new(),
+            gcp_location: String::new(),
         }
     }
 }
@@ -353,6 +361,11 @@ impl ProviderConfig {
             if provider == ProviderType::Bedrock {
                 if let Some(region) = self.resolved_aws_region() {
                     return format!("https://bedrock-runtime.{}.amazonaws.com", region);
+                }
+            }
+            if provider == ProviderType::GoogleVertex {
+                if let Some(location) = self.resolved_gcp_location() {
+                    return format!("https://{}-aiplatform.googleapis.com", location);
                 }
             }
             provider
@@ -417,6 +430,19 @@ impl ProviderConfig {
             }
         }
         "bedrock".to_string()
+    }
+
+    /// Get the resolved GCP project (Vertex AI).
+    pub fn resolved_gcp_project(&self) -> Option<String> {
+        get_api_key(&self.gcp_project)
+            .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+            .or_else(|| std::env::var("GCLOUD_PROJECT").ok())
+    }
+
+    /// Get the resolved GCP location (Vertex AI).
+    pub fn resolved_gcp_location(&self) -> Option<String> {
+        get_api_key(&self.gcp_location)
+            .or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok())
     }
 
     /// Get the provider type enum.
