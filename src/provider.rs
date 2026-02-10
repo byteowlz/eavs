@@ -21,6 +21,12 @@ pub enum ProviderType {
     OpenAICodex,
     /// OpenAI Responses API (api.openai.com/v1/responses)
     OpenAIResponses,
+    /// GitHub Copilot - OpenAI completions API with Copilot token exchange and headers
+    GithubCopilot,
+    /// Google Vertex AI - Google Generative AI via Vertex AI platform (ADC auth)
+    GoogleVertex,
+    /// Google Gemini CLI / Cloud Code Assist (OAuth-based, free tier)
+    GoogleGeminiCli,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -57,7 +63,7 @@ impl ProviderType {
         match s.to_lowercase().as_str() {
             "openai" => Self::OpenAI,
             "anthropic" | "claude" => Self::Anthropic,
-            "google" | "gemini" | "vertex" => Self::Google,
+            "google" | "gemini" => Self::Google,
             "azure" | "azure-openai" => Self::Azure,
             "mistral" => Self::Mistral,
             "groq" => Self::Groq,
@@ -70,6 +76,10 @@ impl ProviderType {
             }
             "openai-codex" | "codex" | "chatgpt" => Self::OpenAICodex,
             "openai-responses" | "responses" => Self::OpenAIResponses,
+            "github-copilot" | "copilot" => Self::GithubCopilot,
+            "google-vertex" | "vertex" => Self::GoogleVertex,
+            "google-gemini-cli" | "gemini-cli" | "google-antigravity" | "antigravity"
+            | "cloudcode" => Self::GoogleGeminiCli,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => Self::OpenAI, // Default fallback
         }
@@ -156,6 +166,24 @@ impl ProviderType {
                 env_key_name: Some("OPENAI_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::GithubCopilot => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.individual.githubcopilot.com"),
+                env_key_name: None, // Uses OAuth (device code flow)
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::GoogleVertex => ProviderInfo {
+                provider_type: *self,
+                default_base_url: None, // Region-specific: https://{location}-aiplatform.googleapis.com
+                env_key_name: Some("GEMINI_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::GoogleGeminiCli => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://cloudcode-pa.googleapis.com"),
+                env_key_name: None, // Uses OAuth
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -183,6 +211,7 @@ impl ProviderType {
                 | Self::XAI
                 | Self::OpenRouter
                 | Self::OpenAICompatible
+                | Self::GithubCopilot
         )
     }
 
@@ -193,6 +222,8 @@ impl ProviderType {
             self,
             Self::Anthropic
                 | Self::Google
+                | Self::GoogleVertex
+                | Self::GoogleGeminiCli
                 | Self::Bedrock
                 | Self::OpenAICodex
                 | Self::OpenAIResponses
@@ -258,6 +289,25 @@ impl ProviderType {
                 "meta.llama3-70b-instruct-v1:0",
             ],
             Self::Cerebras => vec!["llama3.1-8b", "llama3.1-70b"],
+            Self::GithubCopilot => vec![
+                "claude-sonnet-4-20250514",
+                "claude-haiku-4.5",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "o4-mini",
+                "o3",
+                "gemini-2.5-pro",
+            ],
+            Self::GoogleVertex => vec![
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-exp",
+            ],
+            Self::GoogleGeminiCli => vec![
+                "gemini-2.0-flash",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+            ],
             Self::Mock => vec!["mock-model"],
             // OpenAI-compatible providers should fetch from upstream
             _ => vec![],
@@ -285,13 +335,27 @@ pub fn detect_provider_from_host(host: &str) -> Option<&'static str> {
         return Some("anthropic");
     }
 
-    // Google AI / Vertex AI / Gemini
-    if host_lower.contains("googleapis.com")
-        || host_lower.contains("aiplatform.googleapis.com")
+    // Google Cloud Code Assist / Gemini CLI
+    if host_lower.contains("cloudcode-pa.googleapis.com") {
+        return Some("google-gemini-cli");
+    }
+
+    // Google Vertex AI
+    if host_lower.contains("aiplatform.googleapis.com") {
+        return Some("google-vertex");
+    }
+
+    // Google AI / Gemini
+    if host_lower.contains("generativelanguage.googleapis.com")
         || host_lower.contains("gemini.google.com")
         || host_lower.contains("aistudio.google.com")
     {
         return Some("google");
+    }
+
+    // GitHub Copilot
+    if host_lower.contains("githubcopilot.com") || host_lower.contains("copilot-api.") {
+        return Some("github-copilot");
     }
 
     // Mistral
@@ -597,6 +661,35 @@ mod tests {
         assert_eq!(
             ProviderType::from_str("vllm"),
             ProviderType::OpenAICompatible
+        );
+        assert_eq!(
+            ProviderType::from_str("github-copilot"),
+            ProviderType::GithubCopilot
+        );
+        assert_eq!(
+            ProviderType::from_str("copilot"),
+            ProviderType::GithubCopilot
+        );
+        assert_eq!(
+            ProviderType::from_str("google-vertex"),
+            ProviderType::GoogleVertex
+        );
+        assert_eq!(ProviderType::from_str("vertex"), ProviderType::GoogleVertex);
+        assert_eq!(
+            ProviderType::from_str("google-gemini-cli"),
+            ProviderType::GoogleGeminiCli
+        );
+        assert_eq!(
+            ProviderType::from_str("gemini-cli"),
+            ProviderType::GoogleGeminiCli
+        );
+        assert_eq!(
+            ProviderType::from_str("google-antigravity"),
+            ProviderType::GoogleGeminiCli
+        );
+        assert_eq!(
+            ProviderType::from_str("cloudcode"),
+            ProviderType::GoogleGeminiCli
         );
         assert_eq!(ProviderType::from_str("unknown"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_str("mock"), ProviderType::Mock);

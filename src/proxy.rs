@@ -2,7 +2,7 @@ use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::oauth::{
     anthropic as oauth_anthropic, google as oauth_google, openai_codex as oauth_openai,
-    OAuthProvider as OAuthProviderKind,
+    OAuthCredentials, OAuthProvider as OAuthProviderKind,
 };
 use crate::provider::{
     detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType,
@@ -575,7 +575,11 @@ async fn proxy_handler_inner(
         // Resolve URL images for providers that require inline/base64 image data.
         if matches!(
             provider_type,
-            ProviderType::Anthropic | ProviderType::Google | ProviderType::Bedrock
+            ProviderType::Anthropic
+                | ProviderType::Google
+                | ProviderType::GoogleVertex
+                | ProviderType::GoogleGeminiCli
+                | ProviderType::Bedrock
         ) {
             resolve_image_urls_in_context(state.upstream.as_ref(), &mut context)
                 .await
@@ -661,11 +665,64 @@ async fn proxy_handler_inner(
     };
 
     // Construct URL with transformer's endpoint path if transforming
-    // Override base URL for OpenAI Codex OAuth (uses ChatGPT backend)
+    // Override base URL for providers that use dynamic OAuth-derived URLs
     let base = if is_openai_codex_oauth {
         "https://chatgpt.com/backend-api".to_string()
+    } else if provider_type == ProviderType::GithubCopilot {
+        // GitHub Copilot: use dynamic base URL from token if available
+        if let Some(ref validated) = validated_key {
+            if let Some(oauth_user) = validated.oauth_user.as_deref() {
+                if let Some(store) = state.get_oauth_store() {
+                    if let Ok(Some(creds)) = store
+                        .get_credentials(oauth_user, crate::oauth::OAuthProvider::GithubCopilot)
+                        .await
+                    {
+                        if let Some(extra) = &creds.extra_data {
+                            if let Some(url) = extra.get("base_url").and_then(|v| v.as_str()) {
+                                url.to_string()
+                            } else {
+                                provider_config.resolved_base_url()
+                            }
+                        } else {
+                            provider_config.resolved_base_url()
+                        }
+                    } else {
+                        provider_config.resolved_base_url()
+                    }
+                } else {
+                    provider_config.resolved_base_url()
+                }
+            } else {
+                provider_config.resolved_base_url()
+            }
+        } else {
+            provider_config.resolved_base_url()
+        }
     } else {
         provider_config.resolved_base_url()
+    };
+    // Vertex AI: append project/location path prefix to base URL so the
+    // Google transformer's `/models/{model}:{action}` path resolves correctly.
+    let base = if provider_type == ProviderType::GoogleVertex {
+        let project = provider_config.resolved_gcp_project().unwrap_or_default();
+        let location = provider_config.resolved_gcp_location().unwrap_or_default();
+        if !project.is_empty() && !location.is_empty() {
+            format!(
+                "{}/v1beta/projects/{}/locations/{}/publishers/google",
+                base.trim_end_matches('/'),
+                project,
+                location,
+            )
+        } else {
+            tracing::warn!(
+                "Vertex AI requires gcp_project and gcp_location config; got project={:?}, location={:?}",
+                provider_config.resolved_gcp_project(),
+                provider_config.resolved_gcp_location(),
+            );
+            base
+        }
+    } else {
+        base
     };
     let base = base.trim_end_matches('/');
 
@@ -2219,6 +2276,31 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         return;
     }
 
+    // Special handling for GitHub Copilot tokens - they need specific headers
+    if provider_type == ProviderType::GithubCopilot {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+            headers.insert_header(http::header::AUTHORIZATION, value);
+        }
+        // Required Copilot headers (mimic VS Code extension)
+        headers.insert_header(
+            http::header::HeaderName::from_static("user-agent"),
+            http::HeaderValue::from_static("GitHubCopilotChat/0.35.0"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("editor-version"),
+            http::HeaderValue::from_static("vscode/1.107.0"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("editor-plugin-version"),
+            http::HeaderValue::from_static("copilot-chat/0.35.0"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("copilot-integration-id"),
+            http::HeaderValue::from_static("vscode-chat"),
+        );
+        return;
+    }
+
     // Special handling for OpenAI Codex OAuth tokens - they need additional headers
     if provider_type == ProviderType::OpenAICodex && is_openai_codex_oauth_token(api_key) {
         if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
@@ -2330,8 +2412,20 @@ async fn resolve_oauth_access_token(
     provider_name: &str,
     oauth_user: &str,
 ) -> Result<String, String> {
-    let provider = OAuthProviderKind::from_str(provider_name)
-        .ok_or_else(|| "OAuth provider not supported for this route".to_string())?;
+    // Try to resolve from provider type first (more reliable when config key
+    // differs from provider type, e.g., [providers.my-claude] with type = "anthropic").
+    // Falls back to matching on the config section name for backward compatibility.
+    let provider = state
+        .config
+        .resolve_provider(provider_name)
+        .and_then(|lookup| OAuthProviderKind::from_str(&lookup.config.type_))
+        .or_else(|| OAuthProviderKind::from_str(provider_name))
+        .ok_or_else(|| {
+            format!(
+                "OAuth provider not supported for '{}'. Supported: anthropic, openai-codex, github-copilot, google-gemini-cli, google-antigravity",
+                provider_name
+            )
+        })?;
 
     let store = state
         .get_oauth_store()
@@ -2392,7 +2486,17 @@ async fn resolve_oauth_access_token(
                 .map_err(|e| e.to_string())?
             }
             OAuthProviderKind::GithubCopilot => {
-                return Err("GitHub Copilot OAuth refresh not supported".to_string());
+                // GitHub Copilot uses a two-step flow:
+                // 1. refresh_token = GitHub OAuth access token (long-lived)
+                // 2. access_token = Copilot API token (short-lived, exchanged on demand)
+                // The "refresh" here exchanges the GitHub token for a new Copilot token.
+                let github_token = if credentials.refresh_token.is_empty() {
+                    // Older credential format: access_token is the GitHub token
+                    &credentials.access_token
+                } else {
+                    &credentials.refresh_token
+                };
+                exchange_copilot_token(&client, oauth_user, github_token).await?
             }
         };
 
@@ -2403,6 +2507,74 @@ async fn resolve_oauth_access_token(
     }
 
     Ok(credentials.access_token)
+}
+
+/// Exchange a GitHub OAuth access token for a short-lived Copilot API token.
+///
+/// The Copilot token is obtained from `https://api.github.com/copilot_internal/v2/token`
+/// and includes a `proxy-ep` field that determines the actual API base URL.
+/// The token is short-lived (typically ~30 minutes) and must be re-exchanged.
+async fn exchange_copilot_token(
+    client: &reqwest::Client,
+    user_id: &str,
+    github_access_token: &str,
+) -> Result<OAuthCredentials, String> {
+    #[derive(serde::Deserialize)]
+    struct CopilotTokenResponse {
+        token: String,
+        expires_at: i64,
+    }
+
+    let resp = client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {}", github_access_token))
+        .header("User-Agent", "GitHubCopilotChat/0.35.0")
+        .header("Editor-Version", "vscode/1.107.0")
+        .header("Editor-Plugin-Version", "copilot-chat/0.35.0")
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .send()
+        .await
+        .map_err(|e| format!("Copilot token exchange request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(format!(
+            "Copilot token exchange failed ({}): {}",
+            status, body
+        ));
+    }
+
+    let token_resp: CopilotTokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Copilot token response: {}", e))?;
+
+    // Parse proxy-ep from token to determine the actual API base URL.
+    // Token format: tid=...;exp=...;proxy-ep=proxy.individual.githubcopilot.com;...
+    let base_url = if let Some(proxy_ep) = token_resp
+        .token
+        .split(';')
+        .find_map(|part| part.strip_prefix("proxy-ep="))
+    {
+        let api_host = proxy_ep.replace("proxy.", "api.");
+        Some(format!("https://{}", api_host))
+    } else {
+        None
+    };
+
+    Ok(OAuthCredentials {
+        user_id: user_id.to_string(),
+        provider: OAuthProviderKind::GithubCopilot,
+        access_token: token_resp.token,
+        refresh_token: github_access_token.to_string(),
+        expires_at: token_resp.expires_at,
+        extra_data: base_url.map(|url| serde_json::json!({ "base_url": url })),
+    })
 }
 
 async fn resolve_bedrock_aws_credentials(

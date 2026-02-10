@@ -3928,6 +3928,8 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), Cli
             collect_keychain_ref(&mut entries, name, "api_version", v);
         }
         collect_keychain_ref(&mut entries, name, "deployment", &prov.deployment);
+        collect_keychain_ref(&mut entries, name, "gcp_project", &prov.gcp_project);
+        collect_keychain_ref(&mut entries, name, "gcp_location", &prov.gcp_location);
     }
 
     if let Some(ref mk) = config.keys.master_key {

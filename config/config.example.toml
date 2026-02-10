@@ -66,6 +66,29 @@ type = "google"
 api_key = "env:GEMINI_API_KEY"
 # base_url defaults to https://generativelanguage.googleapis.com/v1beta
 
+# Google Vertex AI (uses Application Default Credentials or API key)
+# [providers.vertex]
+# type = "google-vertex"
+# api_key = "env:GEMINI_API_KEY"           # or use ADC: gcloud auth application-default login
+# gcp_project = "env:GOOGLE_CLOUD_PROJECT" # required
+# gcp_location = "env:GOOGLE_CLOUD_LOCATION" # required (e.g., "us-central1")
+# base_url defaults to https://{gcp_location}-aiplatform.googleapis.com
+
+# Google Gemini CLI / Cloud Code Assist (free tier, uses OAuth)
+# [providers.gemini-cli]
+# type = "google-gemini-cli"
+# OAuth tokens are stored in the key database (requires keys.enabled = true).
+# base_url defaults to https://cloudcode-pa.googleapis.com
+# Also supports "google-antigravity" type alias.
+
+# GitHub Copilot (device code flow OAuth)
+# [providers.copilot]
+# type = "github-copilot"
+# OAuth tokens are stored in the key database (requires keys.enabled = true).
+# Uses device code flow: `eavs login github-copilot`
+# base_url is dynamically determined from the Copilot API token.
+# Requires Copilot headers (automatically injected by EAVS).
+
 # Mistral AI
 [providers.mistral]
 type = "mistral"

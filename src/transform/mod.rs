@@ -104,9 +104,12 @@ impl ProviderTransformer {
             | ProviderType::XAI
             | ProviderType::OpenRouter
             | ProviderType::OpenAICompatible
-            | ProviderType::Mock => Box::new(OpenAITransformer::new()), // Mock uses OpenAI format
+            | ProviderType::GithubCopilot // GitHub Copilot uses OpenAI completions API
+            | ProviderType::Mock => Box::new(OpenAITransformer::new()),
             ProviderType::Anthropic => Box::new(AnthropicTransformer::new()),
-            ProviderType::Google => Box::new(GoogleTransformer::new()),
+            ProviderType::Google
+            | ProviderType::GoogleVertex
+            | ProviderType::GoogleGeminiCli => Box::new(GoogleTransformer::new()),
             ProviderType::Azure => Box::new(AzureTransformer::new()),
             ProviderType::Mistral => Box::new(MistralTransformer::new()),
             ProviderType::Bedrock => Box::new(BedrockTransformer::new()),
