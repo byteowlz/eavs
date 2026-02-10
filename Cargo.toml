@@ -41,6 +41,7 @@ ureq = "2.10" # For synchronous HTTP (word lists download)
 url = "2" # For URL parsing in CLI
 libc = "0.2.178"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+rpassword = "7"
 async-trait = "0.1"
 
 [features]

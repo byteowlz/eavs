@@ -168,8 +168,8 @@
         },
         "master_key": {
           "type": ["string", "null"],
-          "description": "Master key for admin API. Supports 'env:VAR_NAME' syntax.",
-          "examples": ["env:EAVS_MASTER_KEY", "sk-admin-secret"]
+          "description": "Master key for admin API. Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
+          "examples": ["env:EAVS_MASTER_KEY", "keychain:eavs-master-key", "sk-admin-secret"]
         },
         "allow_self_provisioning": {
           "type": "boolean",
@@ -396,8 +396,8 @@
         },
         "api_key": {
           "type": "string",
-          "description": "API key. Supports 'env:VAR_NAME' syntax to read from environment.",
-          "examples": ["env:OPENAI_API_KEY", "sk-..."]
+          "description": "API key. Supports three syntaxes: 'env:VAR_NAME' to read from environment variable, 'keychain:account' to read from the system keychain (macOS Keychain / libsecret / Windows Credential Manager), or a literal value. Store keychain secrets with 'eavs secret set <account>'.",
+          "examples": ["env:OPENAI_API_KEY", "keychain:openai", "sk-..."]
         },
         "base_url": {
           "type": "string",
@@ -436,18 +436,18 @@
         },
         "aws_access_key_id": {
           "type": "string",
-          "description": "AWS access key id (Bedrock only). Supports 'env:VAR_NAME' syntax.",
-          "examples": ["env:AWS_ACCESS_KEY_ID"]
+          "description": "AWS access key id (Bedrock only). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
+          "examples": ["env:AWS_ACCESS_KEY_ID", "keychain:aws-access-key-id"]
         },
         "aws_secret_access_key": {
           "type": "string",
-          "description": "AWS secret access key (Bedrock only). Supports 'env:VAR_NAME' syntax.",
-          "examples": ["env:AWS_SECRET_ACCESS_KEY"]
+          "description": "AWS secret access key (Bedrock only). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
+          "examples": ["env:AWS_SECRET_ACCESS_KEY", "keychain:aws-secret-access-key"]
         },
         "aws_session_token": {
           "type": "string",
-          "description": "AWS session token (Bedrock only, optional). Supports 'env:VAR_NAME' syntax.",
-          "examples": ["env:AWS_SESSION_TOKEN"]
+          "description": "AWS session token (Bedrock only, optional). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
+          "examples": ["env:AWS_SESSION_TOKEN", "keychain:aws-session-token"]
         },
         "aws_service": {
           "type": "string",

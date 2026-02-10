@@ -18,12 +18,27 @@ port = 3000
 # Providers
 # =============================================================================
 # Configure multiple LLM providers. Use X-Provider header to select at runtime.
-# All api_key values support "env:VAR_NAME" syntax to read from environment.
+#
+# API key values support three syntaxes:
+#   "env:VAR_NAME"       -- read from environment variable
+#   "keychain:account"   -- read from system keychain (macOS Keychain / libsecret / Windows Credential Manager)
+#   "sk-..."             -- literal value (plaintext in config file)
+#
+# To store a key in the system keychain:
+#   eavs secret set openai            # prompts for key interactively
+#   eavs secret set openai --value sk-...
+#
+# Then reference it:
+#   api_key = "keychain:openai"
+#
+# List configured keychain references and check availability:
+#   eavs secret list --check
 
 # OpenAI (default provider)
 [providers.default]
 type = "openai"
 api_key = "env:OPENAI_API_KEY"
+# Or use keychain: api_key = "keychain:openai"
 # base_url defaults to https://api.openai.com/v1
 
 # OpenAI Responses API (official /v1/responses)
