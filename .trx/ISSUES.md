@@ -14,15 +14,6 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 ...
 
 
-### [eavs-7qma] Improve GitHub Copilot OAuth: add Copilot token exchange, dynamic base URL, and header injection (P2, feature)
-Improve GitHub Copilot OAuth by borrowing from pi-mono implementation.
-
-**Reference:** ~/repos/pi-mono/packages/ai/src/utils/oauth/github-copilot.ts
-
-**Current EAVS implementation gaps:**
-...
-
-
 ### [eavs-yrhd] Add proxy allow/deny lists (P2, feature)
 Support allowlist/denylist controls for EAVS proxy routing (configurable hosts/domains/IPs) so Octo sandbox proxy can enforce outbound network policies.
 
@@ -31,5 +22,6 @@ Extend EAVS config and proxy to support domain allowlist/denylist for network pr
 
 ## Closed
 
+- [eavs-7qma] Improve GitHub Copilot OAuth: add Copilot token exchange, dynamic base URL, and header injection (closed 2026-02-10)
 - [eavs-86bw] Add secure credential storage using system keychain (macOS Keychain, libsecret, Windows Credential Manager) (closed 2026-02-10)
 - [eavs-pyz3] Remove foundry provider type - Azure AI Foundry is a hosting platform, not a distinct API (closed 2026-02-04)
