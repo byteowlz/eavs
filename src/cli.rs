@@ -464,8 +464,8 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Path to config file to use when auto-starting the server
         #[arg(long, env = "EAVS_CONFIG")]
@@ -497,8 +497,8 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Path to config file to use when auto-starting the server
         #[arg(long, env = "EAVS_CONFIG")]
@@ -528,8 +528,8 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Path to config file to use when auto-starting the server
         #[arg(long, env = "EAVS_CONFIG")]
@@ -547,8 +547,8 @@ pub enum TestCommands {
         key: String,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Path to config file to use when auto-starting the server
         #[arg(long, env = "EAVS_CONFIG")]
@@ -598,8 +598,8 @@ pub enum TestCommands {
         duration: Option<String>,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -613,8 +613,8 @@ pub enum TestCommands {
     /// Check proxy health and configuration
     Health {
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -636,8 +636,8 @@ pub enum TestCommands {
         model: Option<String>,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -678,8 +678,8 @@ pub enum TestCommands {
         stream: bool,
 
         /// EAVS server URL
-        #[arg(long, default_value = "http://127.0.0.1:3000", env = "EAVS_URL")]
-        url: String,
+        #[arg(long, env = "EAVS_URL")]
+        url: Option<String>,
 
         /// Output format (text or json)
         #[arg(long, default_value = "text")]
@@ -2784,18 +2784,20 @@ pub fn start_server_background(
 /// Ensure an EAVS server is running, starting one if necessary.
 /// Returns the URL of the running server.
 pub async fn ensure_server_running(
-    preferred_url: &str,
+    preferred_url: &Option<String>,
     config_path: Option<&str>,
 ) -> Result<ServerStatus, CliError> {
+    // Build the URL: use explicit --url if given, otherwise construct from config
+    let effective_port = get_effective_port(None, config_path);
+    let default_url = format!("http://127.0.0.1:{}", effective_port);
+    let url_str = preferred_url.as_deref().unwrap_or(&default_url);
+
     // Parse the preferred URL to get host and port
-    let url = url::Url::parse(preferred_url)
-        .map_err(|e| CliError::Other(format!("Invalid URL '{}': {}", preferred_url, e)))?;
+    let url = url::Url::parse(url_str)
+        .map_err(|e| CliError::Other(format!("Invalid URL '{}': {}", url_str, e)))?;
 
     let host = url.host_str().unwrap_or("127.0.0.1");
-    // Use port from URL if specified, otherwise get from config
-    let preferred_port = url
-        .port()
-        .unwrap_or_else(|| get_effective_port(None, config_path));
+    let preferred_port = url.port().unwrap_or(effective_port);
 
     // First, check if EAVS is already running at the preferred URL
     let check_url = format!("{}://{}:{}", url.scheme(), host, preferred_port);
