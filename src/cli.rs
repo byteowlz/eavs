@@ -3843,8 +3843,22 @@ pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError
         secret
     };
 
-    crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
-    println!("Stored secret for account '{}' in system keychain.", account);
+    let backend = crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
+    match backend {
+        crate::config::SecretBackend::OsKeyring => {
+            println!("Stored secret for account '{}' in system keychain.", account);
+        }
+        crate::config::SecretBackend::File => {
+            println!(
+                "Stored secret for account '{}' in file store (system keychain unavailable).",
+                account
+            );
+            println!(
+                "  Location: {}",
+                crate::config::file_secrets::secrets_path().display()
+            );
+        }
+    }
     println!(
         "Reference it in config.toml as: api_key = \"keychain:{}\"",
         account
