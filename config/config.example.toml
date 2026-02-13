@@ -307,7 +307,7 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 # OAuth credential storage backend: "keychain" (default) or "sqlite".
 # "keychain" uses the system keychain:
 #   - macOS: Keychain
-#   - Linux: Kernel keyutils (works on headless servers, no DBus needed)
+#   - Linux: D-Bus Secret Service (gnome-keyring / libsecret)
 #   - Windows: Credential Manager
 #   Falls back to SQLite automatically if the keychain is unavailable.
 # "sqlite" stores tokens in the same database as virtual API keys (plaintext).
