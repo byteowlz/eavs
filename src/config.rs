@@ -1118,207 +1118,59 @@ pub fn get_api_key(config_key: &str) -> Option<String> {
 
 /// Read a secret from the system keychain.
 ///
-/// Tries the OS keyring first, then falls back to file-based storage if the
-/// keyring is inaccessible. Returns `None` if the entry doesn't exist in
-/// either backend.
+/// Returns `None` if the entry doesn't exist or the keychain is inaccessible,
+/// logging a warning on errors other than "not found".
 pub fn get_keychain_secret(account: &str) -> Option<String> {
     match keyring::Entry::new(KEYCHAIN_SERVICE, account) {
         Ok(entry) => match entry.get_password() {
-            Ok(secret) => return Some(secret),
+            Ok(secret) => Some(secret),
             Err(keyring::Error::NoEntry) => {
-                // Not in OS keyring -- check file fallback before warning
-                if let Some(secret) = file_secrets::get(account) {
-                    return Some(secret);
-                }
                 tracing::warn!(
                     "Keychain entry not found: service={}, account={}. Use 'eavs secret set {}' to store it.",
                     KEYCHAIN_SERVICE,
                     account,
                     account,
                 );
-                return None;
+                None
             }
             Err(e) => {
-                tracing::debug!(
+                tracing::warn!(
                     "Failed to read keychain entry (service={}, account={}): {}",
                     KEYCHAIN_SERVICE,
                     account,
                     e,
                 );
+                None
             }
         },
         Err(e) => {
-            tracing::debug!("Failed to access keychain: {}", e);
+            tracing::warn!("Failed to access keychain: {}", e);
+            None
         }
     }
-
-    // OS keyring failed -- try file-based fallback
-    file_secrets::get(account)
-}
-
-/// Which backend was used to store a secret.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretBackend {
-    /// OS keyring (macOS Keychain, linux-keyutils, Windows Credential Manager).
-    OsKeyring,
-    /// File-based fallback at $XDG_DATA_HOME/eavs/secrets.json.
-    File,
 }
 
 /// Store a secret in the system keychain.
 ///
-/// Tries the OS keyring first. If the keyring is inaccessible, falls back to
-/// file-based storage with restricted file permissions.
-/// Returns which backend was used on success.
-pub fn set_keychain_secret(account: &str, secret: &str) -> Result<SecretBackend, String> {
-    match keyring::Entry::new(KEYCHAIN_SERVICE, account) {
-        Ok(entry) => match entry.set_password(secret) {
-            Ok(()) => return Ok(SecretBackend::OsKeyring),
-            Err(e) => {
-                tracing::debug!("Failed to store in keychain, using file fallback: {}", e);
-            }
-        },
-        Err(e) => {
-            tracing::debug!(
-                "Keychain unavailable, using file fallback: {}",
-                e
-            );
-        }
-    }
-
-    file_secrets::set(account, secret)?;
-    tracing::info!(
-        "Stored secret in file-based fallback (system keychain unavailable)"
-    );
-    Ok(SecretBackend::File)
+/// Creates or updates the entry under service "eavs" with the given account name.
+pub fn set_keychain_secret(account: &str, secret: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
+        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+    entry
+        .set_password(secret)
+        .map_err(|e| format!("Failed to store keychain entry: {}", e))
 }
 
 /// Delete a secret from the system keychain.
 ///
-/// Tries both the OS keyring and file-based fallback.
-/// Returns `true` if the entry was deleted from either backend, `false` if it
-/// didn't exist in either.
+/// Returns `true` if the entry was deleted, `false` if it didn't exist.
 pub fn delete_keychain_secret(account: &str) -> Result<bool, String> {
-    let mut deleted = false;
-
-    // Try OS keyring
-    match keyring::Entry::new(KEYCHAIN_SERVICE, account) {
-        Ok(entry) => match entry.delete_credential() {
-            Ok(()) => deleted = true,
-            Err(keyring::Error::NoEntry) => {}
-            Err(e) => {
-                tracing::debug!("Failed to delete from keychain: {}", e);
-            }
-        },
-        Err(e) => {
-            tracing::debug!("Keychain unavailable for delete: {}", e);
-        }
-    }
-
-    // Also try file-based fallback
-    if file_secrets::delete(account)? {
-        deleted = true;
-    }
-
-    Ok(deleted)
-}
-
-// ---------------------------------------------------------------------------
-// File-based secret storage fallback
-// ---------------------------------------------------------------------------
-//
-// When the OS keyring (linux-keyutils, macOS Keychain, Windows Credential
-// Manager) is not accessible -- e.g. headless servers, containers, SSH sessions
-// without a session keyring -- secrets are stored in a JSON file under the XDG
-// data directory with 0600 permissions.
-//
-// The file lives at: $XDG_DATA_HOME/eavs/secrets.json (or ~/.local/share/eavs/secrets.json)
-//
-// This is NOT encrypted at rest -- it relies on filesystem permissions for
-// security, similar to SSH private keys or ~/.netrc.
-
-pub mod file_secrets {
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::PathBuf;
-
-    use super::env_var_nonempty;
-
-    /// Get the path to the secrets file.
-    pub fn secrets_path() -> PathBuf {
-        let data_home = env_var_nonempty("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-            })
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        data_home.join("eavs").join("secrets.json")
-    }
-
-    /// Load all secrets from the file. Returns empty map if file doesn't exist.
-    fn load() -> HashMap<String, String> {
-        let path = secrets_path();
-        match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => HashMap::new(),
-        }
-    }
-
-    /// Save all secrets to the file with restricted permissions.
-    fn save(secrets: &HashMap<String, String>) -> Result<(), String> {
-        let path = secrets_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create secrets directory: {}", e))?;
-        }
-
-        let json = serde_json::to_string_pretty(secrets)
-            .map_err(|e| format!("Failed to serialize secrets: {}", e))?;
-
-        fs::write(&path, &json)
-            .map_err(|e| format!("Failed to write secrets file: {}", e))?;
-
-        // Set file permissions to 0600 (owner read/write only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&path, perms)
-                .map_err(|e| format!("Failed to set secrets file permissions: {}", e))?;
-        }
-
-        Ok(())
-    }
-
-    /// Get a secret by account name.
-    pub fn get(account: &str) -> Option<String> {
-        load().get(account).cloned()
-    }
-
-    /// Set a secret by account name.
-    pub fn set(account: &str, secret: &str) -> Result<(), String> {
-        let mut secrets = load();
-        secrets.insert(account.to_string(), secret.to_string());
-        save(&secrets)
-    }
-
-    /// Delete a secret by account name. Returns true if it existed.
-    pub fn delete(account: &str) -> Result<bool, String> {
-        let mut secrets = load();
-        let existed = secrets.remove(account).is_some();
-        if existed {
-            save(&secrets)?;
-        }
-        Ok(existed)
-    }
-
-    /// List all account names in the file-based store.
-    #[allow(dead_code)]
-    pub fn list() -> Vec<String> {
-        let mut accounts: Vec<String> = load().keys().cloned().collect();
-        accounts.sort();
-        accounts
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
+        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(format!("Failed to delete keychain entry: {}", e)),
     }
 }
 
