@@ -1100,7 +1100,7 @@ pub const KEYCHAIN_SERVICE: &str = "eavs";
 ///
 /// Keychain uses the OS-native credential store:
 /// - macOS: Keychain
-/// - Linux: libsecret / kernel keyutils
+/// - Linux: D-Bus Secret Service (gnome-keyring, kwallet, KeePassXC)
 /// - Windows: Credential Manager
 pub fn get_api_key(config_key: &str) -> Option<String> {
     if config_key.is_empty() {
@@ -1155,10 +1155,10 @@ pub fn get_keychain_secret(account: &str) -> Option<String> {
 /// Creates or updates the entry under service "eavs" with the given account name.
 pub fn set_keychain_secret(account: &str, secret: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
-        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+        .map_err(|e| format!("{}\n\n{}", e, keychain_help_text()))?;
     entry
         .set_password(secret)
-        .map_err(|e| format!("Failed to store keychain entry: {}", e))
+        .map_err(|e| format!("{}\n\n{}", e, keychain_help_text()))
 }
 
 /// Delete a secret from the system keychain.
@@ -1166,11 +1166,36 @@ pub fn set_keychain_secret(account: &str, secret: &str) -> Result<(), String> {
 /// Returns `true` if the entry was deleted, `false` if it didn't exist.
 pub fn delete_keychain_secret(account: &str) -> Result<bool, String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account)
-        .map_err(|e| format!("Failed to access keychain: {}", e))?;
+        .map_err(|e| format!("{}\n\n{}", e, keychain_help_text()))?;
     match entry.delete_credential() {
         Ok(()) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(format!("Failed to delete keychain entry: {}", e)),
+        Err(e) => Err(format!("{}\n\n{}", e, keychain_help_text())),
+    }
+}
+
+/// Help text shown when the system keychain is not accessible.
+fn keychain_help_text() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "The system secret service (D-Bus Secret Service API) is not available.\n\
+         This typically means no keyring daemon is running or unlocked.\n\n\
+         To fix this:\n\
+         - Desktop: ensure gnome-keyring-daemon or kwallet is running\n\
+         - Headless/SSH: install and start gnome-keyring-daemon:\n\
+         \n\
+             sudo apt install gnome-keyring libsecret-1-0  # Debian/Ubuntu\n\
+             sudo pacman -S gnome-keyring libsecret         # Arch\n\
+         \n\
+             eval $(gnome-keyring-daemon --start --components=secrets 2>/dev/null)\n\
+         \n\
+         - Alternatively, use env: vars or literal keys in config.toml:\n\
+             api_key = \"env:OPENAI_API_KEY\"\n\
+             api_key = \"sk-your-key-here\""
+    } else {
+        "The system keychain is not accessible.\n\
+         Alternatively, use env: vars or literal keys in config.toml:\n\
+             api_key = \"env:OPENAI_API_KEY\"\n\
+             api_key = \"sk-your-key-here\""
     }
 }
 
