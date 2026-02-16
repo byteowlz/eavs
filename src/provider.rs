@@ -298,16 +298,10 @@ impl ProviderType {
                 "o3",
                 "gemini-2.5-pro",
             ],
-            Self::GoogleVertex => vec![
-                "gemini-1.5-pro",
-                "gemini-1.5-flash",
-                "gemini-2.0-flash-exp",
-            ],
-            Self::GoogleGeminiCli => vec![
-                "gemini-2.0-flash",
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-            ],
+            Self::GoogleVertex => {
+                vec!["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"]
+            }
+            Self::GoogleGeminiCli => vec!["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
             Self::Mock => vec!["mock-model"],
             // OpenAI-compatible providers should fetch from upstream
             _ => vec![],
