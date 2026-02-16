@@ -43,6 +43,7 @@ libc = "0.2.178"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 rpassword = "7"
 async-trait = "0.1"
+dialoguer = { version = "0.11", features = ["password"] }
 
 [features]
 integration = []

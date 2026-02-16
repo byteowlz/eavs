@@ -441,8 +441,7 @@ impl ProviderConfig {
 
     /// Get the resolved GCP location (Vertex AI).
     pub fn resolved_gcp_location(&self) -> Option<String> {
-        get_api_key(&self.gcp_location)
-            .or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok())
+        get_api_key(&self.gcp_location).or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok())
     }
 
     /// Get the provider type enum.

@@ -102,6 +102,28 @@ Provider shortcuts (no client changes required):
 - `eavs provider clear` resets to the config default.
 - State is stored in XDG state at `~/.local/state/eavs/state.toml` (or `$XDG_STATE_HOME`).
 
+### Interactive Setup
+
+Add providers interactively with guided prompts for API keys, base URLs, and provider-specific settings. The wizard supports all credential storage methods (literal, `env:`, `keychain:`).
+
+```bash
+# Interactive wizard -- walks through provider type, credentials, and base URL
+eavs setup add
+
+# Test a single provider directly (no server needed)
+eavs setup test anthropic
+eavs setup test foundry-openai --model gpt-4o
+
+# Test all configured providers in one shot
+eavs setup test-all
+
+# Show resolved config for a provider (env vars expanded, defaults applied)
+eavs setup show anthropic
+eavs setup show anthropic --reveal   # show unmasked API key
+```
+
+The `eavs setup test` command bypasses the proxy and makes a direct API call to the upstream provider. This is useful for validating credentials, base URLs, and connectivity before starting the server.
+
 ### Logging
 
 Configure multiple logging backends:

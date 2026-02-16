@@ -121,6 +121,73 @@ pub enum Commands {
         #[command(subcommand)]
         action: SecretCommands,
     },
+
+    /// Interactive setup wizard for adding and testing provider configurations
+    Setup {
+        #[command(subcommand)]
+        action: SetupCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SetupCommands {
+    /// Add a new provider interactively
+    Add {
+        /// Path to config file to modify
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Test a provider from the config file (direct API call, no server needed)
+    Test {
+        /// Provider name from config (e.g. "default", "anthropic", "foundry-openai")
+        provider: String,
+
+        /// Model to test with (auto-detected from provider type if not set)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Custom message to send
+        #[arg(long, default_value = "Say 'test successful' in exactly those words.")]
+        message: String,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+
+    /// Test all providers in the config file
+    TestAll {
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+
+        /// Model override (applies to all providers)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+
+    /// Show effective configuration for a provider (resolved env vars, defaults, etc.)
+    Show {
+        /// Provider name from config
+        provider: String,
+
+        /// Path to config file
+        #[arg(short, long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+
+        /// Reveal secret values (API keys)
+        #[arg(long)]
+        reveal: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3844,7 +3911,10 @@ pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError
     };
 
     crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
-    println!("Stored secret for account '{}' in system keychain.", account);
+    println!(
+        "Stored secret for account '{}' in system keychain.",
+        account
+    );
     println!(
         "Reference it in config.toml as: api_key = \"keychain:{}\"",
         account
@@ -3880,10 +3950,7 @@ pub fn run_secret_get(account: &str, reveal: bool) -> Result<(), CliError> {
 pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
     if !yes {
         use std::io::{self, Write};
-        eprint!(
-            "Delete keychain entry for account '{}'? [y/N] ",
-            account
-        );
+        eprint!("Delete keychain entry for account '{}'? [y/N] ", account);
         io::stdout().flush().map_err(CliError::Io)?;
 
         let mut input = String::new();
@@ -3918,14 +3985,24 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), Cli
     for (name, prov) in &config.providers {
         collect_keychain_ref(&mut entries, name, "api_key", &prov.api_key);
         collect_keychain_ref(&mut entries, name, "base_url", &prov.base_url);
-        collect_keychain_ref(&mut entries, name, "aws_access_key_id", &prov.aws_access_key_id);
+        collect_keychain_ref(
+            &mut entries,
+            name,
+            "aws_access_key_id",
+            &prov.aws_access_key_id,
+        );
         collect_keychain_ref(
             &mut entries,
             name,
             "aws_secret_access_key",
             &prov.aws_secret_access_key,
         );
-        collect_keychain_ref(&mut entries, name, "aws_session_token", &prov.aws_session_token);
+        collect_keychain_ref(
+            &mut entries,
+            name,
+            "aws_session_token",
+            &prov.aws_session_token,
+        );
         if let Some(ref v) = prov.api_version {
             collect_keychain_ref(&mut entries, name, "api_version", v);
         }
@@ -3952,7 +4029,10 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), Cli
 
     println!(
         "{:<20} {:<25} {:<25} {}",
-        "SECTION", "FIELD", "ACCOUNT", if check { "STATUS" } else { "" }
+        "SECTION",
+        "FIELD",
+        "ACCOUNT",
+        if check { "STATUS" } else { "" }
     );
     println!("{}", "-".repeat(if check { 80 } else { 70 }));
 

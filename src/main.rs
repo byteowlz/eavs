@@ -12,6 +12,7 @@ mod policy;
 mod provider;
 mod proxy;
 mod runtime_state;
+mod setup;
 mod state;
 mod transform;
 mod transform_plugins;
@@ -27,7 +28,7 @@ use crate::cli::{
     run_service_start, run_service_status, run_service_stop, run_test_bench, run_test_chat,
     run_test_health, run_test_image, run_test_oauth, run_test_rate_limit, run_test_routing,
     run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ProviderCommands,
-    SecretCommands, ServiceCommands, TestCommands,
+    SecretCommands, ServiceCommands, SetupCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -97,14 +98,18 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Setup { action } => {
+            if let Err(e) = run_setup_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 
 fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
     match action {
-        SecretCommands::Set { account, value } => {
-            run_secret_set(&account, value.as_deref())
-        }
+        SecretCommands::Set { account, value } => run_secret_set(&account, value.as_deref()),
         SecretCommands::Get { account, reveal } => run_secret_get(&account, reveal),
         SecretCommands::Delete { account, yes } => run_secret_delete(&account, yes),
         SecretCommands::List { config, check } => run_secret_list(config.as_deref(), check),
@@ -574,5 +579,37 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             )
             .await
         }
+    }
+}
+
+async fn run_setup_command(action: SetupCommands) -> Result<(), cli::CliError> {
+    match action {
+        SetupCommands::Add { config } => setup::run_setup_add(config.as_deref()).await,
+        SetupCommands::Test {
+            provider,
+            model,
+            message,
+            config,
+            format,
+        } => {
+            setup::run_setup_test(
+                &provider,
+                model.as_deref(),
+                &message,
+                config.as_deref(),
+                &format,
+            )
+            .await
+        }
+        SetupCommands::TestAll {
+            config,
+            model,
+            format,
+        } => setup::run_setup_test_all(config.as_deref(), model.as_deref(), &format).await,
+        SetupCommands::Show {
+            provider,
+            config,
+            reveal,
+        } => setup::run_setup_show(&provider, config.as_deref(), reveal),
     }
 }
