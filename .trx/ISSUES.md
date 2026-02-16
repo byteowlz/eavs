@@ -58,6 +58,7 @@ Extend EAVS config and proxy to support domain allowlist/denylist for network pr
 
 ## Closed
 
+- [eavs-te85] Fix test-all summary counting 'Continue anyway' as passed (closed 2026-02-16)
 - [eavs-7qma] Improve GitHub Copilot OAuth: add Copilot token exchange, dynamic base URL, and header injection (closed 2026-02-10)
 - [eavs-86bw] Add secure credential storage using system keychain (macOS Keychain, libsecret, Windows Credential Manager) (closed 2026-02-10)
 - [eavs-pyz3] Remove foundry provider type - Azure AI Foundry is a hosting platform, not a distinct API (closed 2026-02-04)
