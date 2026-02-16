@@ -186,15 +186,27 @@ api_version = "env:AZURE_OPENAI_API_VERSION" # e.g., 2024-02-15-preview
 type = "ollama"
 base_url = "http://localhost:11434/v1"
 # No API key needed for local Ollama
+test_model = "llama3.2"  # Model to use for `eavs setup test` / `eavs setup test-all`
 
 # Local vLLM (OpenAI-compatible)
 [providers.vllm]
 type = "openai-compatible"
 base_url = "http://localhost:8000/v1"
 api_key = "EMPTY"
+test_model = "my-model"  # Model to use for `eavs setup test` / `eavs setup test-all`
 [providers.vllm.compat]
 supports_store = false
 max_tokens_field = "max_tokens"
+
+# =============================================================================
+# Test Model Resolution
+# =============================================================================
+# When running `eavs setup test` or `eavs setup test-all`, EAVS picks a model
+# to test with using this precedence:
+#
+#   1. `test_model` field in the provider config (shown above)
+#   2. First matching model from ~/.pi/agent/models.json (matched by base_url)
+#   3. Built-in default for the provider type (e.g., gpt-4o-mini for OpenAI)
 
 # =============================================================================
 # Logging
