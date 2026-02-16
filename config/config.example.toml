@@ -282,6 +282,13 @@ broadcast_channel_size = 1024
 # [[policy.rules]]
 # action = "filter_tools"
 # deny = ["delete_*", "rm_*"]
+#
+# [[policy.rules]]
+# action = "set_field"
+# model = "gpt-5*"
+# path = "/v1/responses"
+# field = "store"
+# value = true
 
 # =============================================================================
 # Conversation State

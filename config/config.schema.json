@@ -262,7 +262,7 @@
   },
   "$defs": {
     "policyRule": {
-      "description": "Single policy rule (deny/rewrite_model/filter_tools)",
+      "description": "Single policy rule (deny/rewrite_model/filter_tools/set_field)",
       "oneOf": [
         {
           "type": "object",
@@ -329,6 +329,28 @@
             }
           },
           "required": ["action"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": { "const": "set_field" },
+            "provider": {
+              "type": ["string", "null"],
+              "description": "Glob match against provider name"
+            },
+            "model": {
+              "type": ["string", "null"],
+              "description": "Glob match against requested model"
+            },
+            "path": {
+              "type": ["string", "null"],
+              "description": "Glob match against request path (e.g. */responses)"
+            },
+            "field": { "type": "string", "description": "Top-level field name to set" },
+            "value": { "description": "Value to set (any JSON type)" }
+          },
+          "required": ["action", "field", "value"],
           "additionalProperties": false
         }
       ]

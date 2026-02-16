@@ -47,6 +47,17 @@ pub enum PolicyRule {
         #[serde(default)]
         deny: Option<Vec<String>>,
     },
+    /// Set a top-level field in the request body.
+    SetField {
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+        field: String,
+        value: Value,
+    },
 }
 
 impl PolicyConfig {
@@ -117,6 +128,24 @@ impl PolicyConfig {
                         continue;
                     }
                     filter_tools(body, allow.as_deref(), deny.as_deref());
+                }
+                PolicyRule::SetField {
+                    provider: p,
+                    model: m,
+                    path: rp,
+                    field,
+                    value,
+                } => {
+                    if !matches_opt(p.as_deref(), provider) {
+                        continue;
+                    }
+                    if !matches_opt(m.as_deref(), &model) {
+                        continue;
+                    }
+                    if !matches_opt(rp.as_deref(), path) {
+                        continue;
+                    }
+                    body[field.as_str()] = value.clone();
                 }
             }
         }
@@ -200,6 +229,46 @@ mod tests {
             .apply("default", "/v1/chat/completions", &mut body)
             .unwrap();
         assert_eq!(body["model"], "gpt-4o");
+    }
+
+    #[test]
+    fn policy_set_field() {
+        let policy = PolicyConfig {
+            enabled: true,
+            rules: vec![PolicyRule::SetField {
+                provider: Some("default".to_string()),
+                model: Some("gpt-5*".to_string()),
+                path: Some("/v1/responses".to_string()),
+                field: "store".to_string(),
+                value: json!(true),
+            }],
+        };
+
+        let mut body = json!({"model":"gpt-5.2-codex","input":[],"store":false});
+        policy
+            .apply("default", "/v1/responses", &mut body)
+            .unwrap();
+        assert_eq!(body["store"], true);
+    }
+
+    #[test]
+    fn policy_set_field_no_match() {
+        let policy = PolicyConfig {
+            enabled: true,
+            rules: vec![PolicyRule::SetField {
+                provider: Some("default".to_string()),
+                model: Some("gpt-5*".to_string()),
+                path: None,
+                field: "store".to_string(),
+                value: json!(true),
+            }],
+        };
+
+        let mut body = json!({"model":"gpt-4o","input":[],"store":false});
+        policy
+            .apply("default", "/v1/responses", &mut body)
+            .unwrap();
+        assert_eq!(body["store"], false);
     }
 
     #[test]
