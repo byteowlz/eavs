@@ -14,6 +14,15 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Outcome of a single provider test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestOutcome {
+    /// The API call succeeded.
+    Passed,
+    /// The API call failed, but the user chose to continue (interactive only).
+    FailedContinue,
+}
+
 // =============================================================================
 // Provider type choices for the interactive menu
 // =============================================================================
@@ -129,7 +138,9 @@ pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
 
     if should_test {
         let prov_config = setup_config.to_provider_config();
-        test_provider_direct(&provider_name, &prov_config, None, None).await?;
+        // For the setup wizard, any non-abort outcome is fine (user already saw the result).
+        // We only propagate Err (user chose to abort), not FailedContinue.
+        let _ = test_provider_direct(&provider_name, &prov_config, None, None).await?;
     }
 
     // 5. Save to config
@@ -199,15 +210,26 @@ pub async fn run_setup_test(
 
     match format {
         OutputFormat::Json => {
-            // JSON output is handled inside test_provider_direct for success.
-            // For the outer error case, wrap it.
-            if let Err(ref e) = result {
-                let output = serde_json::json!({
-                    "provider": provider_name,
-                    "success": false,
-                    "error": e.to_string(),
-                });
-                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            match &result {
+                Ok(TestOutcome::FailedContinue) => {
+                    let output = serde_json::json!({
+                        "provider": provider_name,
+                        "success": false,
+                        "skipped": true,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                }
+                Err(ref e) => {
+                    let output = serde_json::json!({
+                        "provider": provider_name,
+                        "success": false,
+                        "error": e.to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                }
+                Ok(TestOutcome::Passed) => {
+                    // Success output is already printed inside test_provider_direct
+                }
             }
         }
         OutputFormat::Text => {
@@ -215,7 +237,12 @@ pub async fn run_setup_test(
         }
     }
 
-    result
+    // Map FailedContinue to an error for the exit code
+    match result {
+        Ok(TestOutcome::Passed) => Ok(()),
+        Ok(TestOutcome::FailedContinue) => Err(CliError::Other("Test failed".to_string())),
+        Err(e) => Err(e),
+    }
 }
 
 // =============================================================================
@@ -252,11 +279,19 @@ pub async fn run_setup_test_all(
         let result = test_provider_direct(name, prov_config, model, None).await;
 
         match &result {
-            Ok(()) => {
+            Ok(TestOutcome::Passed) => {
                 passed += 1;
                 results.push(serde_json::json!({
                     "provider": name,
                     "success": true,
+                }));
+            }
+            Ok(TestOutcome::FailedContinue) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "provider": name,
+                    "success": false,
+                    "skipped": true,
                 }));
             }
             Err(e) => {
@@ -400,7 +435,7 @@ async fn test_provider_direct(
     prov_config: &ProviderConfig,
     model_override: Option<&str>,
     message_override: Option<&str>,
-) -> Result<(), CliError> {
+) -> Result<TestOutcome, CliError> {
     let provider_type = prov_config.provider_type();
     let base_url = prov_config.resolved_base_url();
     let api_key = prov_config.resolved_api_key();
@@ -408,8 +443,7 @@ async fn test_provider_direct(
     let model = match model_override {
         Some(m) => m.to_string(),
         None => {
-            // Interactive prompt if running in a TTY, otherwise use default
-            let default = suggest_test_model(provider_type);
+            let default = resolve_test_model(prov_config);
             if std::io::stdin().is_terminal() {
                 Input::new()
                     .with_prompt(format!("Model to test '{}' with", provider_name))
@@ -475,7 +509,7 @@ async fn test_provider_direct(
                         content.to_string()
                     }
                 );
-                Ok(())
+                Ok(TestOutcome::Passed)
             } else {
                 let body_text = resp.text().await.unwrap_or_default();
                 println!("  FAILED (HTTP {})", status);
@@ -497,7 +531,7 @@ async fn test_provider_direct(
                         .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
 
                     if continue_anyway {
-                        Ok(())
+                        Ok(TestOutcome::FailedContinue)
                     } else {
                         Err(CliError::Api {
                             status: status.as_u16(),
@@ -523,7 +557,7 @@ async fn test_provider_direct(
                     .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
 
                 if continue_anyway {
-                    Ok(())
+                    Ok(TestOutcome::FailedContinue)
                 } else {
                     Err(CliError::Other(e.to_string()))
                 }
@@ -665,8 +699,96 @@ fn ensure_trailing_slash(url: &str) -> String {
     }
 }
 
-/// Suggest a model name for testing based on provider type.
-fn suggest_test_model(provider_type: ProviderType) -> String {
+/// Resolve the test model for a provider using this precedence:
+///
+/// 1. `test_model` from the provider's config.toml section
+/// 2. First model found in `~/.pi/agent/models.json` whose provider `baseUrl`
+///    matches this provider's `base_url`
+/// 3. Hardcoded default based on provider type
+fn resolve_test_model(prov_config: &ProviderConfig) -> String {
+    // 1. Explicit test_model in config
+    if !prov_config.test_model.is_empty() {
+        return prov_config.test_model.clone();
+    }
+
+    // 2. Try to find a matching model in ~/.pi/agent/models.json
+    let base_url = prov_config.resolved_base_url();
+    if !base_url.is_empty() {
+        if let Some(model_id) = find_pi_model_for_base_url(&base_url) {
+            return model_id;
+        }
+    }
+
+    // 3. Hardcoded defaults
+    suggest_test_model_default(prov_config.provider_type())
+}
+
+/// Load `~/.pi/agent/models.json` and find the first model whose provider's
+/// `baseUrl` matches (or is a prefix of) the given base URL.
+fn find_pi_model_for_base_url(base_url: &str) -> Option<String> {
+    let pi_models_path = resolve_pi_models_path()?;
+    let content = std::fs::read_to_string(&pi_models_path).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let providers = doc.get("providers")?.as_object()?;
+    let normalized_base = base_url.trim_end_matches('/').to_lowercase();
+
+    for (_name, provider) in providers {
+        let provider_base = provider
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_lowercase();
+
+        if provider_base.is_empty() {
+            continue;
+        }
+
+        // Match if the URLs are equal or one is a prefix of the other
+        // (e.g., config has "http://localhost:8080/v1" and models.json has "http://localhost:8080/v1")
+        if normalized_base == provider_base
+            || normalized_base.starts_with(&provider_base)
+            || provider_base.starts_with(&normalized_base)
+        {
+            let models = provider.get("models").and_then(|v| v.as_array())?;
+            if let Some(first) = models.first() {
+                return first.get("id").and_then(|v| v.as_str()).map(String::from);
+            }
+        }
+    }
+
+    None
+}
+
+/// Resolve the path to `~/.pi/agent/models.json`, checking
+/// `PI_CODING_AGENT_DIR` env var first.
+fn resolve_pi_models_path() -> Option<std::path::PathBuf> {
+    // Check PI_CODING_AGENT_DIR first (pi's own override)
+    if let Ok(agent_dir) = std::env::var("PI_CODING_AGENT_DIR") {
+        let path = std::path::PathBuf::from(agent_dir).join("models.json");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Default: ~/.pi/agent/models.json
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let path = std::path::PathBuf::from(home)
+        .join(".pi")
+        .join("agent")
+        .join("models.json");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Hardcoded default test models per provider type.
+fn suggest_test_model_default(provider_type: ProviderType) -> String {
     match provider_type {
         ProviderType::OpenAI | ProviderType::OpenAIResponses => "gpt-4o-mini".to_string(),
         ProviderType::Anthropic => "claude-sonnet-4-20250514".to_string(),
@@ -1273,6 +1395,7 @@ impl SetupProviderConfig {
             gcp_location: self.gcp_location.clone().unwrap_or_default(),
             compat: crate::provider::CompatSettings::default(),
             headers: HashMap::new(),
+            test_model: String::new(),
         }
     }
 }

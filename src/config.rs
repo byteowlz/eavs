@@ -324,6 +324,10 @@ pub struct ProviderConfig {
     /// Google Cloud location/region (Vertex AI only). Supports `env:VAR_NAME` syntax.
     #[serde(default)]
     pub gcp_location: String,
+    /// Model name to use for `eavs setup test` and `eavs setup test-all`.
+    /// Overrides the built-in default for this provider type.
+    #[serde(default)]
+    pub test_model: String,
 }
 
 impl Default for ProviderConfig {
@@ -343,6 +347,7 @@ impl Default for ProviderConfig {
             deployment: String::new(),
             gcp_project: String::new(),
             gcp_location: String::new(),
+            test_model: String::new(),
         }
     }
 }
