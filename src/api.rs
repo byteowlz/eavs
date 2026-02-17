@@ -131,6 +131,8 @@ pub struct ProviderDetail {
     pub oauth: bool,
     /// Whether the provider has a resolved API key (not the key itself)
     pub has_api_key: bool,
+    /// Curated model shortlist (empty = use built-in defaults)
+    pub models: Vec<crate::config::ModelShortlistEntry>,
 }
 
 /// Get detailed provider information.
@@ -160,6 +162,7 @@ pub async fn providers_detail_handler(
                         | ProviderType::GoogleGeminiCli
                 ),
                 has_api_key,
+                models: config.models.clone(),
             }
         })
         .collect();
