@@ -101,7 +101,6 @@ pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
 
     let (display_name, type_str, _) = PROVIDER_CHOICES[selection];
-    let provider_type = ProviderType::from_str(type_str);
     let is_azure_foundry = matches!(
         selection,
         AZURE_FOUNDRY_OPENAI_IDX | AZURE_FOUNDRY_ANTHROPIC_IDX | AZURE_FOUNDRY_OTHER_IDX
@@ -109,6 +108,30 @@ pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
 
     println!();
     println!("Selected: {}", display_name);
+
+    // For OpenAI-family providers, let the user choose between API formats
+    let type_str = if type_str == "openai" {
+        println!();
+        let api_choices = vec![
+            "Chat Completions API (/v1/chat/completions)   Standard chat format",
+            "Responses API (/v1/responses)                 Newer stateful format",
+        ];
+        let api_sel = Select::new()
+            .with_prompt("Select API format")
+            .items(&api_choices)
+            .default(0)
+            .interact()
+            .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+        match api_sel {
+            1 => "openai-responses",
+            _ => type_str,
+        }
+    } else {
+        type_str
+    };
+
+    let provider_type = ProviderType::from_str(type_str);
+
     println!();
 
     // 2. Provider name
