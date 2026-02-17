@@ -412,6 +412,7 @@ pub async fn create_key_handler(
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
         oauth_user: payload.oauth_user,
+        oauth_account: payload.oauth_account,
     };
 
     let response = store.create_key(request).await.map_err(|e| {
@@ -435,6 +436,7 @@ pub struct CreateKeyApiRequest {
     pub permissions: Option<KeyPermissions>,
     pub metadata: Option<serde_json::Value>,
     pub oauth_user: Option<String>,
+    pub oauth_account: Option<String>,
 }
 
 /// List all virtual API keys.
@@ -650,6 +652,7 @@ pub async fn provision_key_handler(
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
         oauth_user: payload.oauth_user,
+        oauth_account: None,
     };
 
     let response = store.create_key(request).await.map_err(|e| {

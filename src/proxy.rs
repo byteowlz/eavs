@@ -435,7 +435,14 @@ async fn proxy_handler_inner(
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
             tracing::info!("OAuth user: {}, provider: {}", oauth_user, provider_name);
-            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+            api_key = match resolve_oauth_access_token_with_account(
+                &state,
+                &provider_name,
+                oauth_user,
+                validated.oauth_account.as_deref(),
+            )
+            .await
+            {
                 Ok(token) => {
                     tracing::info!(
                         "Got OAuth token starting with: {}...",
@@ -1840,7 +1847,7 @@ async fn ws_proxy_handler_inner(
 
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
-            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+            api_key = match resolve_oauth_access_token_with_account(&state, &provider_name, oauth_user, validated.oauth_account.as_deref()).await {
                 Ok(token) => token,
                 Err(msg) => {
                     return (
@@ -2122,7 +2129,7 @@ async fn codex_ws_handler_inner(
     // Resolve OAuth token if key is bound to an oauth_user
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
-            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+            api_key = match resolve_oauth_access_token_with_account(&state, &provider_name, oauth_user, validated.oauth_account.as_deref()).await {
                 Ok(token) => token,
                 Err(msg) => {
                     return (
@@ -2788,6 +2795,15 @@ async fn resolve_oauth_access_token(
     provider_name: &str,
     oauth_user: &str,
 ) -> Result<String, String> {
+    resolve_oauth_access_token_with_account(state, provider_name, oauth_user, None).await
+}
+
+async fn resolve_oauth_access_token_with_account(
+    state: &AppState,
+    provider_name: &str,
+    oauth_user: &str,
+    oauth_account: Option<&str>,
+) -> Result<String, String> {
     // Try to resolve from provider type first (more reliable when config key
     // differs from provider type, e.g., [providers.my-claude] with type = "anthropic").
     // Falls back to matching on the config section name for backward compatibility.
@@ -2807,11 +2823,18 @@ async fn resolve_oauth_access_token(
         .get_oauth_store()
         .ok_or_else(|| "OAuth store not initialized".to_string())?;
 
+    let account_label = oauth_account.unwrap_or("default");
     let mut credentials = store
-        .get_credentials(oauth_user, provider)
+        .get_credentials_for_account(oauth_user, provider, account_label)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "OAuth credentials not found".to_string())?;
+        .ok_or_else(|| {
+            if account_label == "default" {
+                "OAuth credentials not found".to_string()
+            } else {
+                format!("OAuth credentials not found for account '{}'", account_label)
+            }
+        })?;
 
     if credentials.is_expired(60) {
         if credentials.refresh_token.is_empty() {
@@ -2875,6 +2898,9 @@ async fn resolve_oauth_access_token(
                 exchange_copilot_token(&client, oauth_user, github_token).await?
             }
         };
+
+        // Preserve account_label from original credentials through refresh
+        credentials.account_label = account_label.to_string();
 
         store
             .upsert_credentials(&credentials)
@@ -2946,6 +2972,7 @@ async fn exchange_copilot_token(
     Ok(OAuthCredentials {
         user_id: user_id.to_string(),
         provider: OAuthProviderKind::GithubCopilot,
+        account_label: "default".to_string(),
         access_token: token_resp.token,
         refresh_token: github_access_token.to_string(),
         expires_at: token_resp.expires_at,

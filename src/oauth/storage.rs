@@ -137,7 +137,21 @@ impl OAuthStore {
         user_id: &str,
         provider: OAuthProvider,
     ) -> Result<Option<OAuthCredentials>, OAuthStoreError> {
-        self.backend.get_credentials(user_id, provider).await
+        self.backend
+            .get_credentials(user_id, provider, "default")
+            .await
+    }
+
+    /// Get credentials for a specific account label.
+    pub async fn get_credentials_for_account(
+        &self,
+        user_id: &str,
+        provider: OAuthProvider,
+        account_label: &str,
+    ) -> Result<Option<OAuthCredentials>, OAuthStoreError> {
+        self.backend
+            .get_credentials(user_id, provider, account_label)
+            .await
     }
 
     pub async fn delete_credentials(
@@ -145,7 +159,21 @@ impl OAuthStore {
         user_id: &str,
         provider: OAuthProvider,
     ) -> Result<bool, OAuthStoreError> {
-        self.backend.delete_credentials(user_id, provider).await
+        self.backend
+            .delete_credentials(user_id, provider, "default")
+            .await
+    }
+
+    /// Delete credentials for a specific account label.
+    pub async fn delete_credentials_for_account(
+        &self,
+        user_id: &str,
+        provider: OAuthProvider,
+        account_label: &str,
+    ) -> Result<bool, OAuthStoreError> {
+        self.backend
+            .delete_credentials(user_id, provider, account_label)
+            .await
     }
 
     pub async fn list_providers(&self, user_id: &str) -> Result<Vec<String>, OAuthStoreError> {
@@ -169,12 +197,14 @@ trait CredentialBackend {
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<Option<OAuthCredentials>, OAuthStoreError>;
 
     async fn delete_credentials(
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<bool, OAuthStoreError>;
 
     async fn list_providers(&self, user_id: &str) -> Result<Vec<String>, OAuthStoreError>;
@@ -208,6 +238,7 @@ impl SqliteBackend {
     }
 
     async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), OAuthStoreError> {
+        // Initial schema
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS oauth_credentials (
@@ -225,6 +256,50 @@ impl SqliteBackend {
         .await
         .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
 
+        // Migration: add account_label column for multi-account support.
+        // ALTER TABLE ADD COLUMN is idempotent in SQLite (fails silently if column exists).
+        let has_account_label: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('oauth_credentials') WHERE name = 'account_label'"
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| OAuthStoreError::Database(e.to_string()))? > 0;
+
+        if !has_account_label {
+            // Add the column with a default
+            sqlx::query(
+                "ALTER TABLE oauth_credentials ADD COLUMN account_label TEXT NOT NULL DEFAULT 'default'"
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
+
+            // Recreate the table with the new primary key.
+            // SQLite doesn't support ALTER TABLE to change PK, so we migrate.
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS oauth_credentials_new (
+                    user_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    account_label TEXT NOT NULL DEFAULT 'default',
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    extra_data TEXT,
+                    PRIMARY KEY (user_id, provider, account_label)
+                );
+                INSERT OR REPLACE INTO oauth_credentials_new
+                    SELECT user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data
+                    FROM oauth_credentials;
+                DROP TABLE oauth_credentials;
+                ALTER TABLE oauth_credentials_new RENAME TO oauth_credentials;
+                "#,
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
+        }
+
         Ok(())
     }
 }
@@ -233,6 +308,8 @@ impl SqliteBackend {
 struct OAuthRow {
     user_id: String,
     provider: String,
+    #[sqlx(default)]
+    account_label: String,
     access_token: String,
     refresh_token: String,
     expires_at: i64,
@@ -249,6 +326,11 @@ impl OAuthRow {
         OAuthCredentials {
             user_id: self.user_id,
             provider: OAuthProvider::from_str(&self.provider).unwrap_or(OAuthProvider::OpenAICodex),
+            account_label: if self.account_label.is_empty() {
+                "default".to_string()
+            } else {
+                self.account_label
+            },
             access_token: self.access_token,
             refresh_token: self.refresh_token,
             expires_at: self.expires_at,
@@ -272,9 +354,9 @@ impl CredentialBackend for SqliteBackend {
 
         sqlx::query(
             r#"
-            INSERT INTO oauth_credentials (user_id, provider, access_token, refresh_token, expires_at, extra_data)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, provider) DO UPDATE SET
+            INSERT INTO oauth_credentials (user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, provider, account_label) DO UPDATE SET
                 access_token = excluded.access_token,
                 refresh_token = excluded.refresh_token,
                 expires_at = excluded.expires_at,
@@ -283,6 +365,7 @@ impl CredentialBackend for SqliteBackend {
         )
         .bind(&credentials.user_id)
         .bind(credentials.provider.as_str())
+        .bind(&credentials.account_label)
         .bind(&credentials.access_token)
         .bind(&credentials.refresh_token)
         .bind(credentials.expires_at)
@@ -298,12 +381,14 @@ impl CredentialBackend for SqliteBackend {
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<Option<OAuthCredentials>, OAuthStoreError> {
         let row: Option<OAuthRow> = sqlx::query_as(
-            "SELECT user_id, provider, access_token, refresh_token, expires_at, extra_data FROM oauth_credentials WHERE user_id = ? AND provider = ?",
+            "SELECT user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data FROM oauth_credentials WHERE user_id = ? AND provider = ? AND account_label = ?",
         )
         .bind(user_id)
         .bind(provider.as_str())
+        .bind(account_label)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
@@ -315,21 +400,24 @@ impl CredentialBackend for SqliteBackend {
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<bool, OAuthStoreError> {
-        let result =
-            sqlx::query("DELETE FROM oauth_credentials WHERE user_id = ? AND provider = ?")
-                .bind(user_id)
-                .bind(provider.as_str())
-                .execute(&self.pool)
-                .await
-                .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
+        let result = sqlx::query(
+            "DELETE FROM oauth_credentials WHERE user_id = ? AND provider = ? AND account_label = ?",
+        )
+        .bind(user_id)
+        .bind(provider.as_str())
+        .bind(account_label)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
     }
 
     async fn list_providers(&self, user_id: &str) -> Result<Vec<String>, OAuthStoreError> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT provider FROM oauth_credentials WHERE user_id = ? ORDER BY provider",
+            "SELECT DISTINCT provider FROM oauth_credentials WHERE user_id = ? ORDER BY provider",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -396,7 +484,15 @@ impl KeychainBackend {
 
     /// Build the keychain "username" for a credential entry.
     fn entry_key(user_id: &str, provider: OAuthProvider) -> String {
-        format!("{}/{}", user_id, provider.as_str())
+        format!("{}/{}/default", user_id, provider.as_str())
+    }
+
+    fn entry_key_with_label(user_id: &str, provider: OAuthProvider, account_label: &str) -> String {
+        if account_label.is_empty() || account_label == "default" {
+            format!("{}/{}/default", user_id, provider.as_str())
+        } else {
+            format!("{}/{}/{}", user_id, provider.as_str(), account_label)
+        }
     }
 
     /// Build the keychain "username" for the per-user provider index.
@@ -468,7 +564,11 @@ impl CredentialBackend for KeychainBackend {
         &self,
         credentials: &OAuthCredentials,
     ) -> Result<(), OAuthStoreError> {
-        let key = Self::entry_key(&credentials.user_id, credentials.provider);
+        let key = Self::entry_key_with_label(
+            &credentials.user_id,
+            credentials.provider,
+            &credentials.account_label,
+        );
         let json = serde_json::to_string(credentials)
             .map_err(|e| OAuthStoreError::Serialization(e.to_string()))?;
 
@@ -488,8 +588,9 @@ impl CredentialBackend for KeychainBackend {
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<Option<OAuthCredentials>, OAuthStoreError> {
-        let key = Self::entry_key(user_id, provider);
+        let key = Self::entry_key_with_label(user_id, provider, account_label);
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &key)
             .map_err(|e| OAuthStoreError::Keychain(e.to_string()))?;
 
@@ -508,8 +609,9 @@ impl CredentialBackend for KeychainBackend {
         &self,
         user_id: &str,
         provider: OAuthProvider,
+        account_label: &str,
     ) -> Result<bool, OAuthStoreError> {
-        let key = Self::entry_key(user_id, provider);
+        let key = Self::entry_key_with_label(user_id, provider, account_label);
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &key)
             .map_err(|e| OAuthStoreError::Keychain(e.to_string()))?;
 
@@ -559,6 +661,7 @@ mod tests {
         let creds = OAuthCredentials {
             user_id: "user-1".to_string(),
             provider: OAuthProvider::Anthropic,
+            account_label: "default".to_string(),
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: 123,
@@ -583,6 +686,7 @@ mod tests {
         let creds = OAuthCredentials {
             user_id: "user-2".to_string(),
             provider: OAuthProvider::GithubCopilot,
+            account_label: "default".to_string(),
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: 999,

@@ -105,6 +105,7 @@ impl KeyValidator {
             name: key.name.clone(),
             permissions: key.permissions.clone(),
             oauth_user: key.oauth_user.clone(),
+            oauth_account: key.oauth_account.clone(),
         })
     }
 
@@ -163,6 +164,8 @@ pub struct ValidatedKey {
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
+    /// Optional OAuth account label for multi-account support
+    pub oauth_account: Option<String>,
 }
 
 /// Errors that can occur during key validation.
@@ -265,7 +268,7 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
-                oauth_user: None,
+                oauth_user: None, ..Default::default()
             })
             .await
             .unwrap();
@@ -317,7 +320,7 @@ mod tests {
                 expires_at: None,
                 permissions,
                 metadata: serde_json::Value::Null,
-                oauth_user: None,
+                oauth_user: None, ..Default::default()
             })
             .await
             .unwrap();
@@ -345,7 +348,7 @@ mod tests {
                 expires_at: None,
                 permissions,
                 metadata: serde_json::Value::Null,
-                oauth_user: None,
+                oauth_user: None, ..Default::default()
             })
             .await
             .unwrap();

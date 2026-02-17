@@ -40,6 +40,9 @@ pub struct VirtualKey {
 
     /// Optional OAuth user binding for token-based auth
     pub oauth_user: Option<String>,
+    /// Optional OAuth account label for multi-account support (defaults to "default")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<String>,
 }
 
 /// Permissions and scopes for a virtual key.
@@ -126,7 +129,7 @@ pub struct KeyUsage {
 }
 
 /// Request to create a new virtual key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateKeyRequest {
     /// Human-readable name
     pub name: Option<String>,
@@ -144,6 +147,9 @@ pub struct CreateKeyRequest {
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
+    /// Optional OAuth account label for multi-account support
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<String>,
 }
 
 /// Response after creating a key (includes the actual key value).
@@ -172,6 +178,9 @@ pub struct CreateKeyResponse {
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
+    /// Optional OAuth account label
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<String>,
 }
 
 /// Key info for listing (does not include the actual key).
@@ -203,6 +212,9 @@ pub struct KeyInfo {
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
+    /// Optional OAuth account label for multi-account support
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<String>,
 }
 
 impl VirtualKey {
@@ -221,6 +233,7 @@ impl VirtualKey {
             usage: KeyUsage::default(),
             metadata: serde_json::Value::Null,
             oauth_user: None,
+            oauth_account: None,
         }
     }
 
@@ -276,6 +289,7 @@ impl VirtualKey {
             permissions: self.permissions.clone(),
             usage: self.usage.clone(),
             oauth_user: self.oauth_user.clone(),
+            oauth_account: self.oauth_account.clone(),
         }
     }
 }

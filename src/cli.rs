@@ -1237,6 +1237,7 @@ pub async fn run_key_create_direct(
         },
         metadata: serde_json::Value::Null,
         oauth_user: None,
+        oauth_account: None,
     };
 
     let response = store
@@ -2097,6 +2098,7 @@ pub async fn run_test_oauth(
         permissions: KeyPermissions::default(),
         metadata: serde_json::Value::Null,
         oauth_user: Some(user_id.to_string()),
+        oauth_account: None,
     };
 
     let key_response = key_store

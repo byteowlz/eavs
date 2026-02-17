@@ -234,6 +234,21 @@ impl KeyStore {
                 .map_err(|e| KeyStoreError::Database(e.to_string()))?;
         }
 
+        // Ensure oauth_account column exists (multi-account support).
+        let has_oauth_account: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('virtual_keys') WHERE name = 'oauth_account'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?
+            > 0;
+        if !has_oauth_account {
+            sqlx::query("ALTER TABLE virtual_keys ADD COLUMN oauth_account TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        }
+
         // Usage history table for analytics
         sqlx::query(
             r#"
@@ -282,7 +297,7 @@ impl KeyStore {
     /// Refresh the in-memory cache from the database.
     pub async fn refresh_cache(&self) -> Result<(), KeyStoreError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user FROM virtual_keys WHERE disabled = 0",
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account FROM virtual_keys WHERE disabled = 0",
         )
         .fetch_all(&self.pool)
         .await
@@ -327,6 +342,7 @@ impl KeyStore {
             usage: KeyUsage::default(),
             metadata: request.metadata.clone(),
             oauth_user: request.oauth_user.clone(),
+            oauth_account: request.oauth_account.clone(),
         };
 
         // Insert into database
@@ -339,8 +355,8 @@ impl KeyStore {
 
         sqlx::query(
             r#"
-            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&key_hash)
@@ -354,6 +370,7 @@ impl KeyStore {
         .bind(&usage_json)
         .bind(&metadata_json)
         .bind(&virtual_key.oauth_user)
+        .bind(&virtual_key.oauth_account)
         .execute(&self.pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
@@ -371,6 +388,7 @@ impl KeyStore {
             expires_at: request.expires_at,
             permissions: request.permissions,
             oauth_user: request.oauth_user,
+            oauth_account: request.oauth_account,
         })
     }
 
@@ -437,7 +455,7 @@ impl KeyStore {
     /// List all keys (returns masked info, not actual keys).
     pub async fn list_keys(&self) -> Result<Vec<KeyInfo>, KeyStoreError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user FROM virtual_keys ORDER BY created_at DESC",
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account FROM virtual_keys ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await
@@ -671,6 +689,8 @@ struct KeyRow {
     usage: String,
     metadata: Option<String>,
     oauth_user: Option<String>,
+    #[sqlx(default)]
+    oauth_account: Option<String>,
 }
 
 impl KeyRow {
@@ -721,6 +741,7 @@ impl KeyRow {
             usage,
             metadata,
             oauth_user: self.oauth_user.clone(),
+            oauth_account: self.oauth_account.clone(),
         })
     }
 }
@@ -801,7 +822,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
-            oauth_user: None,
+            oauth_user: None, ..Default::default()
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -823,7 +844,7 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
-                oauth_user: None,
+                oauth_user: None, ..Default::default()
             };
             store.create_key(request).await.unwrap();
         }
@@ -841,7 +862,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
-            oauth_user: None,
+            oauth_user: None, ..Default::default()
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -866,7 +887,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
-            oauth_user: None,
+            oauth_user: None, ..Default::default()
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -894,7 +915,7 @@ mod tests {
             expires_at: None,
             permissions: KeyPermissions::default(),
             metadata: serde_json::Value::Null,
-            oauth_user: None,
+            oauth_user: None, ..Default::default()
         };
 
         let response = store.create_key(request).await.unwrap();
@@ -927,7 +948,7 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
-                oauth_user: None,
+                oauth_user: None, ..Default::default()
             };
 
             let response = store.create_key(request).await.unwrap();
