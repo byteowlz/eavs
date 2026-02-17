@@ -330,7 +330,8 @@ pub struct ProviderConfig {
     pub test_model: String,
     /// Curated model shortlist for this provider.
     /// Used by integrations (e.g., octo) to generate models.json for Pi.
-    /// If empty, a built-in default list is used based on provider type.
+    /// If empty, the full model catalog from models.dev is used.
+    /// If non-empty, ONLY these models are exposed (locks down the choice).
     #[serde(default)]
     pub models: Vec<ModelShortlistEntry>,
 }

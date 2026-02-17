@@ -127,6 +127,25 @@ pub enum Commands {
         #[command(subcommand)]
         action: SetupCommands,
     },
+
+    /// Browse the model catalog (from models.dev)
+    Models {
+        #[command(subcommand)]
+        action: ModelCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ModelCommands {
+    /// List models for a provider
+    List {
+        /// Provider name (e.g., openai, anthropic, google)
+        provider: String,
+    },
+    /// Update the cached model catalog from models.dev
+    Update,
+    /// Show catalog stats
+    Stats,
 }
 
 #[derive(Subcommand)]

@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, StateConfig};
 use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
+use crate::model_catalog::ModelCatalog;
 use crate::oauth::{OAuthBackend, OAuthPendingAuth, OAuthStore};
 use crate::upstream::{ReqwestUpstream, Upstream};
 use dashmap::DashMap;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub pricing: SharedPricingTable,
     /// Cost calculator
     pub cost_calculator: Arc<OnceCell<CostCalculator>>,
+    /// Model catalog from models.dev
+    pub model_catalog: Arc<OnceCell<ModelCatalog>>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -415,7 +418,27 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::new()),
             pricing: pricing.clone(),
             cost_calculator: Arc::new(OnceCell::new()),
+            model_catalog: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Initialize the model catalog (fetches from models.dev or uses cache).
+    pub async fn init_model_catalog(&self) {
+        match ModelCatalog::load().await {
+            Ok(catalog) => {
+                let total = catalog.total_models();
+                let _ = self.model_catalog.set(catalog);
+                tracing::info!("Model catalog loaded ({} models)", total);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load model catalog: {}", e);
+            }
+        }
+    }
+
+    /// Get the model catalog (returns None if not yet loaded).
+    pub fn catalog(&self) -> Option<&ModelCatalog> {
+        self.model_catalog.get()
     }
 
     /// Initialize the key store (call during startup if keys are enabled).

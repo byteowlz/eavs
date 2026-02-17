@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod keys;
 mod logging;
+mod model_catalog;
 mod oauth;
 mod plugins;
 mod policy;
@@ -27,8 +28,8 @@ use crate::cli::{
     run_secret_get, run_secret_list, run_secret_set, run_service_logs, run_service_restart,
     run_service_start, run_service_status, run_service_stop, run_test_bench, run_test_chat,
     run_test_health, run_test_image, run_test_oauth, run_test_rate_limit, run_test_routing,
-    run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ProviderCommands,
-    SecretCommands, ServiceCommands, SetupCommands, TestCommands,
+    run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ModelCommands,
+    ProviderCommands, SecretCommands, ServiceCommands, SetupCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -104,6 +105,12 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Models { action } => {
+            if let Err(e) = run_models_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -113,6 +120,108 @@ fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
         SecretCommands::Get { account, reveal } => run_secret_get(&account, reveal),
         SecretCommands::Delete { account, yes } => run_secret_delete(&account, yes),
         SecretCommands::List { config, check } => run_secret_list(config.as_deref(), check),
+    }
+}
+
+async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> {
+    use crate::model_catalog::ModelCatalog;
+
+    match action {
+        ModelCommands::List { provider } => {
+            let catalog = ModelCatalog::load()
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+
+            let models = catalog.catalog_models(&provider);
+            if models.is_empty() {
+                eprintln!("No models found for provider '{}'", provider);
+                eprintln!(
+                    "Available providers: {}",
+                    catalog.provider_ids().join(", ")
+                );
+                return Ok(());
+            }
+
+            println!(
+                "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8} {:>8}",
+                "ID", "NAME", "REASON", "CONTEXT", "OUTPUT", "$/M IN", "$/M OUT"
+            );
+            println!("{}", "-".repeat(115));
+            for m in &models {
+                println!(
+                    "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8.2} {:>8.2}",
+                    m.id,
+                    truncate(&m.name, 29),
+                    if m.reasoning { "yes" } else { "" },
+                    format_num(m.limit.context),
+                    format_num(m.limit.output),
+                    m.cost.input,
+                    m.cost.output,
+                );
+            }
+            println!("\n{} models", models.len());
+        }
+        ModelCommands::Update => {
+            println!("Fetching model catalog from models.dev...");
+            let catalog = ModelCatalog::refresh()
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to refresh: {}", e)))?;
+            println!(
+                "Cached {} models across {} providers",
+                catalog.total_models(),
+                catalog.provider_ids().len()
+            );
+        }
+        ModelCommands::Stats => {
+            let catalog = ModelCatalog::load()
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+
+            if catalog.is_empty() {
+                println!("Catalog is empty. Run `eavs models update` to fetch.");
+                return Ok(());
+            }
+
+            println!("Model catalog (models.dev):");
+            println!("  Total models: {}", catalog.total_models());
+            println!("  Providers: {}", catalog.provider_ids().len());
+            println!();
+
+            let mut providers: Vec<(&str, usize)> = catalog
+                .provider_ids()
+                .iter()
+                .map(|&id| (id, catalog.catalog_models(id).len()))
+                .collect();
+            providers.sort_by(|a, b| b.1.cmp(&a.1));
+
+            println!("{:<30} {:>8}", "PROVIDER", "MODELS");
+            println!("{}", "-".repeat(40));
+            for (id, count) in &providers {
+                println!("{:<30} {:>8}", id, count);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+fn format_num(n: u64) -> String {
+    if n == 0 {
+        return "-".to_string();
+    }
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
     }
 }
 
@@ -187,6 +296,9 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             tracing::error!("Failed to initialize OAuth store: {}", e);
         }
     }
+
+    // Load model catalog from models.dev (async, non-blocking)
+    state.init_model_catalog().await;
 
     // Start logging task
     let log_rx = state.analysis_tx.subscribe();
