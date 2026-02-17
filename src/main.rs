@@ -18,6 +18,7 @@ mod state;
 mod transform;
 mod transform_plugins;
 mod types;
+mod upstream_quota;
 mod upstream;
 
 #[cfg(all(test, feature = "integration"))]
@@ -111,7 +112,89 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Quotas { json } => {
+            if let Err(e) = run_quotas_command(json).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+async fn run_quotas_command(json_output: bool) -> Result<(), cli::CliError> {
+    let config = cli::CliConfig::default();
+    let url = format!("{}/admin/quotas", config.server_url);
+
+    // Try env var first, then read from config file
+    let master_key = std::env::var("EAVS_MASTER_KEY").ok().or_else(|| {
+        let app_config = crate::config::AppConfig::load().ok()?;
+        app_config.keys.resolved_master_key()
+    }).ok_or_else(|| {
+        cli::CliError::Other(
+            "EAVS_MASTER_KEY not set and keys.master_key not found in config".to_string(),
+        )
+    })?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", master_key))
+        .send()
+        .await
+        .map_err(|e| cli::CliError::Other(format!("Failed to fetch quotas: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(cli::CliError::Other(format!(
+            "Server returned {}: {}",
+            status, body
+        )));
+    }
+
+    let quotas: Vec<upstream_quota::QuotaSnapshot> = resp
+        .json()
+        .await
+        .map_err(|e| cli::CliError::Other(format!("Failed to parse response: {}", e)))?;
+
+    if quotas.is_empty() {
+        eprintln!("No upstream quotas observed yet.");
+        return Ok(());
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&quotas).unwrap_or_else(|_| "[]".to_string())
+        );
+    } else {
+        println!(
+            "{:<20} {:<12} {:>10} {:>10} {:>12} {:>12} {:>8}",
+            "PROVIDER", "ACCOUNT", "REQ LEFT", "REQ LIMIT", "TOK LEFT", "TOK LIMIT", "AGE(s)"
+        );
+        println!("{}", "-".repeat(90));
+        for q in &quotas {
+            println!(
+                "{:<20} {:<12} {:>10} {:>10} {:>12} {:>12} {:>8.0}",
+                q.provider,
+                q.account,
+                q.requests_remaining
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                q.requests_limit
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                q.tokens_remaining
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                q.tokens_limit
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                q.age_secs,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
@@ -410,6 +493,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/keys/:key_hash/usage", get(api::key_usage_handler))
         // Admin API - Pricing
         .route("/admin/pricing/update", post(api::update_pricing_handler))
+        .route("/admin/quotas", get(api::upstream_quotas_handler))
         // OAuth API
         .route("/auth/login/:provider", post(api::oauth_login_handler))
         .route("/auth/callback", post(api::oauth_callback_handler))

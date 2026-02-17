@@ -961,6 +961,30 @@ async fn proxy_handler_inner(
         body: stream,
     } = upstream_res;
 
+    // Track upstream rate limit quotas from response headers
+    if let Some(quota) = crate::upstream_quota::parse_quota_headers(&headers) {
+        let account = validated_key
+            .as_ref()
+            .and_then(|k| k.oauth_account.as_deref())
+            .unwrap_or("default")
+            .to_string();
+        let key = crate::upstream_quota::QuotaKey {
+            provider: provider_name.clone(),
+            account,
+        };
+        tracing::debug!(
+            "Upstream quota for {}/{}: req {}/{}, tok {}/{}",
+            key.provider,
+            key.account,
+            quota.requests_remaining.unwrap_or(0),
+            quota.requests_limit.unwrap_or(0),
+            quota.tokens_remaining.unwrap_or(0),
+            quota.tokens_limit.unwrap_or(0),
+        );
+        let tracker = state.quota_tracker.clone();
+        tokio::spawn(async move { tracker.update(key, quota).await });
+    }
+
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 

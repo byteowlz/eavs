@@ -133,6 +133,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: ModelCommands,
     },
+
+    /// Show upstream rate limit quotas (requires running server)
+    Quotas {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
