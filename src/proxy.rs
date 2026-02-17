@@ -1984,6 +1984,382 @@ async fn ws_proxy_handler_inner(
     .into_response()
 }
 
+/// Handler for provider-prefixed Codex WebSocket routes: /{provider}/v1/codex/responses
+pub async fn provider_codex_ws_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    codex_ws_handler_inner(state, ws, headers, uri, Some(provider)).await
+}
+
+/// Handler for the default Codex WebSocket route: /v1/codex/responses
+pub async fn codex_ws_handler(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    codex_ws_handler_inner(state, ws, headers, uri, None).await
+}
+
+/// Inner implementation for Codex Responses WebSocket proxy.
+///
+/// Protocol: client sends `{"type": "response.create", ...body}`, server streams
+/// back response events as JSON messages. Eavs intercepts the initial message to
+/// apply policy rules (e.g., set_field for `store: true`), then relays bidirectionally.
+async fn codex_ws_handler_inner(
+    state: AppState,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    uri: http::Uri,
+    path_provider: Option<String>,
+) -> Response {
+    // --- Auth & provider resolution (shared with realtime WS handler) ---
+
+    let header_provider = headers
+        .get("X-Provider")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    let provider_name = path_provider
+        .or(header_provider)
+        .unwrap_or_else(|| "openai-codex".to_string());
+
+    let require_key = state.config.keys.enabled && state.config.keys.require_key;
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    let mut validated_key: Option<ValidatedKey> = None;
+
+    if let Some(ref key) = auth_header {
+        if is_virtual_key(key) {
+            if let Some(validator) = state.get_key_validator() {
+                let estimated_tokens = 100;
+                match validator
+                    .validate(key, "codex-ws", &provider_name, Some(estimated_tokens))
+                    .await
+                {
+                    Ok(validated) => {
+                        validated_key = Some(validated);
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::from_u16(e.status_code())
+                                .unwrap_or(StatusCode::UNAUTHORIZED),
+                            Json(
+                                ProxyError::new(e.to_string(), "authentication_error")
+                                    .with_code(e.error_code()),
+                            ),
+                        )
+                            .into_response();
+                    }
+                }
+            } else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ProxyError::new(
+                        "Virtual API keys are not available",
+                        "service_unavailable",
+                    )),
+                )
+                    .into_response();
+            }
+        } else if require_key {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(
+                    ProxyError::new(
+                        "A valid virtual API key is required",
+                        "authentication_error",
+                    )
+                    .with_code("invalid_api_key"),
+                ),
+            )
+                .into_response();
+        }
+    } else if require_key {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(
+                ProxyError::new(
+                    "Authorization header required",
+                    "authentication_error",
+                )
+                .with_code("missing_api_key"),
+            ),
+        )
+            .into_response();
+    }
+
+    let provider_lookup = match state.config.resolve_provider(&provider_name) {
+        Some(v) => v,
+        None => {
+            let available = state.config.provider_names();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    format!(
+                        "Unknown provider '{}'. Available: {:?}",
+                        provider_name, available
+                    ),
+                    "invalid_provider",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let provider_config = provider_lookup.config.clone();
+    let provider_type = provider_config.provider_type();
+    let mut api_key = provider_config.resolved_api_key();
+
+    // Resolve OAuth token if key is bound to an oauth_user
+    if let Some(ref validated) = validated_key {
+        if let Some(oauth_user) = validated.oauth_user.as_deref() {
+            api_key = match resolve_oauth_access_token(&state, &provider_name, oauth_user).await {
+                Ok(token) => token,
+                Err(msg) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
+                    )
+                        .into_response();
+                }
+            };
+        }
+    }
+
+    // Build upstream WebSocket URL
+    // For OpenAI Codex OAuth, override base to chatgpt.com
+    let base = if is_openai_codex_oauth_token(&api_key) {
+        "https://chatgpt.com/backend-api".to_string()
+    } else {
+        provider_config.resolved_base_url()
+    };
+
+    let upstream_url = match build_ws_upstream_url(&base, "/codex/responses", uri.query()) {
+        Ok(u) => u,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(e, "invalid_request")),
+            )
+                .into_response();
+        }
+    };
+
+    // Clone what we need for the async upgrade closure
+    let policy = state.config.policy.clone();
+    let provider_name_for_policy = provider_name.clone();
+    let provider_name_for_usage = provider_name.clone();
+    let provider_headers = provider_config.headers.clone();
+    let validated_key_hash = validated_key.as_ref().map(|k| k.key_hash.clone());
+    // We'll reference state inside the closure directly
+
+    ws.on_upgrade(move |mut client_socket| async move {
+        // Connect to upstream WebSocket
+        let mut request = match upstream_url.into_client_request() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to build upstream WS request: {}", e);
+                let _ = client_socket.send(AxumWsMessage::Close(None)).await;
+                return;
+            }
+        };
+
+        // Apply auth + extra headers
+        apply_ws_auth_headers(&mut request, provider_type, &api_key);
+
+        // Add WebSocket-specific beta header for Codex responses
+        request.headers_mut().insert(
+            http::header::HeaderName::from_static("openai-beta"),
+            http::HeaderValue::from_static("responses_websockets=2026-02-06"),
+        );
+
+        // Custom provider headers
+        for (key, value) in &provider_headers {
+            let resolved_value = if let Some(var_name) = value.strip_prefix("env:") {
+                std::env::var(var_name).unwrap_or_default()
+            } else {
+                value.clone()
+            };
+            if let (Ok(name), Ok(val)) = (
+                http::header::HeaderName::from_bytes(key.as_bytes()),
+                http::header::HeaderValue::from_str(&resolved_value),
+            ) {
+                request.headers_mut().insert(name, val);
+            }
+        }
+
+        let (upstream_socket, _) = match tokio_tungstenite::connect_async(request).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!("Failed to connect to upstream Codex WS: {}", e);
+                let _ = client_socket.send(AxumWsMessage::Close(None)).await;
+                return;
+            }
+        };
+
+        let (mut client_sender, mut client_receiver) = client_socket.split();
+        let (mut upstream_sender, mut upstream_receiver) = upstream_socket.split();
+
+        // Single writer task for upstream
+        let (upstream_tx, mut upstream_rx) = mpsc::unbounded_channel::<TungsteniteMessage>();
+        let upstream_write = tokio::spawn(async move {
+            while let Some(msg) = upstream_rx.recv().await {
+                if upstream_sender.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Forward client -> upstream, intercepting response.create for policy application
+        let upstream_tx_client = upstream_tx.clone();
+        let client_to_upstream = tokio::spawn(async move {
+            while let Some(Ok(msg)) = client_receiver.next().await {
+                let processed = match &msg {
+                    AxumWsMessage::Text(text) => {
+                        // Try to parse as JSON and apply policies to response.create messages
+                        match serde_json::from_str::<Value>(text.as_str()) {
+                            Ok(mut json) => {
+                                let msg_type = json
+                                    .get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+
+                                if msg_type == "response.create" {
+                                    // The body fields are at the top level of the message
+                                    // (not nested under "body"), e.g. {"type":"response.create","model":"...","store":false,...}
+                                    if let Err(e) = policy.apply(
+                                        &provider_name_for_policy,
+                                        "/codex/responses",
+                                        &mut json,
+                                    ) {
+                                        tracing::warn!(
+                                            "Policy violation on Codex WS: {}",
+                                            e.message
+                                        );
+                                        // Skip sending this message
+                                        continue;
+                                    }
+                                    Some(TungsteniteMessage::Text(json.to_string()))
+                                } else {
+                                    axum_to_tungstenite(msg)
+                                }
+                            }
+                            Err(_) => axum_to_tungstenite(msg),
+                        }
+                    }
+                    _ => axum_to_tungstenite(msg),
+                };
+
+                let Some(up_msg) = processed else {
+                    continue;
+                };
+                let is_close = matches!(up_msg, TungsteniteMessage::Close(_));
+                let _ = upstream_tx_client.send(up_msg);
+                if is_close {
+                    break;
+                }
+            }
+        });
+
+        // Forward upstream -> client, tracking usage from response.completed events
+        let key_hash = validated_key_hash.clone();
+        let key_validator = state.get_key_validator().cloned();
+        let cost_calc = state.get_cost_calculator().cloned();
+        let upstream_to_client = tokio::spawn(async move {
+            while let Some(Ok(msg)) = upstream_receiver.next().await {
+                // Track usage from response.completed events
+                if let TungsteniteMessage::Text(ref text) = msg {
+                    if let Ok(json) = serde_json::from_str::<Value>(text.as_str()) {
+                        let event_type = json
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+
+                        if event_type == "response.completed" || event_type == "response.done" {
+                            if let (Some(ref kh), Some(ref validator)) =
+                                (&key_hash, &key_validator)
+                            {
+                                // Extract usage from response.completed.response.usage
+                                let usage = json
+                                    .pointer("/response/usage")
+                                    .or_else(|| json.get("usage"));
+                                let model = json
+                                    .pointer("/response/model")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("codex-ws");
+                                if let Some(usage) = usage {
+                                    let input_tokens = usage
+                                        .get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                    let output_tokens = usage
+                                        .get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                    let cached_tokens = usage
+                                        .get("input_tokens_details")
+                                        .and_then(|d| d.get("cached_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+
+                                    let cost_usd = if let Some(ref cc) = cost_calc {
+                                        cc.calculate_actual_cost(
+                                            model,
+                                            input_tokens,
+                                            output_tokens,
+                                            cached_tokens,
+                                        )
+                                        .await
+                                    } else {
+                                        0.0
+                                    };
+
+                                    validator
+                                        .record_usage(
+                                            kh,
+                                            input_tokens,
+                                            output_tokens,
+                                            cached_tokens,
+                                            cost_usd,
+                                            model,
+                                            &provider_name_for_usage,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let Some(client_msg) = tungstenite_to_axum(msg) else {
+                    continue;
+                };
+                let is_close = matches!(client_msg, AxumWsMessage::Close(_));
+                if client_sender.send(client_msg).await.is_err() {
+                    break;
+                }
+                if is_close {
+                    break;
+                }
+            }
+        });
+
+        // Wait for all tasks (no injection task for Codex - it's request/response)
+        let _ = tokio::join!(upstream_write, client_to_upstream, upstream_to_client);
+        drop(upstream_tx); // ensure writer task exits
+    })
+    .into_response()
+}
+
 struct WsSessionGuard {
     conversation_id: String,
     token: crate::state::WsSessionToken,
