@@ -117,6 +117,80 @@ pub async fn providers_handler(State(state): State<AppState>) -> Json<Vec<String
     Json(providers)
 }
 
+/// Detailed provider info for external integrations (e.g., generating models.json for Pi).
+#[derive(Serialize)]
+pub struct ProviderDetail {
+    /// Provider name as configured in eavs (e.g., "openai", "anthropic")
+    pub name: String,
+    /// Provider type (e.g., "openai", "anthropic", "openai-codex")
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Pi-compatible API type for models.json
+    pub pi_api: Option<&'static str>,
+    /// Whether this provider uses OAuth
+    pub oauth: bool,
+    /// Whether the provider has a resolved API key (not the key itself)
+    pub has_api_key: bool,
+}
+
+/// Get detailed provider information.
+///
+/// Returns provider types and Pi API mappings for models.json generation.
+pub async fn providers_detail_handler(
+    State(state): State<AppState>,
+) -> Json<Vec<ProviderDetail>> {
+    use crate::provider::ProviderType;
+
+    let details: Vec<ProviderDetail> = state
+        .config
+        .providers
+        .iter()
+        .map(|(name, config)| {
+            let provider_type = ProviderType::from_str(&config.type_);
+            let has_api_key = !config.api_key.is_empty();
+
+            ProviderDetail {
+                name: name.clone(),
+                type_: config.type_.clone(),
+                pi_api: pi_api_for_provider(&provider_type),
+                oauth: matches!(
+                    provider_type,
+                    ProviderType::OpenAICodex
+                        | ProviderType::GithubCopilot
+                        | ProviderType::GoogleGeminiCli
+                ),
+                has_api_key,
+            }
+        })
+        .collect();
+
+    Json(details)
+}
+
+/// Map eavs provider type to Pi's API type string for models.json.
+fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Option<&'static str> {
+    use crate::provider::ProviderType;
+    match provider_type {
+        ProviderType::OpenAI => Some("openai-responses"),
+        ProviderType::OpenAIResponses => Some("openai-responses"),
+        ProviderType::OpenAICodex => Some("openai-codex-responses"),
+        ProviderType::Anthropic => Some("anthropic-messages"),
+        ProviderType::Google | ProviderType::GoogleVertex | ProviderType::GoogleGeminiCli => {
+            Some("google-generative-ai")
+        }
+        ProviderType::Azure => Some("openai-responses"),
+        ProviderType::Mistral
+        | ProviderType::Groq
+        | ProviderType::Cerebras
+        | ProviderType::XAI
+        | ProviderType::OpenRouter
+        | ProviderType::OpenAICompatible => Some("openai-completions"),
+        ProviderType::GithubCopilot => Some("openai-responses"),
+        ProviderType::Bedrock => Some("anthropic-messages"),
+        ProviderType::Mock => None,
+    }
+}
+
 /// Response for conversation stats.
 #[derive(Serialize)]
 pub struct ConversationStatsResponse {

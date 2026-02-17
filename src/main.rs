@@ -204,6 +204,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/health", get(api::health_handler))
         // Control API - Providers
         .route("/providers", get(api::providers_handler))
+        .route("/providers/detail", get(api::providers_detail_handler))
         // Control API - Conversations
         .route("/conversations", get(api::conversations_handler))
         .route("/conversations/stats", get(api::stats_handler))
