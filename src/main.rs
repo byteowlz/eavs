@@ -127,7 +127,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
     use crate::model_catalog::ModelCatalog;
 
     match action {
-        ModelCommands::List { provider } => {
+        ModelCommands::List { provider, json } => {
             let catalog = ModelCatalog::load()
                 .await
                 .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
@@ -142,24 +142,92 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 return Ok(());
             }
 
-            println!(
-                "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8} {:>8}",
-                "ID", "NAME", "REASON", "CONTEXT", "OUTPUT", "$/M IN", "$/M OUT"
-            );
-            println!("{}", "-".repeat(115));
-            for m in &models {
+            if json {
                 println!(
-                    "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8.2} {:>8.2}",
-                    m.id,
-                    truncate(&m.name, 29),
-                    if m.reasoning { "yes" } else { "" },
-                    format_num(m.limit.context),
-                    format_num(m.limit.output),
-                    m.cost.input,
-                    m.cost.output,
+                    "{}",
+                    serde_json::to_string_pretty(&models)
+                        .unwrap_or_else(|_| "[]".to_string())
                 );
+            } else {
+                println!(
+                    "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8} {:>8}",
+                    "ID", "NAME", "REASON", "CONTEXT", "OUTPUT", "$/M IN", "$/M OUT"
+                );
+                println!("{}", "-".repeat(115));
+                for m in &models {
+                    println!(
+                        "{:<40} {:<30} {:>6} {:>10} {:>10} {:>8.2} {:>8.2}",
+                        m.id,
+                        truncate(&m.name, 29),
+                        if m.reasoning { "yes" } else { "" },
+                        format_num(m.limit.context),
+                        format_num(m.limit.output),
+                        m.cost.input,
+                        m.cost.output,
+                    );
+                }
+                println!("\n{} models", models.len());
             }
-            println!("\n{} models", models.len());
+        }
+        ModelCommands::Search { query, json } => {
+            let catalog = ModelCatalog::load()
+                .await
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+
+            let query_lower = query.to_lowercase();
+            let mut results: Vec<(String, crate::model_catalog::CatalogModel)> = Vec::new();
+
+            for provider_id in catalog.provider_ids() {
+                for model in catalog.catalog_models(provider_id) {
+                    if model.id.to_lowercase().contains(&query_lower)
+                        || model.name.to_lowercase().contains(&query_lower)
+                    {
+                        results.push((provider_id.to_string(), model.clone()));
+                    }
+                }
+            }
+
+            if results.is_empty() {
+                eprintln!("No models matching '{}'", query);
+                return Ok(());
+            }
+
+            results.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+
+            if json {
+                let json_results: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(p, m)| {
+                        let mut v = serde_json::to_value(m).unwrap_or_default();
+                        v.as_object_mut()
+                            .map(|o| o.insert("provider".to_string(), serde_json::json!(p)));
+                        v
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json_results)
+                        .unwrap_or_else(|_| "[]".to_string())
+                );
+            } else {
+                println!(
+                    "{:<20} {:<40} {:<30} {:>6} {:>8} {:>8}",
+                    "PROVIDER", "ID", "NAME", "REASON", "$/M IN", "$/M OUT"
+                );
+                println!("{}", "-".repeat(115));
+                for (provider, m) in &results {
+                    println!(
+                        "{:<20} {:<40} {:<30} {:>6} {:>8.2} {:>8.2}",
+                        provider,
+                        m.id,
+                        truncate(&m.name, 29),
+                        if m.reasoning { "yes" } else { "" },
+                        m.cost.input,
+                        m.cost.output,
+                    );
+                }
+                println!("\n{} matches", results.len());
+            }
         }
         ModelCommands::Update => {
             println!("Fetching model catalog from models.dev...");
