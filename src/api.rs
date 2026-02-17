@@ -716,6 +716,29 @@ pub async fn key_stats_handler(
     }))
 }
 
+/// Get upstream rate limit quotas.
+///
+/// GET /admin/quotas
+/// Authorization: Bearer <master_key>
+///
+/// Returns the latest observed upstream rate limit quotas for all provider/account
+/// pairs that have been seen recently.
+pub async fn upstream_quotas_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::upstream_quota::QuotaSnapshot>>, (StatusCode, Json<KeyApiError>)> {
+    check_keys_enabled(&state)?;
+    check_master_key(&headers, &state)?;
+
+    let quotas = state.quota_tracker.all().await;
+    let snapshots: Vec<crate::upstream_quota::QuotaSnapshot> = quotas
+        .iter()
+        .map(|(key, quota)| crate::upstream_quota::QuotaSnapshot::from_quota(key, quota))
+        .collect();
+
+    Ok(Json(snapshots))
+}
+
 /// Update pricing from LiteLLM.
 ///
 /// POST /admin/pricing/update

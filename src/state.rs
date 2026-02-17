@@ -3,6 +3,7 @@ use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPri
 use crate::model_catalog::ModelCatalog;
 use crate::oauth::{OAuthBackend, OAuthPendingAuth, OAuthStore};
 use crate::upstream::{ReqwestUpstream, Upstream};
+use crate::upstream_quota::QuotaTracker;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +39,8 @@ pub struct AppState {
     pub cost_calculator: Arc<OnceCell<CostCalculator>>,
     /// Model catalog from models.dev
     pub model_catalog: Arc<OnceCell<ModelCatalog>>,
+    /// Upstream rate limit quota tracker
+    pub quota_tracker: QuotaTracker,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -419,6 +422,7 @@ impl AppState {
             pricing: pricing.clone(),
             cost_calculator: Arc::new(OnceCell::new()),
             model_catalog: Arc::new(OnceCell::new()),
+            quota_tracker: QuotaTracker::new(),
         }
     }
 

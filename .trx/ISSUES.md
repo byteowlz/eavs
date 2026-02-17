@@ -5,15 +5,6 @@
 ### [eavs-08jz] Track upstream rate limit quotas from response headers (P1, feature)
 -
 
-### [eavs-5cym.1] Recognize gpt-5.3-codex-spark model in provider detection (P1, task)
-Update ProviderType detection in provider.rs to recognize gpt-5.3-codex-spark and route it to ProviderType::OpenAICodex.
-
-## Changes needed
-
-### src/provider.rs - detect_provider_from_model()
-...
-
-
 ### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
 Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
 
@@ -26,15 +17,6 @@ When a client sends a request to the Codex responses endpoint:
 ...
 
 
-### [eavs-5cym.2] Add WebSocket proxy handler for Codex responses endpoint (P2, feature)
-Add WebSocket upgrade handling for the Codex responses endpoint so eavs can proxy WebSocket connections (key management, rate limiting, logging) when clients use the new WebSocket transport.
-
-## Context
-
-pi-mono v0.52.12 added WebSocket transport for openai-codex-responses. When a client uses transport=websocket, it opens a WebSocket to wss://chatgpt.com/backend-api/codex/responses instead of an HTTP POST. eavs currently only proxies WebSocket for /v1/realtime (OpenAI Realtime API).
-...
-
-
 ### [eavs-6yxf] Add GitHub CLI (gh) credential proxy for secure agent access to GitHub (P2, feature)
 Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub tokens.
 
@@ -44,14 +26,12 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 ...
 
 
-### [eavs-yrhd] Add proxy allow/deny lists (P2, feature)
-Support allowlist/denylist controls for EAVS proxy routing (configurable hosts/domains/IPs) so Octo sandbox proxy can enforce outbound network policies.
-
-### [eavs-rca1] Add domain allow/deny lists to EAVS proxy (P2, feature)
-Extend EAVS config and proxy to support domain allowlist/denylist for network proxy mode. Include config schema updates, enforcement logic, and tests.
-
 ## Closed
 
+- [eavs-yrhd] Add proxy allow/deny lists (closed 2026-02-17)
+- [eavs-rca1] Add domain allow/deny lists to EAVS proxy (closed 2026-02-17)
+- [eavs-5cym.2] Add WebSocket proxy handler for Codex responses endpoint (closed 2026-02-17)
+- [eavs-5cym.1] Recognize gpt-5.3-codex-spark model in provider detection (closed 2026-02-17)
 - [eavs-y1sb] Integrate models.dev as external model catalog (closed 2026-02-17)
 - [eavs-5cym] GPT-5.3-Codex-Spark support and WebSocket transport for Codex Responses (closed 2026-02-17)
 - [eavs-7dkk] Multi-account support for same provider (OAuth subscription pooling) (closed 2026-02-17)
