@@ -101,6 +101,9 @@ pub struct AppConfig {
     /// Request/response transform plugins
     #[serde(default)]
     pub transform: TransformConfig,
+    /// Network access control (domain allow/deny lists)
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 impl AppConfig {
@@ -117,8 +120,40 @@ impl AppConfig {
             keys: KeysConfig::default(),
             capture: CaptureConfig::default(),
             transform: TransformConfig::default(),
+            network: NetworkConfig::default(),
         }
     }
+}
+
+/// Network access control configuration.
+///
+/// Controls which upstream domains/IPs the proxy is allowed to connect to.
+/// Precedence: deny list is checked first, then allow list.
+/// - If deny list is non-empty and the domain matches: BLOCKED
+/// - If allow list is non-empty and the domain does NOT match: BLOCKED
+/// - Otherwise: ALLOWED
+///
+/// Empty lists = no restriction for that list.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct NetworkConfig {
+    /// Allowed upstream domains (glob patterns). Empty = allow all.
+    /// Examples: ["api.openai.com", "*.anthropic.com", "api.groq.com"]
+    #[serde(default)]
+    pub allow_domains: Vec<String>,
+
+    /// Denied upstream domains (glob patterns). Checked before allow list.
+    /// Examples: ["*.internal.corp", "localhost", "127.*"]
+    #[serde(default)]
+    pub deny_domains: Vec<String>,
+
+    /// Block requests to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x).
+    /// Default: true (prevents SSRF attacks).
+    #[serde(default = "default_true")]
+    pub block_private_ips: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -767,7 +802,11 @@ pub struct KeysConfig {
 }
 
 fn default_oauth_backend() -> String {
-    "keychain".to_string()
+    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+        "keychain".to_string()
+    } else {
+        "sqlite".to_string()
+    }
 }
 
 impl Default for KeysConfig {

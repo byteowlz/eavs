@@ -912,6 +912,16 @@ async fn proxy_handler_inner(
         })?;
     }
 
+    // Network access control check
+    if let Err(reason) = crate::network_acl::check_url_allowed(&state.config.network, &url) {
+        tracing::warn!("Network ACL blocked request to {}: {}", url, reason);
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(reason, "network_policy").with_code("network_blocked")),
+        )
+            .into_response());
+    }
+
     let upstream_req = UpstreamRequest {
         method: parts.method.clone(),
         url: url.clone(),
@@ -1899,6 +1909,18 @@ async fn ws_proxy_handler_inner(
         }
     };
 
+    // Network ACL check for WebSocket
+    if let Err(reason) =
+        crate::network_acl::check_url_allowed(&state.config.network, upstream_url.as_str())
+    {
+        tracing::warn!("Network ACL blocked WS to {}: {}", upstream_url, reason);
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(reason, "network_policy").with_code("network_blocked")),
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(move |mut client_socket| async move {
         let (session_token, mut injection_rx) = state.ws_sessions.register(&conversation_id);
         let _session_guard = WsSessionGuard {
@@ -2184,6 +2206,22 @@ async fn codex_ws_handler_inner(
                 .into_response();
         }
     };
+
+    // Network ACL check for Codex WebSocket
+    if let Err(reason) =
+        crate::network_acl::check_url_allowed(&state.config.network, upstream_url.as_str())
+    {
+        tracing::warn!(
+            "Network ACL blocked Codex WS to {}: {}",
+            upstream_url,
+            reason
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(reason, "network_policy").with_code("network_blocked")),
+        )
+            .into_response();
+    }
 
     // Clone what we need for the async upgrade closure
     let policy = state.config.policy.clone();
@@ -3910,6 +3948,7 @@ mod tests {
             keys: Default::default(),
             capture: Default::default(),
             transform: Default::default(),
+            network: Default::default(),
         }
     }
 

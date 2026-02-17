@@ -574,6 +574,7 @@ mod tests {
             state: StateConfig::default(),
             capture: Default::default(),
             transform: Default::default(),
+            network: Default::default(),
         }
     }
 

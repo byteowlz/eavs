@@ -196,6 +196,7 @@ mod tests {
             keys: Default::default(),
             capture: Default::default(),
             transform: TransformConfig::default(),
+            network: Default::default(),
         }
     }
 

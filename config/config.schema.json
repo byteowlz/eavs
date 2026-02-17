@@ -690,5 +690,27 @@
       ]
     }
   },
+  "network": {
+    "type": "object",
+    "description": "Network access control for upstream connections",
+    "properties": {
+      "allow_domains": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Allowed upstream domains (glob patterns). Empty = allow all. Examples: ['api.openai.com', '*.anthropic.com']"
+      },
+      "deny_domains": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Denied upstream domains (glob patterns). Checked before allow list. Examples: ['*.internal.corp', 'evil.com']"
+      },
+      "block_private_ips": {
+        "type": "boolean",
+        "default": true,
+        "description": "Block requests to private/internal IP ranges (127.x, 10.x, 172.16-31.x, 192.168.x, localhost). Default: true"
+      }
+    },
+    "additionalProperties": false
+  },
   "additionalProperties": false
 }
