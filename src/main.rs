@@ -361,6 +361,13 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             "/:provider/v1/realtime",
             get(proxy::provider_ws_proxy_handler),
         )
+        // Codex Responses WebSocket proxy - default route
+        .route("/v1/codex/responses", get(proxy::codex_ws_handler))
+        // Provider-prefixed Codex Responses WebSocket proxy
+        .route(
+            "/:provider/v1/codex/responses",
+            get(proxy::provider_codex_ws_handler),
+        )
         // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
         // This allows explicit provider selection via URL path
         .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
