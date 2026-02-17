@@ -33,6 +33,52 @@ curl http://localhost:3000/v1/chat/completions \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
+## Installation
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap byteowlz/tap
+brew install eavs
+```
+
+### Arch Linux (AUR)
+
+```bash
+# Using yay (recommended)
+yay -S eavs
+
+# Using paru
+paru -S eavs
+
+# Using makepkg (manual)
+git clone https://aur.archlinux.org/eavs.git
+cd eavs
+makepkg -si
+```
+
+### Cargo
+
+```bash
+cargo install eavs
+```
+
+### Pre-built Binaries
+
+Download pre-built binaries from the [GitHub Releases](https://github.com/byteowlz/eavs/releases) page.
+
+Available platforms:
+- Linux x86_64 and ARM64
+- macOS Intel and Apple Silicon
+
+### Build from Source
+
+```bash
+git clone https://github.com/byteowlz/eavs.git
+cd eavs
+cargo build --release
+```
+
 ## Configuration
 
 EAVS uses TOML configuration. It looks for config files in:
@@ -385,6 +431,20 @@ eavs test bench --provider mock --concurrent 50 --duration 30s
 | `--model <model>` | Model to use (optional) |
 
 The `mock` provider returns synthetic responses without network calls, ideal for measuring proxy overhead.
+
+## Contributing
+
+Contributions are welcome! Please see [docs/RELEASE.md](docs/RELEASE.md) for information about the release process.
+
+## Release Process
+
+The release process is fully automated via GitHub Actions:
+
+1. **GitHub Releases**: Automatic builds for Linux (x86_64/ARM64) and macOS (Intel/Apple Silicon)
+2. **Homebrew**: Automatic formula updates in `byteowlz/homebrew-tap`
+3. **AUR**: Automatic PKGBUILD updates
+
+See [docs/RELEASE.md](docs/RELEASE.md) for detailed release instructions.
 
 ## Acknowledgements
 
