@@ -50,10 +50,9 @@ Support allowlist/denylist controls for EAVS proxy routing (configurable hosts/d
 ### [eavs-rca1] Add domain allow/deny lists to EAVS proxy (P2, feature)
 Extend EAVS config and proxy to support domain allowlist/denylist for network proxy mode. Include config schema updates, enforcement logic, and tests.
 
-### [eavs-y1sb] Integrate models.dev as external model catalog (P3, feature)
-
 ## Closed
 
+- [eavs-y1sb] Integrate models.dev as external model catalog (closed 2026-02-17)
 - [eavs-5cym] GPT-5.3-Codex-Spark support and WebSocket transport for Codex Responses (closed 2026-02-17)
 - [eavs-7dkk] Multi-account support for same provider (OAuth subscription pooling) (closed 2026-02-17)
 - [eavs-te85] Fix test-all summary counting 'Continue anyway' as passed (closed 2026-02-16)
