@@ -131,17 +131,21 @@ pub struct ProviderDetail {
     pub oauth: bool,
     /// Whether the provider has a resolved API key (not the key itself)
     pub has_api_key: bool,
-    /// Curated model shortlist (empty = use built-in defaults)
+        /// Model list: config shortlist if set, otherwise full catalog from models.dev
     pub models: Vec<crate::config::ModelShortlistEntry>,
 }
 
 /// Get detailed provider information.
 ///
-/// Returns provider types and Pi API mappings for models.json generation.
+/// Returns provider types, Pi API mappings, and model lists for models.json generation.
+/// Model list logic: config shortlist non-empty = only those models; empty = full models.dev catalog.
 pub async fn providers_detail_handler(
     State(state): State<AppState>,
 ) -> Json<Vec<ProviderDetail>> {
+    use crate::model_catalog::eavs_to_catalog_id;
     use crate::provider::ProviderType;
+
+    let catalog = state.catalog();
 
     let details: Vec<ProviderDetail> = state
         .config
@@ -150,6 +154,16 @@ pub async fn providers_detail_handler(
         .map(|(name, config)| {
             let provider_type = ProviderType::from_str(&config.type_);
             let has_api_key = !config.api_key.is_empty();
+
+            // Resolve models: config shortlist wins, otherwise catalog
+            let models = if !config.models.is_empty() {
+                config.models.clone()
+            } else if let Some(cat) = catalog {
+                let catalog_id = eavs_to_catalog_id(name, &config.type_);
+                cat.models_for_provider(catalog_id, &config.models)
+            } else {
+                Vec::new()
+            };
 
             ProviderDetail {
                 name: name.clone(),
@@ -162,7 +176,7 @@ pub async fn providers_detail_handler(
                         | ProviderType::GoogleGeminiCli
                 ),
                 has_api_key,
-                models: config.models.clone(),
+                models,
             }
         })
         .collect();

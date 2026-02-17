@@ -386,6 +386,10 @@ eavs test bench --provider mock --concurrent 50 --duration 30s
 
 The `mock` provider returns synthetic responses without network calls, ideal for measuring proxy overhead.
 
+## Acknowledgements
+
+- Model catalog data provided by [models.dev](https://models.dev/) -- a comprehensive, community-maintained database of LLM model metadata, pricing, and capabilities.
+
 ## License
 
 MIT
