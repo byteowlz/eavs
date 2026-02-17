@@ -1396,6 +1396,7 @@ impl SetupProviderConfig {
             compat: crate::provider::CompatSettings::default(),
             headers: HashMap::new(),
             test_model: String::new(),
+            models: Vec::new(),
         }
     }
 }

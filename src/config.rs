@@ -1,5 +1,5 @@
 use config::{Config, ConfigError, File};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -328,6 +328,59 @@ pub struct ProviderConfig {
     /// Overrides the built-in default for this provider type.
     #[serde(default)]
     pub test_model: String,
+    /// Curated model shortlist for this provider.
+    /// Used by integrations (e.g., octo) to generate models.json for Pi.
+    /// If empty, a built-in default list is used based on provider type.
+    #[serde(default)]
+    pub models: Vec<ModelShortlistEntry>,
+}
+
+/// A model entry in a provider's shortlist.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelShortlistEntry {
+    /// Model ID as sent to the API (e.g., "gpt-5.2-codex", "claude-opus-4-6")
+    pub id: String,
+    /// Human-readable display name
+    #[serde(default)]
+    pub name: String,
+    /// Whether the model supports extended thinking/reasoning
+    #[serde(default)]
+    pub reasoning: bool,
+    /// Input modalities: ["text"] or ["text", "image"]
+    #[serde(default = "default_input_modalities")]
+    pub input: Vec<String>,
+    /// Context window size in tokens
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    /// Maximum output tokens
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u64,
+    /// Cost per million tokens: input, output, cache_read
+    #[serde(default)]
+    pub cost: ModelCost,
+}
+
+fn default_input_modalities() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+fn default_context_window() -> u64 {
+    128_000
+}
+
+fn default_max_tokens() -> u64 {
+    16_384
+}
+
+/// Cost per million tokens.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ModelCost {
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
 }
 
 impl Default for ProviderConfig {
@@ -348,6 +401,7 @@ impl Default for ProviderConfig {
             gcp_project: String::new(),
             gcp_location: String::new(),
             test_model: String::new(),
+            models: Vec::new(),
         }
     }
 }

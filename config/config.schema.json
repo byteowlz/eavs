@@ -495,6 +495,38 @@
           "type": "string",
           "description": "Model name to use for 'eavs setup test' and 'eavs setup test-all'. Overrides auto-detection from ~/.pi/agent/models.json and built-in defaults.",
           "examples": ["gpt-4o-mini", "claude-sonnet-4-20250514", "gemini-2.0-flash", "llama-3.3-70b-versatile"]
+        },
+        "models": {
+          "type": "array",
+          "description": "Curated model shortlist for integrations (e.g., generating Pi models.json via octo). If omitted, a built-in default list is used based on provider type.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "description": "Model ID as sent to the API" },
+              "name": { "type": "string", "description": "Human-readable display name" },
+              "reasoning": { "type": "boolean", "description": "Supports extended thinking", "default": false },
+              "input": {
+                "type": "array",
+                "description": "Input modalities",
+                "items": { "type": "string", "enum": ["text", "image"] },
+                "default": ["text"]
+              },
+              "context_window": { "type": "integer", "description": "Context window in tokens", "default": 128000 },
+              "max_tokens": { "type": "integer", "description": "Max output tokens", "default": 16384 },
+              "cost": {
+                "type": "object",
+                "description": "Cost per million tokens",
+                "properties": {
+                  "input": { "type": "number", "default": 0 },
+                  "output": { "type": "number", "default": 0 },
+                  "cache_read": { "type": "number", "default": 0 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+          }
         }
       },
       "allOf": [
