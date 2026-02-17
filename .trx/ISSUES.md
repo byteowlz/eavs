@@ -14,19 +14,8 @@ Update ProviderType detection in provider.rs to recognize gpt-5.3-codex-spark an
 ...
 
 
-### [eavs-5cym] GPT-5.3-Codex-Spark support and WebSocket transport for Codex Responses (P1, epic)
-Add support for the new GPT-5.3-Codex-Spark model and the WebSocket transport for the openai-codex-responses API, aligning eavs with pi-mono v0.52.12 changes.
-
-## Context
-
-OpenAI released GPT-5.3-Codex-Spark on Feb 12, 2026 -- a smaller GPT-5.3 variant optimized for real-time coding at 1000+ tok/s on Cerebras hardware. Text-only, 128k context, research preview for ChatGPT Pro users via Codex app/CLI/IDE (not public API at launch).
-...
-
-
 ### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
 Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
-
-### [eavs-7dkk] Multi-account support for same provider (OAuth subscription pooling) (P2, feature)
 
 ### [eavs-5cym.3] Support transport-aware routing for Codex requests (P2, task)
 Detect whether an incoming Codex request is SSE (HTTP POST) or WebSocket (upgrade) and route accordingly.
@@ -65,6 +54,8 @@ Extend EAVS config and proxy to support domain allowlist/denylist for network pr
 
 ## Closed
 
+- [eavs-5cym] GPT-5.3-Codex-Spark support and WebSocket transport for Codex Responses (closed 2026-02-17)
+- [eavs-7dkk] Multi-account support for same provider (OAuth subscription pooling) (closed 2026-02-17)
 - [eavs-te85] Fix test-all summary counting 'Continue anyway' as passed (closed 2026-02-16)
 - [eavs-7qma] Improve GitHub Copilot OAuth: add Copilot token exchange, dynamic base URL, and header injection (closed 2026-02-10)
 - [eavs-86bw] Add secure credential storage using system keychain (macOS Keychain, libsecret, Windows Credential Manager) (closed 2026-02-10)

@@ -141,6 +141,17 @@ pub enum ModelCommands {
     List {
         /// Provider name (e.g., openai, anthropic, google)
         provider: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search models across all providers
+    Search {
+        /// Search query (matches model ID or name, case-insensitive)
+        query: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Update the cached model catalog from models.dev
     Update,
