@@ -2,9 +2,6 @@
 
 ## Open
 
-### [eavs-08jz] Track upstream rate limit quotas from response headers (P1, feature)
--
-
 ### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
 Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
 
@@ -28,6 +25,7 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 
 ## Closed
 
+- [eavs-08jz] Track upstream rate limit quotas from response headers (closed 2026-02-17)
 - [eavs-yrhd] Add proxy allow/deny lists (closed 2026-02-17)
 - [eavs-rca1] Add domain allow/deny lists to EAVS proxy (closed 2026-02-17)
 - [eavs-5cym.2] Add WebSocket proxy handler for Codex responses endpoint (closed 2026-02-17)
