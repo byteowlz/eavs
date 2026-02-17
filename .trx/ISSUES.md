@@ -2,9 +2,6 @@
 
 ## Open
 
-### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
-Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
-
 ### [eavs-5cym.3] Support transport-aware routing for Codex requests (P2, task)
 Detect whether an incoming Codex request is SSE (HTTP POST) or WebSocket (upgrade) and route accordingly.
 
@@ -25,6 +22,7 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 
 ## Closed
 
+- [eavs-83mb] Add allow/deny lists for network proxy mode (closed 2026-02-17)
 - [eavs-08jz] Track upstream rate limit quotas from response headers (closed 2026-02-17)
 - [eavs-yrhd] Add proxy allow/deny lists (closed 2026-02-17)
 - [eavs-rca1] Add domain allow/deny lists to EAVS proxy (closed 2026-02-17)
