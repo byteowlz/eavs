@@ -2,6 +2,9 @@
 
 ## Open
 
+### [eavs-08jz] Track upstream rate limit quotas from response headers (P1, feature)
+-
+
 ### [eavs-5cym.1] Recognize gpt-5.3-codex-spark model in provider detection (P1, task)
 Update ProviderType detection in provider.rs to recognize gpt-5.3-codex-spark and route it to ProviderType::OpenAICodex.
 
@@ -22,6 +25,8 @@ OpenAI released GPT-5.3-Codex-Spark on Feb 12, 2026 -- a smaller GPT-5.3 variant
 
 ### [eavs-83mb] Add allow/deny lists for network proxy mode (P1, task)
 Add allowlist/denylist support for proxy-based network isolation (domain/IP/CIDR). Ensure rules are enforced for outbound requests, with clear precedence and tests.
+
+### [eavs-7dkk] Multi-account support for same provider (OAuth subscription pooling) (P2, feature)
 
 ### [eavs-5cym.3] Support transport-aware routing for Codex requests (P2, task)
 Detect whether an incoming Codex request is SSE (HTTP POST) or WebSocket (upgrade) and route accordingly.
