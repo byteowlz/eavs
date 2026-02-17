@@ -29,6 +29,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
@@ -45,6 +48,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Setup cross-compilation for aarch64 Linux
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -127,20 +139,23 @@ jobs:
           # Download checksums
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/checksums.txt" -o checksums.txt
           
-          SHA256=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
+          SHA256_X86=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
+          SHA256_ARM=$(grep "aarch64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
           
           cat > PKGBUILD << 'EOF'
-          # Maintainer: byteowlz
+          # Maintainer: byteowlz <dev@byteowlz.com>
           pkgname=eavs
           pkgver=VERSION_PLACEHOLDER
           pkgrel=1
           pkgdesc="Unified API gateway for LLM providers with virtual API keys and usage tracking"
-          arch=('x86_64')
+          arch=('x86_64' 'aarch64')
           url="https://github.com/byteowlz/eavs"
           license=('MIT')
           depends=('gcc-libs')
-          source=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/eavs/releases/download/v$pkgver/eavs-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
-          sha256sums=('SHA256_PLACEHOLDER')
+          source_x86_64=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/eavs/releases/download/v$pkgver/eavs-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+          source_aarch64=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/eavs/releases/download/v$pkgver/eavs-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+          sha256sums_x86_64=('SHA256_X86_PLACEHOLDER')
+          sha256sums_aarch64=('SHA256_ARM_PLACEHOLDER')
           
           package() {
               install -Dm755 eavs "$pkgdir/usr/bin/eavs"
@@ -148,7 +163,8 @@ jobs:
           EOF
           
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
-          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
+          sed -i "s/SHA256_X86_PLACEHOLDER/${SHA256_X86}/g" PKGBUILD
+          sed -i "s/SHA256_ARM_PLACEHOLDER/${SHA256_ARM}/g" PKGBUILD
 
       - name: Publish to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
