@@ -92,8 +92,8 @@ impl OAuthStore {
                     })
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "System keychain unavailable ({}), falling back to SQLite",
+                    tracing::debug!(
+                        "System keychain unavailable ({}), using SQLite for OAuth credentials",
                         e
                     );
                     let sb = SqliteBackend::new(db_path).await?;

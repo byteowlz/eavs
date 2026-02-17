@@ -1307,6 +1307,7 @@ mod tests {
             keys: KeysConfig::default(),
             capture: Default::default(),
             transform: Default::default(),
+            network: Default::default(),
         };
         AppState::new(config)
     }
@@ -1343,6 +1344,7 @@ mod tests {
             keys: KeysConfig::default(),
             capture: Default::default(),
             transform: Default::default(),
+            network: Default::default(),
         };
         AppState::new(config)
     }

@@ -7,6 +7,7 @@ mod config;
 mod keys;
 mod logging;
 mod model_catalog;
+mod network_acl;
 mod oauth;
 mod plugins;
 mod policy;
