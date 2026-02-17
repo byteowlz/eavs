@@ -153,6 +153,7 @@ fn token_to_credentials(user_id: &str, token: DeviceTokenResponse) -> OAuthCrede
     OAuthCredentials {
         user_id: user_id.to_string(),
         provider: OAuthProvider::GithubCopilot,
+        account_label: "default".to_string(),
         access_token: token.access_token,
         refresh_token: token.refresh_token.unwrap_or_default(),
         expires_at,

@@ -174,6 +174,7 @@ fn token_to_credentials(
     OAuthCredentials {
         user_id: user_id.to_string(),
         provider,
+        account_label: "default".to_string(),
         access_token: token.access_token,
         refresh_token: token.refresh_token.unwrap_or_default(),
         expires_at,

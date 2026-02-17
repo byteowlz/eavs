@@ -4,11 +4,20 @@ use serde::{Deserialize, Serialize};
 pub struct OAuthCredentials {
     pub user_id: String,
     pub provider: OAuthProvider,
+    /// Account label for multi-account support.
+    /// Multiple accounts for the same provider are distinguished by this label.
+    /// Defaults to "default" for single-account usage.
+    #[serde(default = "default_account_label")]
+    pub account_label: String,
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_data: Option<serde_json::Value>,
+}
+
+fn default_account_label() -> String {
+    "default".to_string()
 }
 
 impl OAuthCredentials {
