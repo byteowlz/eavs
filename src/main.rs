@@ -326,17 +326,63 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             );
         }
         ModelCommands::Export {
-            format,
+            adapter: adapter_name,
             base_url,
             api_key,
             config: config_path,
+            merge: merge_path,
         } => {
             use crate::api::{pi_api_for_provider, ProviderDetail};
             use crate::provider::ProviderType;
 
+            // No adapter name -> list available adapters
+            let adapter_name = match adapter_name {
+                Some(name) => name,
+                None => {
+                    match export::list_adapters() {
+                        Ok(adapters) if !adapters.is_empty() => {
+                            println!("Available export adapters:");
+                            for name in &adapters {
+                                // Try to get info for each
+                                if let Ok(info) = export::adapter_info(name) {
+                                    let display = info["displayName"]
+                                        .as_str()
+                                        .unwrap_or(name);
+                                    let desc = info["description"]
+                                        .as_str()
+                                        .unwrap_or("");
+                                    let file = info["outputFile"]
+                                        .as_str()
+                                        .unwrap_or("");
+                                    println!(
+                                        "  {:<12} {} ({})",
+                                        name, desc, file
+                                    );
+                                } else {
+                                    println!("  {}", name);
+                                }
+                            }
+                            println!(
+                                "\nUsage: eavs models export <adapter> [--api-key KEY] [--base-url URL]"
+                            );
+                        }
+                        Ok(_) => {
+                            eprintln!("No export adapters found.");
+                            if let Err(e) = export::adapters_dir() {
+                                eprintln!("{}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error discovering adapters: {}", e);
+                        }
+                    }
+                    return Ok(());
+                }
+            };
+
             // Load eavs config to find configured providers
-            let app_config = if let Some(path) = config_path {
-                crate::config::AppConfig::load_from(&path)
+            let app_config = if let Some(ref path) = config_path {
+                crate::config::AppConfig::load_from(path)
             } else {
                 crate::config::AppConfig::load()
             }
@@ -361,7 +407,6 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 let provider_type = ProviderType::from_str(&provider_config.type_);
                 let has_api_key = !provider_config.api_key.is_empty();
 
-                // Resolve models: config shortlist wins, otherwise catalog
                 let models = if !provider_config.models.is_empty() {
                     provider_config.models.clone()
                 } else if let Some(ref cat) = catalog {
@@ -388,9 +433,26 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 });
             }
 
-            let output = match format {
-                cli::ExportFormat::Pi => export::to_pi(&details, &eavs_base, &key),
+            // If --merge is specified, read the existing file and use merge mode
+            let existing = if let Some(ref path) = merge_path {
+                Some(
+                    std::fs::read_to_string(path)
+                        .map_err(|e| cli::CliError::Other(format!(
+                            "Failed to read {}: {}", path, e
+                        )))?,
+                )
+            } else {
+                None
             };
+
+            let output = export::run_adapter(
+                &adapter_name,
+                &details,
+                &eavs_base,
+                &key,
+                existing.as_deref(),
+            )
+            .map_err(|e| cli::CliError::Other(format!("{:#}", e)))?;
 
             println!(
                 "{}",
