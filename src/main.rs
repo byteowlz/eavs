@@ -943,13 +943,14 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
         TestCommands::Routing {
             provider,
             model,
+            key,
             url,
             format,
             config,
         } => {
             // Ensure server is running, auto-start if needed
             let server = ensure_server_running(&url, config.as_deref()).await?;
-            run_test_routing(&server.url, &provider, model, format).await
+            run_test_routing(&server.url, &provider, model, key, format).await
         }
         TestCommands::Oauth {
             user,
