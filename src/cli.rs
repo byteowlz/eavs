@@ -774,6 +774,10 @@ pub enum TestCommands {
         #[arg(short, long)]
         model: Option<String>,
 
+        /// Virtual API key to authenticate with
+        #[arg(short, long, env = "EAVS_API_KEY")]
+        key: Option<String>,
+
         /// EAVS server URL
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
@@ -1848,6 +1852,7 @@ pub async fn run_test_routing(
     server_url: &str,
     provider: &str,
     model: Option<String>,
+    api_key: Option<String>,
     format: OutputFormat,
 ) -> Result<(), CliError> {
     let client = reqwest::Client::builder()
@@ -1870,6 +1875,7 @@ pub async fn run_test_routing(
         &client,
         &format!("{}/{}/v1/models", server_url, provider),
         None,
+        api_key.as_deref(),
         "provider-prefixed path",
     )
     .await;
@@ -1883,6 +1889,7 @@ pub async fn run_test_routing(
         &client,
         &format!("{}/v1/models", server_url),
         Some(provider),
+        api_key.as_deref(),
         "X-Provider header",
     )
     .await;
@@ -1906,12 +1913,13 @@ pub async fn run_test_routing(
             "max_tokens": 1
         });
 
-        let resp = client
+        let mut req = client
             .post(format!("{}/v1/chat/completions", server_url))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await;
+            .header("Content-Type", "application/json");
+        if let Some(ref k) = api_key {
+            req = req.header("Authorization", format!("Bearer {}", k));
+        }
+        let resp = req.json(&body).send().await;
 
         let result = match resp {
             Ok(r) => {
@@ -2012,12 +2020,16 @@ async fn test_routing_method(
     client: &reqwest::Client,
     url: &str,
     x_provider_header: Option<&str>,
+    api_key: Option<&str>,
     method_name: &str,
 ) -> RoutingTestResult {
     let mut req = client.get(url);
 
     if let Some(provider) = x_provider_header {
         req = req.header("X-Provider", provider);
+    }
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {}", key));
     }
 
     match req.send().await {
