@@ -193,8 +193,6 @@ pub enum ModelCommands {
     Stats,
 }
 
-
-
 #[derive(Subcommand)]
 pub enum SetupCommands {
     /// Add a new provider interactively

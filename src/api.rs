@@ -131,7 +131,7 @@ pub struct ProviderDetail {
     pub oauth: bool,
     /// Whether the provider has a resolved API key (not the key itself)
     pub has_api_key: bool,
-        /// Model list: config shortlist if set, otherwise full catalog from models.dev
+    /// Model list: config shortlist if set, otherwise full catalog from models.dev
     pub models: Vec<crate::config::ModelShortlistEntry>,
 }
 
@@ -139,9 +139,7 @@ pub struct ProviderDetail {
 ///
 /// Returns provider types, Pi API mappings, and model lists for models.json generation.
 /// Model list logic: config shortlist non-empty = only those models; empty = full models.dev catalog.
-pub async fn providers_detail_handler(
-    State(state): State<AppState>,
-) -> Json<Vec<ProviderDetail>> {
+pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec<ProviderDetail>> {
     use crate::model_catalog::eavs_to_catalog_id;
     use crate::provider::ProviderType;
 

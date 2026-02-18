@@ -175,10 +175,7 @@ mod tests {
 
     #[test]
     fn test_deny_takes_precedence() {
-        let config = config_both(
-            &["*.openai.com", "evil.openai.com"],
-            &["evil.openai.com"],
-        );
+        let config = config_both(&["*.openai.com", "evil.openai.com"], &["evil.openai.com"]);
         assert!(check_url_allowed(&config, "https://api.openai.com/v1/chat").is_ok());
         assert!(check_url_allowed(&config, "https://evil.openai.com/bad").is_err());
     }

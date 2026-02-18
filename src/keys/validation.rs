@@ -268,7 +268,8 @@ mod tests {
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
-                oauth_user: None, ..Default::default()
+                oauth_user: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -320,7 +321,8 @@ mod tests {
                 expires_at: None,
                 permissions,
                 metadata: serde_json::Value::Null,
-                oauth_user: None, ..Default::default()
+                oauth_user: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -348,7 +350,8 @@ mod tests {
                 expires_at: None,
                 permissions,
                 metadata: serde_json::Value::Null,
-                oauth_user: None, ..Default::default()
+                oauth_user: None,
+                ..Default::default()
             })
             .await
             .unwrap();

@@ -20,8 +20,8 @@ mod state;
 mod transform;
 mod transform_plugins;
 mod types;
-mod upstream_quota;
 mod upstream;
+mod upstream_quota;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
@@ -128,14 +128,17 @@ async fn run_quotas_command(json_output: bool) -> Result<(), cli::CliError> {
     let url = format!("{}/admin/quotas", config.server_url);
 
     // Try env var first, then read from config file
-    let master_key = std::env::var("EAVS_MASTER_KEY").ok().or_else(|| {
-        let app_config = crate::config::AppConfig::load().ok()?;
-        app_config.keys.resolved_master_key()
-    }).ok_or_else(|| {
-        cli::CliError::Other(
-            "EAVS_MASTER_KEY not set and keys.master_key not found in config".to_string(),
-        )
-    })?;
+    let master_key = std::env::var("EAVS_MASTER_KEY")
+        .ok()
+        .or_else(|| {
+            let app_config = crate::config::AppConfig::load().ok()?;
+            app_config.keys.resolved_master_key()
+        })
+        .ok_or_else(|| {
+            cli::CliError::Other(
+                "EAVS_MASTER_KEY not set and keys.master_key not found in config".to_string(),
+            )
+        })?;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -220,18 +223,14 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             let models = catalog.catalog_models(&provider);
             if models.is_empty() {
                 eprintln!("No models found for provider '{}'", provider);
-                eprintln!(
-                    "Available providers: {}",
-                    catalog.provider_ids().join(", ")
-                );
+                eprintln!("Available providers: {}", catalog.provider_ids().join(", "));
                 return Ok(());
             }
 
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&models)
-                        .unwrap_or_else(|_| "[]".to_string())
+                    serde_json::to_string_pretty(&models).unwrap_or_else(|_| "[]".to_string())
                 );
             } else {
                 println!(
@@ -345,19 +344,10 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                             for name in &adapters {
                                 // Try to get info for each
                                 if let Ok(info) = export::adapter_info(name) {
-                                    let display = info["displayName"]
-                                        .as_str()
-                                        .unwrap_or(name);
-                                    let desc = info["description"]
-                                        .as_str()
-                                        .unwrap_or("");
-                                    let file = info["outputFile"]
-                                        .as_str()
-                                        .unwrap_or("");
-                                    println!(
-                                        "  {:<12} {} ({})",
-                                        name, desc, file
-                                    );
+                                    let display = info["displayName"].as_str().unwrap_or(name);
+                                    let desc = info["description"].as_str().unwrap_or("");
+                                    let file = info["outputFile"].as_str().unwrap_or("");
+                                    println!("  {:<12} {} ({})", name, desc, file);
                                 } else {
                                     println!("  {}", name);
                                 }
@@ -434,16 +424,14 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             }
 
             // If --merge is specified, read the existing file and use merge mode
-            let existing = if let Some(ref path) = merge_path {
-                Some(
-                    std::fs::read_to_string(path)
-                        .map_err(|e| cli::CliError::Other(format!(
-                            "Failed to read {}: {}", path, e
-                        )))?,
-                )
-            } else {
-                None
-            };
+            let existing =
+                if let Some(ref path) = merge_path {
+                    Some(std::fs::read_to_string(path).map_err(|e| {
+                        cli::CliError::Other(format!("Failed to read {}: {}", path, e))
+                    })?)
+                } else {
+                    None
+                };
 
             let output = export::run_adapter(
                 &adapter_name,

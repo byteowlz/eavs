@@ -112,11 +112,7 @@ fn build_merge_request(
 }
 
 /// Build a full export request payload.
-fn build_request(
-    providers: &[ProviderDetail],
-    base_url: &str,
-    api_key: &str,
-) -> Value {
+fn build_request(providers: &[ProviderDetail], base_url: &str, api_key: &str) -> Value {
     let mut req = build_provider_data(providers);
     req["method"] = serde_json::json!("export");
     req["base_url"] = serde_json::json!(base_url);
@@ -198,16 +194,23 @@ pub fn run_adapter(
     } else {
         build_request(providers, base_url, api_key)
     };
-    let request_json =
-        serde_json::to_string(&request).context("serializing adapter request")?;
+    let request_json = serde_json::to_string(&request).context("serializing adapter request")?;
 
     // Try bun first (faster startup), fall back to npx tsx
     let (cmd, args) = if which("bun") {
-        ("bun", vec!["run".to_string(), adapter_path.display().to_string()])
+        (
+            "bun",
+            vec!["run".to_string(), adapter_path.display().to_string()],
+        )
     } else if which("npx") {
-        ("npx", vec!["tsx".to_string(), adapter_path.display().to_string()])
+        (
+            "npx",
+            vec!["tsx".to_string(), adapter_path.display().to_string()],
+        )
     } else {
-        bail!("Neither 'bun' nor 'npx' found. Install bun (recommended) or Node.js to run adapters.")
+        bail!(
+            "Neither 'bun' nor 'npx' found. Install bun (recommended) or Node.js to run adapters."
+        )
     };
 
     let output = Command::new(cmd)
@@ -237,8 +240,7 @@ pub fn run_adapter(
         );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("adapter output is not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("adapter output is not valid UTF-8")?;
 
     serde_json::from_str(&stdout)
         .with_context(|| format!("adapter '{}' returned invalid JSON", adapter_name))
@@ -257,9 +259,15 @@ pub fn adapter_info(adapter_name: &str) -> Result<Value> {
     let request_json = serde_json::to_string(&request)?;
 
     let (cmd, args) = if which("bun") {
-        ("bun", vec!["run".to_string(), adapter_path.display().to_string()])
+        (
+            "bun",
+            vec!["run".to_string(), adapter_path.display().to_string()],
+        )
     } else if which("npx") {
-        ("npx", vec!["tsx".to_string(), adapter_path.display().to_string()])
+        (
+            "npx",
+            vec!["tsx".to_string(), adapter_path.display().to_string()],
+        )
     } else {
         bail!("Neither 'bun' nor 'npx' found.")
     };
