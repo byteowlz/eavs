@@ -4,6 +4,7 @@ mod aws_sigv4;
 mod capture;
 mod cli;
 mod config;
+mod export;
 mod keys;
 mod logging;
 mod model_catalog;
@@ -322,6 +323,78 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 "Cached {} models across {} providers",
                 catalog.total_models(),
                 catalog.provider_ids().len()
+            );
+        }
+        ModelCommands::Export {
+            format,
+            base_url,
+            api_key,
+            config: config_path,
+        } => {
+            use crate::api::{pi_api_for_provider, ProviderDetail};
+            use crate::provider::ProviderType;
+
+            // Load eavs config to find configured providers
+            let app_config = if let Some(path) = config_path {
+                crate::config::AppConfig::load_from(&path)
+            } else {
+                crate::config::AppConfig::load()
+            }
+            .map_err(|e| cli::CliError::Other(format!("Failed to load config: {}", e)))?;
+
+            // Load catalog for enriching shortlists
+            let catalog = ModelCatalog::load().await.ok();
+
+            // Resolve base URL from config or override
+            let eavs_base = base_url.unwrap_or_else(|| {
+                format!(
+                    "http://{}:{}",
+                    app_config.server.host, app_config.server.port
+                )
+            });
+
+            let key = api_key.unwrap_or_else(|| "EAVS_API_KEY".to_string());
+
+            // Build provider details (same logic as the /providers/detail API endpoint)
+            let mut details: Vec<ProviderDetail> = Vec::new();
+            for (name, provider_config) in &app_config.providers {
+                let provider_type = ProviderType::from_str(&provider_config.type_);
+                let has_api_key = !provider_config.api_key.is_empty();
+
+                // Resolve models: config shortlist wins, otherwise catalog
+                let models = if !provider_config.models.is_empty() {
+                    provider_config.models.clone()
+                } else if let Some(ref cat) = catalog {
+                    let catalog_id =
+                        crate::model_catalog::eavs_to_catalog_id(name, &provider_config.type_);
+                    cat.models_for_provider(catalog_id, &provider_config.models)
+                } else {
+                    Vec::new()
+                };
+
+                details.push(ProviderDetail {
+                    name: name.clone(),
+                    type_: provider_config.type_.clone(),
+                    pi_api: pi_api_for_provider(&provider_type),
+                    oauth: matches!(
+                        provider_type,
+                        ProviderType::Anthropic
+                            | ProviderType::OpenAI
+                            | ProviderType::Google
+                            | ProviderType::GithubCopilot
+                    ),
+                    has_api_key,
+                    models,
+                });
+            }
+
+            let output = match format {
+                cli::ExportFormat::Pi => export::to_pi(&details, &eavs_base, &key),
+            };
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
             );
         }
         ModelCommands::Stats => {
