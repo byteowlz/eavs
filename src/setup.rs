@@ -940,9 +940,22 @@ fn build_test_request(
             });
             (url, body, headers)
         }
+        ProviderType::OpenAIResponses | ProviderType::OpenAICodex => {
+            // OpenAI Responses API format
+            let url = format!("{}/responses", base_url.trim_end_matches('/'));
+            if !api_key.is_empty() {
+                headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
+            }
+            let body = serde_json::json!({
+                "model": model,
+                "input": message,
+                "max_output_tokens": 64
+            });
+            (url, body, headers)
+        }
         _ => {
-            // OpenAI-compatible format (covers OpenAI, Groq, Mistral, xAI,
-            // OpenRouter, Cerebras, Ollama, OpenAI-Compatible, Foundry, etc.)
+            // OpenAI-compatible chat completions format (covers OpenAI, Groq,
+            // Mistral, xAI, OpenRouter, Cerebras, Ollama, Foundry, etc.)
             let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
             if !api_key.is_empty() {
                 headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
