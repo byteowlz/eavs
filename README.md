@@ -652,6 +652,7 @@ See [docs/RELEASE.md](docs/RELEASE.md) for detailed release instructions.
 ## Acknowledgements
 
 - Model catalog data provided by [models.dev](https://models.dev/) -- a comprehensive, community-maintained database of LLM model metadata, pricing, and capabilities.
+- Provider-specific API quirks and protocol handling informed by [pi-mono](https://github.com/badlogic/pi-mono) -- the monorepo behind the Pi coding agent.
 
 ## License
 
