@@ -2043,6 +2043,27 @@ async fn test_routing_method(
             let status = resp.status();
             let code = status.as_u16();
 
+            // Read body for error details on non-success responses
+            let body_text = if !status.is_success() {
+                resp.text().await.ok()
+            } else {
+                // Consume body but don't store it
+                let _ = resp.text().await;
+                None
+            };
+
+            // Try to extract error message from JSON body
+            let body_error = body_text.as_deref().and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(t)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                            .map(String::from)
+                    })
+            });
+
             // Determine routing success:
             // - x-eavs-provider header present = routing definitely worked
             // - 200/2xx = success (routing + auth both worked)
@@ -2055,13 +2076,14 @@ async fn test_routing_method(
             } else if status.is_success() {
                 (true, None)
             } else if code == 401 || code == 403 {
-                (
-                    true,
-                    Some(
-                        "routing OK (auth failed - provide a valid API key to fully verify)"
-                            .to_string(),
-                    ),
-                )
+                let detail = body_error.clone().unwrap_or_else(|| {
+                    if api_key.is_some() {
+                        "key rejected by server".to_string()
+                    } else {
+                        "no API key provided".to_string()
+                    }
+                });
+                (true, Some(format!("routing OK, auth failed: {}", detail)))
             } else if code == 404 {
                 (false, Some("provider or path not found".to_string()))
             } else {
@@ -2069,7 +2091,15 @@ async fn test_routing_method(
             };
 
             let error = if !success {
-                Some(format!("HTTP {} {}", code, status.canonical_reason().unwrap_or("")))
+                Some(format!(
+                    "HTTP {} {}",
+                    code,
+                    body_error
+                        .unwrap_or_else(|| status
+                            .canonical_reason()
+                            .unwrap_or("")
+                            .to_string())
+                ))
             } else {
                 None
             };
