@@ -160,10 +160,43 @@ pub enum ModelCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Export configured providers and models for an agent harness
+    ///
+    /// Reads the eavs config to find configured providers, resolves their
+    /// model lists (shortlist from config or full catalog), and outputs
+    /// in the target harness format.
+    ///
+    /// Examples:
+    ///   eavs models export pi > ~/.pi/agent/models.json
+    ///   eavs models export pi --api-key sk-xxx --base-url http://host:3033
+    Export {
+        /// Target harness format
+        #[arg(value_enum)]
+        format: ExportFormat,
+        /// Override eavs base URL (default: http://127.0.0.1:<port> from config)
+        #[arg(long)]
+        base_url: Option<String>,
+        /// API key to embed in the output (default: "EAVS_API_KEY" placeholder)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Path to eavs config file (default: auto-detect)
+        #[arg(long, short)]
+        config: Option<String>,
+    },
     /// Update the cached model catalog from models.dev
     Update,
     /// Show catalog stats
     Stats,
+}
+
+/// Supported agent harness export formats
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum ExportFormat {
+    /// Pi coding agent (models.json)
+    Pi,
+    // Future formats:
+    // /// OpenCode (opencode.json)
+    // Opencode,
 }
 
 #[derive(Subcommand)]

@@ -185,7 +185,7 @@ pub async fn providers_detail_handler(
 }
 
 /// Map eavs provider type to Pi's API type string for models.json.
-fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Option<&'static str> {
+pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Option<&'static str> {
     use crate::provider::ProviderType;
     match provider_type {
         ProviderType::OpenAI => Some("openai-responses"),
