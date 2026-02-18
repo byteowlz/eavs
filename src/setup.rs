@@ -9,9 +9,12 @@
 use crate::cli::{CliError, OutputFormat};
 use crate::config::{AppConfig, ProviderConfig};
 use crate::provider::ProviderType;
-use dialoguer::{Confirm, Input, Password, Select};
+use dialoguer::{Confirm, Select};
+// Note: we intentionally avoid dialoguer::Input for text fields because it
+// uses raw terminal mode which breaks bracketed paste (duplicating text).
+// Plain stdin line reads via prompt_input() handle paste correctly.
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 /// Outcome of a single provider test.
@@ -296,11 +299,10 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
 
     // 2. Provider name
     let default_name = suggest_provider_name(display_name, selection);
-    let provider_name: String = Input::new()
-        .with_prompt("Provider name (used in config and X-Provider header)")
-        .default(default_name)
-        .interact_text()
-        .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+    let provider_name = prompt_input(
+        "Provider name (used in config and X-Provider header)",
+        Some(&default_name),
+    )?;
 
     let provider_name = provider_name.trim().to_lowercase().replace(' ', "-");
     if provider_name.is_empty() {
@@ -711,11 +713,10 @@ async fn test_provider_direct(
         None => {
             let default = resolve_test_model(prov_config);
             if std::io::stdin().is_terminal() {
-                Input::new()
-                    .with_prompt(format!("Model to test '{}' with", provider_name))
-                    .default(default)
-                    .interact_text()
-                    .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?
+                prompt_input(
+                    &format!("Model to test '{}' with", provider_name),
+                    Some(&default),
+                )?
             } else {
                 default
             }
@@ -1145,21 +1146,19 @@ fn collect_provider_fields(
     } else {
         match provider_type {
             ProviderType::Azure => {
-                let base_url: String = Input::new()
-                    .with_prompt(
-                        "Azure OpenAI endpoint URL (e.g. https://your-resource.openai.azure.com/)",
-                    )
-                    .interact_text()
-                    .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+                let base_url = prompt_input(
+                    "Azure OpenAI endpoint URL (e.g. https://your-resource.openai.azure.com/)",
+                    None,
+                )?;
                 if !base_url.is_empty() {
                     config.base_url = Some(base_url);
                 }
             }
             ProviderType::OpenAICompatible => {
-                let base_url: String = Input::new()
-                    .with_prompt("Base URL (e.g. http://localhost:8000/v1)")
-                    .interact_text()
-                    .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+                let base_url = prompt_input(
+                    "Base URL (e.g. http://localhost:8000/v1)",
+                    None,
+                )?;
                 if !base_url.is_empty() {
                     config.base_url = Some(base_url);
                 }
@@ -1174,12 +1173,7 @@ fn collect_provider_fields(
                     .unwrap_or("")
                     .to_string();
 
-                let base_url: String = Input::new()
-                    .with_prompt("Base URL (press Enter for default)")
-                    .default(default_url.clone())
-                    .show_default(true)
-                    .interact_text()
-                    .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+                let base_url = prompt_input("Base URL", Some(&default_url))?;
 
                 if !base_url.is_empty() && base_url != default_url {
                     config.base_url = Some(base_url);
@@ -1191,28 +1185,19 @@ fn collect_provider_fields(
     // -- Provider-specific extra fields --
     match provider_type {
         ProviderType::Azure if !is_azure_foundry => {
-            let api_version: String = Input::new()
-                .with_prompt("API version")
-                .default("2024-12-01-preview".to_string())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let api_version = prompt_input("API version", Some("2024-12-01-preview"))?;
             config.api_version = Some(api_version);
 
-            let deployment: String = Input::new()
-                .with_prompt("Deployment name (leave empty to use model name)")
-                .default(String::new())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let deployment = prompt_input(
+                "Deployment name (leave empty to use model name)",
+                None,
+            )?;
             if !deployment.is_empty() {
                 config.deployment = Some(deployment);
             }
         }
         ProviderType::Bedrock => {
-            let region: String = Input::new()
-                .with_prompt("AWS region")
-                .default("us-east-1".to_string())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let region = prompt_input("AWS region", Some("us-east-1"))?;
             config.aws_region = Some(region);
 
             config.aws_access_key_id = Some(collect_api_key_or_env(
@@ -1224,27 +1209,19 @@ fn collect_provider_fields(
                 "AWS_SECRET_ACCESS_KEY",
             )?);
 
-            let session_token: String = Input::new()
-                .with_prompt("AWS session token (leave empty if not needed)")
-                .default(String::new())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let session_token = prompt_input(
+                "AWS session token (leave empty if not needed)",
+                None,
+            )?;
             if !session_token.is_empty() {
                 config.aws_session_token = Some(session_token);
             }
         }
         ProviderType::GoogleVertex => {
-            let project: String = Input::new()
-                .with_prompt("GCP project ID")
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let project = prompt_input_required("GCP project ID")?;
             config.gcp_project = Some(project);
 
-            let location: String = Input::new()
-                .with_prompt("GCP location")
-                .default("us-central1".to_string())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let location = prompt_input("GCP location", Some("us-central1"))?;
             config.gcp_location = Some(location);
         }
         _ => {}
@@ -1268,11 +1245,7 @@ fn collect_provider_fields(
                 .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
             config.compat_supports_store = Some(supports_store);
 
-            let max_tokens_field: String = Input::new()
-                .with_prompt("Max tokens field name")
-                .default("max_tokens".to_string())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let max_tokens_field = prompt_input("Max tokens field name", Some("max_tokens"))?;
             config.compat_max_tokens_field = Some(max_tokens_field);
         }
     }
@@ -1349,9 +1322,7 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
 
     match key_method {
         0 => {
-            let key = Password::new()
-                .with_prompt("API key")
-                .interact()
+            let key = rpassword::prompt_password("API key: ")
                 .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
             if key.is_empty() && !allow_empty {
                 return Err(CliError::Other("API key cannot be empty".to_string()));
@@ -1359,15 +1330,7 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
             Ok(key)
         }
         1 => {
-            let var_name: String = Input::new()
-                .with_prompt("Environment variable name")
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
-            if var_name.is_empty() {
-                return Err(CliError::Other(
-                    "Environment variable name cannot be empty".to_string(),
-                ));
-            }
+            let var_name = prompt_input_required("Environment variable name")?;
             if std::env::var(&var_name).is_err() {
                 println!(
                     "  Warning: ${} is not currently set in the environment",
@@ -1379,15 +1342,7 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
             Ok(format!("env:{}", var_name))
         }
         2 => {
-            let account: String = Input::new()
-                .with_prompt("Keychain account name")
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
-            if account.is_empty() {
-                return Err(CliError::Other(
-                    "Keychain account name cannot be empty".to_string(),
-                ));
-            }
+            let account = prompt_input_required("Keychain account name")?;
             if crate::config::get_keychain_secret(&account).is_some() {
                 println!("  Keychain entry '{}' found", account);
             } else {
@@ -1399,9 +1354,7 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
                     .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
 
                 if store_now {
-                    let secret = Password::new()
-                        .with_prompt("Secret value")
-                        .interact()
+                    let secret = rpassword::prompt_password("Secret value: ")
                         .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
                     crate::config::set_keychain_secret(&account, &secret)
                         .map_err(CliError::Other)?;
@@ -1431,17 +1384,11 @@ fn collect_api_key_or_env(prompt: &str, default_env: &str) -> Result<String, Cli
 
     match method {
         0 => {
-            let var_name: String = Input::new()
-                .with_prompt("Environment variable name")
-                .default(default_env.to_string())
-                .interact_text()
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let var_name = prompt_input("Environment variable name", Some(default_env))?;
             Ok(format!("env:{}", var_name))
         }
         1 => {
-            let value = Password::new()
-                .with_prompt(prompt)
-                .interact()
+            let value = rpassword::prompt_password(format!("{}: ", prompt))
                 .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
             Ok(value)
         }
@@ -1451,14 +1398,7 @@ fn collect_api_key_or_env(prompt: &str, default_env: &str) -> Result<String, Cli
 
 /// Collect Azure Foundry base URL based on the specific variant.
 fn collect_azure_foundry_base_url(selection: usize) -> Result<String, CliError> {
-    let resource: String = Input::new()
-        .with_prompt("Azure AI Foundry resource name (e.g. 'my-resource')")
-        .interact_text()
-        .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
-
-    if resource.is_empty() {
-        return Err(CliError::Other("Resource name cannot be empty".to_string()));
-    }
+    let resource = prompt_input_required("Azure AI Foundry resource name (e.g. 'my-resource')")?;
 
     let base_url = match selection {
         AZURE_FOUNDRY_OPENAI_IDX => {
@@ -1482,10 +1422,7 @@ fn collect_azure_foundry_base_url(selection: usize) -> Result<String, CliError> 
         .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
 
     if use_custom {
-        let custom_url: String = Input::new()
-            .with_prompt("Custom base URL")
-            .interact_text()
-            .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+        let custom_url = prompt_input_required("Custom base URL")?;
         Ok(custom_url)
     } else {
         Ok(base_url)
@@ -1625,6 +1562,45 @@ fn save_provider_to_config(
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Prompt for text input using plain stdin (cooked mode).
+///
+/// Unlike `dialoguer::Input`, this handles pasted text correctly because
+/// the terminal stays in cooked/line-buffered mode. Bracketed paste
+/// sequences are consumed by the terminal driver instead of leaking into
+/// the application as duplicate characters.
+fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String, CliError> {
+    match default {
+        Some(d) if !d.is_empty() => print!("{} [{}]: ", prompt, d),
+        _ => print!("{}: ", prompt),
+    }
+    io::stdout()
+        .flush()
+        .map_err(|e| CliError::Other(e.to_string()))?;
+
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+
+    let trimmed = line.trim().to_string();
+    if trimmed.is_empty() {
+        if let Some(d) = default {
+            return Ok(d.to_string());
+        }
+    }
+    Ok(trimmed)
+}
+
+/// Prompt for required (non-empty) text input.
+fn prompt_input_required(prompt: &str) -> Result<String, CliError> {
+    let value = prompt_input(prompt, None)?;
+    if value.is_empty() {
+        return Err(CliError::Other(format!("{} cannot be empty", prompt)));
+    }
+    Ok(value)
+}
 
 /// Mask a secret value for display.
 fn mask_secret(value: &str) -> String {
