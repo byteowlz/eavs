@@ -1963,18 +1963,18 @@ pub async fn run_test_routing(
             }
 
             println!();
-            let successes = [
+            let mut successes = [
                 results.provider_prefix.success,
                 results.x_provider_header.success,
-                results
-                    .model_auto_detect
-                    .as_ref()
-                    .map(|r| r.success)
-                    .unwrap_or(true),
             ]
             .iter()
             .filter(|&&s| s)
             .count();
+            if let Some(ref auto) = results.model_auto_detect {
+                if auto.success {
+                    successes += 1;
+                }
+            }
 
             let total = if results.model_auto_detect.is_some() {
                 3
