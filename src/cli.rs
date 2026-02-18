@@ -195,11 +195,19 @@ pub enum ModelCommands {
 
 #[derive(Subcommand)]
 pub enum SetupCommands {
-    /// Add a new provider interactively
+    /// Add provider(s) interactively
+    ///
+    /// Without --batch: interactive wizard, loops until you're done.
+    /// With --batch: scans environment for known API keys (OPENAI_API_KEY,
+    /// ANTHROPIC_API_KEY, etc.) and offers to add each one.
     Add {
         /// Path to config file to modify
         #[arg(short, long, env = "EAVS_CONFIG")]
         config: Option<String>,
+
+        /// Batch mode: auto-detect API keys from environment
+        #[arg(short, long)]
+        batch: bool,
     },
 
     /// Test a provider from the config file (direct API call, no server needed)
