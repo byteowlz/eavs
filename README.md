@@ -1,3 +1,5 @@
+![banner](banner.png)
+
 # eavs - a no-nonsense LLM proxy
 
 A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full logging, and live context injection.
@@ -74,6 +76,7 @@ cargo install eavs
 Download pre-built binaries from the [GitHub Releases](https://github.com/byteowlz/eavs/releases) page.
 
 Available platforms:
+
 - Linux x86_64 and ARM64
 - macOS Intel and Apple Silicon
 
@@ -116,11 +119,11 @@ base_url = "http://localhost:11434/v1"
 
 API key values support three resolution methods:
 
-| Syntax | Source | Example |
-|--------|--------|---------|
-| `env:VAR_NAME` | Environment variable | `api_key = "env:OPENAI_API_KEY"` |
-| `keychain:account` | System keychain | `api_key = "keychain:openai"` |
-| literal value | Config file (plaintext) | `api_key = "sk-..."` |
+| Syntax             | Source                  | Example                          |
+| ------------------ | ----------------------- | -------------------------------- |
+| `env:VAR_NAME`     | Environment variable    | `api_key = "env:OPENAI_API_KEY"` |
+| `keychain:account` | System keychain         | `api_key = "keychain:openai"`    |
+| literal value      | Config file (plaintext) | `api_key = "sk-..."`             |
 
 The `keychain:` prefix reads from the OS-native credential store (macOS Keychain, libsecret on Linux, Windows Credential Manager). Store secrets with `eavs secret set <account>` and reference them in config. This keeps credentials out of plaintext files -- useful for sandboxed environments where agents should not have direct access to secrets.
 
@@ -145,11 +148,13 @@ Supported providers:
 - `mock` - Mock provider for testing (no network calls)
 
 When to use which OpenAI provider:
+
 - `openai` for the Chat Completions API (`/v1/chat/completions`).
 - `openai-responses` for the Responses API (`/v1/responses`).
 - `openai-codex` for the Codex/ChatGPT backend with OAuth tokens.
 
 Provider shortcuts (no client changes required):
+
 - `eavs provider use <name>` sets a runtime default for the auto endpoint.
 - `eavs provider clear` resets to the config default.
 - State is stored in XDG state at `~/.local/state/eavs/state.toml` (or `$XDG_STATE_HOME`).
@@ -323,6 +328,7 @@ eavs quotas --json
 ```
 
 Supported headers:
+
 - OpenAI: `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, etc.
 - Anthropic: `anthropic-ratelimit-requests-limit`, `anthropic-ratelimit-requests-remaining`, etc.
 
@@ -378,6 +384,7 @@ aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
 Automatically intercept LLM API calls from any application (including desktop apps like ChatGPT and Claude) without changing client configuration. This feature uses mitmproxy for cross-platform traffic interception.
 
 **Prerequisites:**
+
 - mitmproxy 10.1.5+ (`brew install mitmproxy` on macOS, `pip install mitmproxy` elsewhere)
 - On first run, trust mitmproxy's CA certificate (see [mitmproxy docs](https://docs.mitmproxy.org/stable/concepts/certificates/))
 
@@ -408,10 +415,12 @@ mitmproxy --mode local:ChatGPT -s scripts/eavs_capture.py
 ```
 
 **Captured domains:**
+
 - API endpoints: api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, api.mistral.ai, api.groq.com, etc.
 - Desktop apps: chat.openai.com, claude.ai, gemini.google.com, perplexity.ai, poe.com, etc.
 
 **How it works:**
+
 1. mitmproxy intercepts outgoing HTTPS traffic using its local capture mode
 2. The `eavs_capture.py` addon detects LLM-related domains and redirects them to Eaves
 3. Eaves auto-detects the provider from the original host and proxies the request
@@ -625,13 +634,13 @@ eavs test bench --provider mock --concurrent 50 --duration 30s
 
 ### Benchmark Options
 
-| Flag | Description |
-|------|-------------|
+| Flag                | Description                           |
+| ------------------- | ------------------------------------- |
 | `--provider <name>` | Provider to test (default: "default") |
-| `--count <n>` | Number of requests (default: 10) |
-| `--concurrent <n>` | Parallel requests (default: 1) |
-| `--duration <time>` | Run for duration (e.g., "30s", "1m") |
-| `--model <model>` | Model to use (optional) |
+| `--count <n>`       | Number of requests (default: 10)      |
+| `--concurrent <n>`  | Parallel requests (default: 1)        |
+| `--duration <time>` | Run for duration (e.g., "30s", "1m")  |
+| `--model <model>`   | Model to use (optional)               |
 
 The `mock` provider returns synthetic responses without network calls, ideal for measuring proxy overhead.
 
