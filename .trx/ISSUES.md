@@ -2,6 +2,15 @@
 
 ## Open
 
+### [eavs-a2wb] Add 'eavs setup init' for batch provider setup with model selection (P2, feature)
+setup.sh currently generates eavs config.toml via bash/jq string templating, which is fragile (stdout leaking into TOML, format mismatches). Eavs should own its own config generation.
+
+Add 'eavs setup init' command that:
+1. Scans environment for known API key env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+2. For each found key, offers to configure the provider (Y/n)
+...
+
+
 ### [eavs-5cym.3] Support transport-aware routing for Codex requests (P2, task)
 Detect whether an incoming Codex request is SSE (HTTP POST) or WebSocket (upgrade) and route accordingly.
 
