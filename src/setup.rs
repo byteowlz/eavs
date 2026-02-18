@@ -81,7 +81,167 @@ const AZURE_FOUNDRY_OTHER_IDX: usize = 10;
 // =============================================================================
 
 /// Run the interactive setup wizard.
-pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
+pub async fn run_setup_add(config_path: Option<&str>, batch: bool) -> Result<(), CliError> {
+    let config_file = resolve_config_path(config_path)?;
+
+    // Ensure a base config exists (server, logging, etc.)
+    ensure_base_config(&config_file)?;
+
+    if batch {
+        // Batch mode: scan environment for known API keys, offer each
+        run_batch_add(&config_file).await?;
+    } else {
+        // Interactive loop: add providers one at a time
+        loop {
+            add_single_provider(&config_file).await?;
+
+            println!();
+            let add_more = Confirm::new()
+                .with_prompt("Add another provider?")
+                .default(false)
+                .interact()
+                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+
+            if !add_more {
+                break;
+            }
+        }
+    }
+
+    println!();
+    println!("Config written to {}", config_file.display());
+    Ok(())
+}
+
+/// Known environment variable -> provider mappings for batch mode.
+const ENV_PROVIDERS: &[(&str, &str, &str, &str)] = &[
+    // (env_var, provider_name, provider_type, display_name)
+    ("OPENAI_API_KEY", "openai", "openai", "OpenAI"),
+    ("ANTHROPIC_API_KEY", "anthropic", "anthropic", "Anthropic"),
+    ("GEMINI_API_KEY", "google", "google", "Google Gemini"),
+    ("GOOGLE_API_KEY", "google", "google", "Google Gemini"),
+    ("MISTRAL_API_KEY", "mistral", "mistral", "Mistral"),
+    ("GROQ_API_KEY", "groq", "groq", "Groq"),
+    ("XAI_API_KEY", "xai", "xai", "xAI"),
+    (
+        "OPENROUTER_API_KEY",
+        "openrouter",
+        "openrouter",
+        "OpenRouter",
+    ),
+    ("CEREBRAS_API_KEY", "cerebras", "cerebras", "Cerebras"),
+];
+
+/// Batch mode: scan environment for API keys and offer to add each.
+async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
+    let is_tty = std::io::stdin().is_terminal();
+
+    println!();
+    println!("EAVS Provider Setup (batch)");
+    println!("{}", "=".repeat(50));
+    println!();
+    println!("Scanning environment for API keys...");
+    println!();
+
+    let existing = std::fs::read_to_string(config_file).unwrap_or_default();
+    let mut added_count = 0;
+    let mut first_provider: Option<String> = None;
+
+    for &(env_var, provider_name, provider_type, display_name) in ENV_PROVIDERS {
+        // Skip if key not in environment
+        if std::env::var(env_var).is_err() {
+            continue;
+        }
+
+        // Skip if already in config
+        let section = format!("[providers.{}]", provider_name);
+        if existing.contains(&section) {
+            println!("  {} -- already configured, skipping", display_name);
+            continue;
+        }
+
+        // In interactive mode, ask. In non-interactive, auto-add.
+        let should_add = if is_tty {
+            Confirm::new()
+                .with_prompt(format!(
+                    "Configure {} ({} found in env)?",
+                    display_name, env_var
+                ))
+                .default(true)
+                .interact()
+                .unwrap_or(false)
+        } else {
+            true
+        };
+
+        if !should_add {
+            continue;
+        }
+
+        let config = SetupProviderConfig {
+            type_: provider_type.to_string(),
+            api_key: format!("env:{}", env_var),
+            base_url: None,
+            api_version: None,
+            deployment: None,
+            aws_region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            gcp_project: None,
+            gcp_location: None,
+            compat_supports_store: None,
+            compat_max_tokens_field: None,
+        };
+
+        save_provider_to_config(config_file, provider_name, &config)?;
+        println!("  Added {}", display_name);
+        added_count += 1;
+
+        if first_provider.is_none() {
+            first_provider = Some(provider_name.to_string());
+        }
+    }
+
+    // If interactive, offer to add more (custom providers)
+    if is_tty {
+        loop {
+            println!();
+            let add_custom = Confirm::new()
+                .with_prompt("Add a custom provider?")
+                .default(false)
+                .interact()
+                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+
+            if !add_custom {
+                break;
+            }
+
+            add_single_provider(config_file).await?;
+            added_count += 1;
+        }
+    }
+
+    // Set the first provider as the default route
+    if let Some(ref first) = first_provider {
+        set_default_provider(config_file, first)?;
+    }
+
+    if added_count == 0 {
+        println!("No providers added.");
+    } else {
+        println!();
+        println!("{} provider(s) configured.", added_count);
+        if let Some(ref first) = first_provider {
+            println!("Default provider: {}", first);
+        }
+    }
+
+    Ok(())
+}
+
+/// Add a single provider interactively (the original wizard flow).
+async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
     println!();
     println!("EAVS Provider Setup");
     println!("{}", "=".repeat(50));
@@ -161,8 +321,6 @@ pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
 
     if should_test {
         let prov_config = setup_config.to_provider_config();
-        // For the setup wizard, any non-abort outcome is fine (user already saw the result).
-        // We only propagate Err (user chose to abort), not FailedContinue.
         let _ = test_provider_direct(&provider_name, &prov_config, None, None).await?;
     }
 
@@ -175,24 +333,109 @@ pub async fn run_setup_add(config_path: Option<&str>) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
 
     if should_save {
-        let config_file = resolve_config_path(config_path)?;
-        save_provider_to_config(&config_file, &provider_name, &setup_config)?;
-        println!();
-        println!(
-            "Provider '{}' saved to {}",
-            provider_name,
-            config_file.display()
-        );
-        println!();
-        println!("Usage:");
-        println!("  curl http://localhost:3000/v1/chat/completions \\");
-        println!("    -H \"X-Provider: {}\" \\", provider_name);
-        println!("    -H \"Content-Type: application/json\" \\");
-        println!(
-            "    -d '{{\"model\": \"<model>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'"
-        );
+        save_provider_to_config(config_file, &provider_name, &setup_config)?;
+        println!("Provider '{}' saved.", provider_name);
     } else {
-        println!("Setup cancelled. No changes written.");
+        println!("Skipped.");
+    }
+
+    Ok(())
+}
+
+/// Ensure the config file has a base scaffold (server, logging, keys sections).
+/// Does nothing if the file already exists and has content.
+fn ensure_base_config(config_file: &PathBuf) -> Result<(), CliError> {
+    if config_file.exists() {
+        let content = std::fs::read_to_string(config_file).unwrap_or_default();
+        if content.contains("[server]") {
+            return Ok(()); // Already has base config
+        }
+    }
+
+    // Create parent dirs
+    if let Some(parent) = config_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::Other(format!("Failed to create {}: {}", parent.display(), e))
+        })?;
+    }
+
+    let scaffold = r#""$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/eavs/eavs.config.schema.json"
+
+# EAVS Configuration
+# Docs: https://github.com/byteowlz/eavs
+
+[server]
+host = "127.0.0.1"
+port = 3033
+
+[logging]
+default = "stdout"
+
+[analysis]
+enabled = true
+broadcast_channel_size = 1024
+
+[state]
+enabled = true
+ttl_secs = 3600
+cleanup_interval_secs = 60
+max_conversations = 10000
+
+[keys]
+enabled = true
+require_key = true
+master_key = "env:EAVS_MASTER_KEY"
+allow_self_provisioning = false
+default_rpm_limit = 60
+default_budget_usd = 50.0
+update_pricing_on_startup = true
+"#;
+
+    std::fs::write(config_file, scaffold).map_err(|e| {
+        CliError::Other(format!("Failed to write {}: {}", config_file.display(), e))
+    })?;
+
+    println!("Created base config: {}", config_file.display());
+
+    Ok(())
+}
+
+/// Set the default provider in the config (copies type + api_key from an existing provider).
+fn set_default_provider(config_file: &PathBuf, provider_name: &str) -> Result<(), CliError> {
+    let content = std::fs::read_to_string(config_file).unwrap_or_default();
+
+    // Already has a default? Skip.
+    if content.contains("[providers.default]") {
+        return Ok(());
+    }
+
+    // Find the provider's type and api_key
+    let section = format!("[providers.{}]", provider_name);
+    if let Some(start) = content.find(&section) {
+        let block = &content[start..];
+        let type_val = block
+            .lines()
+            .find(|l| l.starts_with("type = "))
+            .unwrap_or("type = \"openai\"");
+        let key_val = block
+            .lines()
+            .find(|l| l.starts_with("api_key = "))
+            .unwrap_or("api_key = \"\"");
+
+        // Insert default provider before the first [providers.*] section
+        let default_block = format!("\n[providers.default]\n{}\n{}\n", type_val, key_val);
+
+        // Find insertion point: just before the first [providers.*]
+        if let Some(pos) = content.find("[providers.") {
+            let mut new_content = String::with_capacity(content.len() + default_block.len());
+            new_content.push_str(&content[..pos]);
+            new_content.push_str(&default_block);
+            new_content.push_str(&content[pos..]);
+
+            std::fs::write(config_file, new_content).map_err(|e| {
+                CliError::Other(format!("Failed to write {}: {}", config_file.display(), e))
+            })?;
+        }
     }
 
     Ok(())
