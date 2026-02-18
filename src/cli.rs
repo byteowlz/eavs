@@ -1830,6 +1830,8 @@ pub struct RoutingTestResult {
     pub method: String,
     pub success: bool,
     pub resolved_provider: Option<String>,
+    pub status_code: Option<u16>,
+    pub note: Option<String>,
     pub error: Option<String>,
 }
 
@@ -1919,20 +1921,37 @@ pub async fn run_test_routing(
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
 
-                // Consider it a success if we got a provider header back
-                // (even if the actual API call failed due to missing API key)
+                let code = r.status().as_u16();
+                let (success, note) = if resolved.is_some() {
+                    (true, None)
+                } else if r.status().is_success() {
+                    (true, None)
+                } else if code == 401 || code == 403 {
+                    (true, Some("routing OK (auth failed)".to_string()))
+                } else {
+                    (false, None)
+                };
+
                 RoutingTestResult {
                     method: "model auto-detection".to_string(),
-                    success: resolved.is_some(),
+                    success,
                     resolved_provider: resolved,
-                    error: None,
+                    status_code: Some(code),
+                    note,
+                    error: if !success {
+                        Some(format!("HTTP {}", code))
+                    } else {
+                        None
+                    },
                 }
             }
             Err(e) => RoutingTestResult {
                 method: "model auto-detection".to_string(),
                 success: false,
                 resolved_provider: None,
-                error: Some(e.to_string()),
+                status_code: None,
+                note: None,
+                error: Some(format!("Connection failed: {}", e)),
             },
         };
         Some(result)
@@ -2010,13 +2029,35 @@ async fn test_routing_method(
                 .map(|s| s.to_string());
 
             let status = resp.status();
+            let code = status.as_u16();
 
-            // Consider success if we got the provider header (routing worked)
-            // even if status is 401/403 (auth issue, not routing issue)
-            let success = resolved.is_some() || status.is_success();
+            // Determine routing success:
+            // - x-eavs-provider header present = routing definitely worked
+            // - 200/2xx = success (routing + auth both worked)
+            // - 401/403 = routing worked but auth failed (server accepted
+            //   the route, just rejected credentials)
+            // - 404 = routing failed (unknown path/provider)
+            // - Connection error = server unreachable
+            let (success, note) = if resolved.is_some() {
+                (true, None)
+            } else if status.is_success() {
+                (true, None)
+            } else if code == 401 || code == 403 {
+                (
+                    true,
+                    Some(
+                        "routing OK (auth failed - provide a valid API key to fully verify)"
+                            .to_string(),
+                    ),
+                )
+            } else if code == 404 {
+                (false, Some("provider or path not found".to_string()))
+            } else {
+                (false, None)
+            };
 
-            let error = if !status.is_success() && resolved.is_none() {
-                Some(format!("HTTP {}", status))
+            let error = if !success {
+                Some(format!("HTTP {} {}", code, status.canonical_reason().unwrap_or("")))
             } else {
                 None
             };
@@ -2025,6 +2066,8 @@ async fn test_routing_method(
                 method: method_name.to_string(),
                 success,
                 resolved_provider: resolved,
+                status_code: Some(code),
+                note,
                 error,
             }
         }
@@ -2032,18 +2075,24 @@ async fn test_routing_method(
             method: method_name.to_string(),
             success: false,
             resolved_provider: None,
-            error: Some(e.to_string()),
+            status_code: None,
+            note: None,
+            error: Some(format!("Connection failed: {}", e)),
         },
     }
 }
 
 /// Print a single routing test result in text format
 fn print_routing_result(result: &RoutingTestResult) {
-    let status = if result.success { "OK" } else { "FAIL" };
-    print!("  {}: {}", result.method, status);
+    let label = if result.success { "OK" } else { "FAIL" };
+    print!("  {}: {}", result.method, label);
 
     if let Some(ref provider) = result.resolved_provider {
         print!(" (resolved to: {})", provider);
+    }
+
+    if let Some(ref note) = result.note {
+        print!(" - {}", note);
     }
 
     if let Some(ref err) = result.error {
