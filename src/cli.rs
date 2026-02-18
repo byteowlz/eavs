@@ -162,17 +162,17 @@ pub enum ModelCommands {
     },
     /// Export configured providers and models for an agent harness
     ///
-    /// Reads the eavs config to find configured providers, resolves their
-    /// model lists (shortlist from config or full catalog), and outputs
-    /// in the target harness format.
+    /// Uses TypeScript adapters (in adapters/<name>/adapter.ts) to generate
+    /// config files for different agent harnesses. Run without arguments to
+    /// list available adapters.
     ///
     /// Examples:
     ///   eavs models export pi > ~/.pi/agent/models.json
     ///   eavs models export pi --api-key sk-xxx --base-url http://host:3033
+    ///   eavs models export pi --merge ~/.pi/agent/models.json
     Export {
-        /// Target harness format
-        #[arg(value_enum)]
-        format: ExportFormat,
+        /// Target adapter name (e.g., "pi"). Omit to list available adapters.
+        adapter: Option<String>,
         /// Override eavs base URL (default: http://127.0.0.1:<port> from config)
         #[arg(long)]
         base_url: Option<String>,
@@ -182,6 +182,10 @@ pub enum ModelCommands {
         /// Path to eavs config file (default: auto-detect)
         #[arg(long, short)]
         config: Option<String>,
+        /// Merge into an existing config file instead of full export.
+        /// Replaces eavs-managed entries, preserves everything else.
+        #[arg(long, short)]
+        merge: Option<String>,
     },
     /// Update the cached model catalog from models.dev
     Update,
@@ -189,15 +193,7 @@ pub enum ModelCommands {
     Stats,
 }
 
-/// Supported agent harness export formats
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum ExportFormat {
-    /// Pi coding agent (models.json)
-    Pi,
-    // Future formats:
-    // /// OpenCode (opencode.json)
-    // Opencode,
-}
+
 
 #[derive(Subcommand)]
 pub enum SetupCommands {

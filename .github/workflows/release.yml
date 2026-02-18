@@ -65,7 +65,9 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czvf ../../../eavs-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz eavs
+          # Include adapters alongside the binary in the tarball
+          cp -r ${{ github.workspace }}/adapters .
+          tar czvf ../../../eavs-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz eavs adapters
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
