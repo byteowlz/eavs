@@ -30,9 +30,12 @@ build:
 run *args:
     cargo run -- {{args}}
 
-# Install binary locally
+# Install binary and adapters locally
 install:
     cargo install --path .
+    @mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters"
+    @cp -r adapters/* "${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters/"
+    @echo "Adapters installed to ${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters/"
 
 # Clean build artifacts
 clean:
