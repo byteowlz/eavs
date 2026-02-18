@@ -245,9 +245,7 @@ mod tests {
         };
 
         let mut body = json!({"model":"gpt-5.2-codex","input":[],"store":false});
-        policy
-            .apply("default", "/v1/responses", &mut body)
-            .unwrap();
+        policy.apply("default", "/v1/responses", &mut body).unwrap();
         assert_eq!(body["store"], true);
     }
 
@@ -265,9 +263,7 @@ mod tests {
         };
 
         let mut body = json!({"model":"gpt-4o","input":[],"store":false});
-        policy
-            .apply("default", "/v1/responses", &mut body)
-            .unwrap();
+        policy.apply("default", "/v1/responses", &mut body).unwrap();
         assert_eq!(body["store"], false);
     }
 

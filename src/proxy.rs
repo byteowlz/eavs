@@ -1881,7 +1881,14 @@ async fn ws_proxy_handler_inner(
 
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
-            api_key = match resolve_oauth_access_token_with_account(&state, &provider_name, oauth_user, validated.oauth_account.as_deref()).await {
+            api_key = match resolve_oauth_access_token_with_account(
+                &state,
+                &provider_name,
+                oauth_user,
+                validated.oauth_account.as_deref(),
+            )
+            .await
+            {
                 Ok(token) => token,
                 Err(msg) => {
                     return (
@@ -2140,11 +2147,8 @@ async fn codex_ws_handler_inner(
         return (
             StatusCode::UNAUTHORIZED,
             Json(
-                ProxyError::new(
-                    "Authorization header required",
-                    "authentication_error",
-                )
-                .with_code("missing_api_key"),
+                ProxyError::new("Authorization header required", "authentication_error")
+                    .with_code("missing_api_key"),
             ),
         )
             .into_response();
@@ -2175,7 +2179,14 @@ async fn codex_ws_handler_inner(
     // Resolve OAuth token if key is bound to an oauth_user
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
-            api_key = match resolve_oauth_access_token_with_account(&state, &provider_name, oauth_user, validated.oauth_account.as_deref()).await {
+            api_key = match resolve_oauth_access_token_with_account(
+                &state,
+                &provider_name,
+                oauth_user,
+                validated.oauth_account.as_deref(),
+            )
+            .await
+            {
                 Ok(token) => token,
                 Err(msg) => {
                     return (
@@ -2354,8 +2365,7 @@ async fn codex_ws_handler_inner(
                             .unwrap_or_default();
 
                         if event_type == "response.completed" || event_type == "response.done" {
-                            if let (Some(ref kh), Some(ref validator)) =
-                                (&key_hash, &key_validator)
+                            if let (Some(ref kh), Some(ref validator)) = (&key_hash, &key_validator)
                             {
                                 // Extract usage from response.completed.response.usage
                                 let usage = json
@@ -2369,16 +2379,19 @@ async fn codex_ws_handler_inner(
                                     let input_tokens = usage
                                         .get("input_tokens")
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as u32;
+                                        .unwrap_or(0)
+                                        as u32;
                                     let output_tokens = usage
                                         .get("output_tokens")
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as u32;
+                                        .unwrap_or(0)
+                                        as u32;
                                     let cached_tokens = usage
                                         .get("input_tokens_details")
                                         .and_then(|d| d.get("cached_tokens"))
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as u32;
+                                        .unwrap_or(0)
+                                        as u32;
 
                                     let cost_usd = if let Some(ref cc) = cost_calc {
                                         cc.calculate_actual_cost(
@@ -2894,7 +2907,10 @@ async fn resolve_oauth_access_token_with_account(
             if account_label == "default" {
                 "OAuth credentials not found".to_string()
             } else {
-                format!("OAuth credentials not found for account '{}'", account_label)
+                format!(
+                    "OAuth credentials not found for account '{}'",
+                    account_label
+                )
             }
         })?;
 

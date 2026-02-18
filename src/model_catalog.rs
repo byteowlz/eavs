@@ -143,10 +143,7 @@ impl ModelCatalog {
         // Fetch fresh
         match fetch_catalog().await {
             Ok(providers) => {
-                info!(
-                    "Fetched model catalog: {} providers",
-                    providers.len()
-                );
+                info!("Fetched model catalog: {} providers", providers.len());
                 // Write cache (best-effort)
                 if let Err(e) = write_cache(&cache_path, &providers) {
                     warn!("Failed to write catalog cache: {}", e);
@@ -287,7 +284,10 @@ fn try_load_cache(path: &PathBuf) -> Option<HashMap<String, CatalogProvider>> {
     let age = SystemTime::now().duration_since(modified).ok()?;
 
     if age > CACHE_MAX_AGE {
-        debug!("Catalog cache expired ({:.1}h old)", age.as_secs_f64() / 3600.0);
+        debug!(
+            "Catalog cache expired ({:.1}h old)",
+            age.as_secs_f64() / 3600.0
+        );
         return None;
     }
 
