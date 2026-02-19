@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.10] - 2026-02-19
+
+### Added
+- `eavs models configured` command to show models from eavs.toml shortlists
+- `--discover` flag to probe provider endpoints for available models
+- Model discovery for OpenAI-compatible, Google Gemini, and Ollama endpoints
+- Non-chat model filtering (removes fine-tunes, embeddings, TTS, image, realtime models)
+- JSON output support via `--json` flag
+- Optional provider filter argument
+
 ## [0.5.3] - 2026-02-17
 
 ### Added

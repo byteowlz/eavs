@@ -8,6 +8,7 @@ mod export;
 mod keys;
 mod logging;
 mod model_catalog;
+mod model_discovery;
 mod network_acl;
 mod oauth;
 mod plugins;
@@ -43,6 +44,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -251,6 +253,120 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                     );
                 }
                 println!("\n{} models", models.len());
+            }
+        }
+        ModelCommands::Configured { provider, json, discover } => {
+            use crate::config::AppConfig;
+            use crate::model_discovery::discover_provider_models;
+
+            let config = AppConfig::load()
+                .map_err(|e| cli::CliError::Other(format!("Failed to load config: {}", e)))?;
+
+            let providers_to_show: Vec<(String, crate::config::ProviderConfig)> = if let Some(p) = provider {
+                match config.providers.get(&p) {
+                    Some(cfg) => vec![(p.clone(), cfg.clone())],
+                    None => {
+                        eprintln!("Provider '{}' not found in config", p);
+                        eprintln!("Available: {}", config.providers.keys().cloned().collect::<Vec<_>>().join(", "));
+                        return Ok(());
+                    }
+                }
+            } else {
+                config.providers.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            };
+
+            // Discover from endpoints if requested
+            let discovered: HashMap<String, Vec<crate::model_discovery::DiscoveredModel>> = if discover {
+                let mut results = HashMap::new();
+                for (name, cfg) in &providers_to_show {
+                    match discover_provider_models(name, cfg).await {
+                        Ok(models) => {
+                            if !models.is_empty() {
+                                results.insert(name.clone(), models);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("  Note: Could not discover models from {}: {}", name, e);
+                        }
+                    }
+                }
+                results
+            } else {
+                HashMap::new()
+            };
+
+            if json {
+                let result: serde_json::Value = providers_to_show
+                    .into_iter()
+                    .map(|(name, cfg)| {
+                        let models: Vec<_> = cfg.models.iter().map(|m| {
+                            serde_json::json!({
+                                "id": m.id,
+                                "name": m.name,
+                                "reasoning": m.reasoning,
+                                "context_window": m.context_window,
+                                "max_tokens": m.max_tokens,
+                                "cost": m.cost,
+                                "input": m.input,
+                            })
+                        }).collect();
+                        let discovered_models = discovered.get(&name).map(|d| {
+                            d.iter().map(|m| serde_json::json!({
+                                "id": &m.id,
+                                "name": &m.name,
+                                "context_window": m.context_window,
+                                "source": "discovered",
+                            })).collect::<Vec<_>>()
+                        }).unwrap_or_default();
+                        (name, serde_json::json!({ 
+                            "type": cfg.type_, 
+                            "models": models,
+                            "discovered": discovered_models,
+                        }))
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>()
+                    .into();
+                println!("{}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()));
+            } else {
+                for (name, cfg) in &providers_to_show {
+                    println!("\n{} [{}]", name, cfg.type_);
+                    println!("{}", "-".repeat(60));
+                    
+                    // Show configured models
+                    if cfg.models.is_empty() {
+                        println!("  Configured: (none - uses full catalog)");
+                    } else {
+                        println!("  Configured models:");
+                        println!("    {:<30} {:>10} {:>10} {:>8} {:>8}",
+                            "MODEL", "CONTEXT", "OUTPUT", "$/M IN", "$/M OUT");
+                        for m in &cfg.models {
+                            println!("    {:<30} {:>10} {:>10} {:>8.2} {:>8.2}",
+                                if m.name.is_empty() { &m.id } else { &m.name },
+                                format_num(m.context_window),
+                                format_num(m.max_tokens),
+                                m.cost.input,
+                                m.cost.output,
+                            );
+                        }
+                    }
+                    
+                    // Show discovered models
+                    if let Some(disc) = discovered.get(name) {
+                        println!("  Discovered from endpoint:");
+                        for m in disc {
+                            let name_str = m.name.as_deref().unwrap_or(&m.id);
+                            let ctx_str = m.context_window.map(|c| format!("{} ctx", format_num(c))).unwrap_or_default();
+                            println!("    - {} {}", name_str, ctx_str);
+                        }
+                    }
+                }
+                let total_configured: usize = providers_to_show.iter().map(|(_, cfg)| cfg.models.len()).sum();
+                let total_discovered: usize = discovered.values().map(|v| v.len()).sum();
+                println!("\nTotal: {} providers, {} configured, {} discovered", 
+                    providers_to_show.len(), total_configured, total_discovered);
+                if !discover {
+                    println!("\nTip: Use --discover to probe endpoints for available models");
+                }
             }
         }
         ModelCommands::Search { query, json } => {

@@ -144,7 +144,7 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ModelCommands {
-    /// List models for a provider
+    /// List models for a provider (from catalog)
     List {
         /// Provider name (e.g., openai, anthropic, google)
         provider: String,
@@ -152,7 +152,18 @@ pub enum ModelCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Search models across all providers
+    /// Show models configured in eavs.toml (shortlists)
+    Configured {
+        /// Provider name (optional - if omitted, shows all providers)
+        provider: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Probe provider endpoints to discover available models
+        #[arg(long)]
+        discover: bool,
+    },
+    /// Search models across all providers (from catalog)
     Search {
         /// Search query (matches model ID or name, case-insensitive)
         query: String,
