@@ -4,8 +4,9 @@
  * Generates Aider-compatible configuration.
  * Aider can use .aider.conf.yml in project root or ~/.aider.conf.yml
  *
- * Aider's config is simpler - mostly model selection and API keys.
- * It doesn't have a structured providers object like Pi.
+ * All requests route through eavs as the proxy. Aider's config is simpler
+ * than most -- it primarily needs a model name, API key, and base URL.
+ * When routing through eavs, we use the eavs provider-prefixed URL.
  */
 
 import type {
@@ -16,88 +17,59 @@ import type {
 } from "../types/index.ts";
 import { runAdapter } from "../types/index.ts";
 
-/** Get default model for provider */
-function defaultModelForProvider(provider: EavsProvider): string {
-  const defaults: Record<string, string> = {
-    openai: "gpt-4o",
-    anthropic: "claude-sonnet-4",
-    google: "gemini-2.0-flash",
-    "google-vertex": "gemini-2.0-flash",
-    azure: "gpt-4o",
-    mistral: "mistral-large",
-    groq: "llama-3.3-70b",
-    xai: "grok-2",
-    openrouter: "openai/gpt-4o",
-  };
-
-  if (provider.models.length > 0) {
-    return provider.models[0].id;
-  }
-
-  return defaults[provider.type] ?? "gpt-4o";
-}
-
-/** Get API key env var for provider */
-function apiKeyEnvVar(providerType: string): string {
-  const envVars: Record<string, string> = {
-    openai: "OPENAI_API_KEY",
-    anthropic: "ANTHROPIC_API_KEY",
-    google: "GEMINI_API_KEY",
-    "google-vertex": "GEMINI_API_KEY",
-    azure: "AZURE_OPENAI_API_KEY",
-    mistral: "MISTRAL_API_KEY",
-    groq: "GROQ_API_KEY",
-    cerebras: "CEREBRAS_API_KEY",
-    xai: "XAI_API_KEY",
-    openrouter: "OPENROUTER_API_KEY",
-    bedrock: "AWS_ACCESS_KEY_ID",
-  };
-
-  return envVars[providerType] ?? "OPENAI_API_KEY";
-}
-
-/** Build Aider config */
-function buildAiderConfig(
-  providers: EavsProvider[],
-  _baseUrl: string,
-  _apiKey: string
-): Record<string, unknown> {
-  // Find the default or first provider
-  const defaultProvider =
-    providers.find((p) => p.name === "default") ?? providers[0];
-
-  if (!defaultProvider) {
-    return {
-      model: "gpt-4o",
-    };
-  }
-
-  const model = defaultModelForProvider(defaultProvider);
-
-  // Aider uses a simple model identifier
-  // Format: provider/model-name or just model-name
-  let aiderModel = model;
-  if (!model.includes("/")) {
-    // Check if we need to prefix with provider name
-    const needsPrefix = ["ollama", "openrouter", "bedrock"].includes(
-      defaultProvider.type
-    );
-    if (needsPrefix) {
-      aiderModel = `${defaultProvider.type}/${model}`;
+/** Pick the best default model from available providers */
+function pickDefaultModel(providers: EavsProvider[]): string {
+  // Prefer anthropic sonnet, then openai gpt-4o, then first available
+  for (const provider of providers) {
+    if (provider.name === "default") continue;
+    for (const model of provider.models) {
+      if (model.id.includes("sonnet")) return model.id;
     }
   }
+  for (const provider of providers) {
+    if (provider.name === "default") continue;
+    for (const model of provider.models) {
+      if (model.id.includes("gpt-4o")) return model.id;
+    }
+  }
+  const first = providers.find((p) => p.name !== "default");
+  if (first && first.models.length > 0) return first.models[0].id;
+  return "gpt-4o";
+}
+
+/** Find which provider owns the default model */
+function findProviderForModel(
+  providers: EavsProvider[],
+  modelId: string
+): EavsProvider | undefined {
+  for (const provider of providers) {
+    if (provider.name === "default") continue;
+    for (const model of provider.models) {
+      if (model.id === modelId) return provider;
+    }
+  }
+  return providers.find((p) => p.name !== "default");
+}
+
+/** Build Aider config routing through eavs */
+function buildAiderConfig(
+  providers: EavsProvider[],
+  baseUrl: string,
+  apiKey: string
+): Record<string, unknown> {
+  const base = baseUrl.replace(/\/+$/, "");
+  const model = pickDefaultModel(providers);
+  const provider = findProviderForModel(providers, model);
 
   const config: Record<string, unknown> = {
-    model: aiderModel,
+    model: model,
+    // Aider uses openai_api_key for the API key and openai_api_base for the
+    // base URL, which works for OpenAI-compatible endpoints (which eavs is).
+    openai_api_key: apiKey,
   };
 
-  // Add API key env var comment (not actual key for security)
-  const envVar = apiKeyEnvVar(defaultProvider.type);
-  config.api_key_env_var = envVar;
-
-  // Add base URL if non-standard
-  if (defaultProvider.type === "ollama") {
-    config.base_url = "http://localhost:11434/v1";
+  if (provider) {
+    config.openai_api_base = `${base}/${provider.name}/v1`;
   }
 
   return config;
@@ -122,7 +94,6 @@ runAdapter({
   },
 
   merge(req: MergeRequest): Record<string, unknown> {
-    // Parse existing YAML
     let existing: Record<string, unknown>;
     try {
       existing = parseYaml(req.existing);
@@ -137,10 +108,11 @@ runAdapter({
       req.api_key
     );
 
-    // Preserve non-eavs settings
+    // Preserve non-eavs settings (anything we don't manage)
     const preserved: Record<string, unknown> = {};
+    const managedKeys = ["model", "openai_api_key", "openai_api_base", "api_key", "api_key_env_var", "base_url"];
     for (const [key, value] of Object.entries(existing)) {
-      if (key !== "model" && key !== "api_key" && key !== "base_url") {
+      if (!managedKeys.includes(key)) {
         preserved[key] = value;
       }
     }
@@ -148,8 +120,6 @@ runAdapter({
     return {
       ...preserved,
       ...newConfig,
-      // Mark as eavs-managed
-      _comment: "eavs-managed configuration - model settings from eavs",
     };
   },
 });
