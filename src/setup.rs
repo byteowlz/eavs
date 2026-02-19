@@ -12,7 +12,10 @@ use crate::provider::ProviderType;
 use dialoguer::{Confirm, Select};
 // Note: we intentionally avoid dialoguer::Input for text fields because it
 // uses raw terminal mode which breaks bracketed paste (duplicating text).
-// Plain stdin line reads via prompt_input() handle paste correctly.
+// Plain line reads via prompt_input() handle paste correctly.
+// We read from /dev/tty explicitly so that dialoguer's Select (which also
+// uses /dev/tty in raw mode) doesn't leave stale bytes in stdin's buffer
+// that would cause the next read_line() to silently consume a phantom newline.
 use std::collections::HashMap;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -91,11 +94,26 @@ const FOUNDRY_MODEL_CHOICES: &[(&str, &str, &str)] = &[
 // =============================================================================
 
 /// Run the interactive setup wizard.
-pub async fn run_setup_add(config_path: Option<&str>, batch: bool) -> Result<(), CliError> {
+pub async fn run_setup_add(
+    config_path: Option<&str>,
+    batch: bool,
+    env_file: Option<&str>,
+    import: Option<&str>,
+) -> Result<(), CliError> {
     let config_file = resolve_config_path(config_path)?;
 
     // Ensure a base config exists (server, logging, etc.)
     ensure_base_config(&config_file)?;
+
+    // Load env file if provided (KEY=VALUE lines -> std::env::set_var)
+    if let Some(path) = env_file {
+        load_env_file(path)?;
+    }
+
+    // Import provider configs from TOML file if provided
+    if let Some(path) = import {
+        import_providers_from_toml(&config_file, path)?;
+    }
 
     if batch {
         // Batch mode: scan environment for known API keys, offer each
@@ -120,6 +138,187 @@ pub async fn run_setup_add(config_path: Option<&str>, batch: bool) -> Result<(),
 
     println!();
     println!("Config written to {}", config_file.display());
+    Ok(())
+}
+
+/// Load a KEY=VALUE env file into the current process environment.
+/// Lines starting with # are comments, empty lines are skipped.
+fn load_env_file(path: &str) -> Result<(), CliError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Other(format!("Cannot read env file {}: {}", path, e)))?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if !key.is_empty() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Import provider sections from a TOML file and append them to the config.
+/// The TOML file should contain `[providers.<name>]` sections.
+fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Result<(), CliError> {
+    let import_content = std::fs::read_to_string(import_path)
+        .map_err(|e| CliError::Other(format!("Cannot read import file {}: {}", import_path, e)))?;
+
+    // Parse the import file to extract provider sections
+    let import_toml: toml::Value = import_content
+        .parse()
+        .map_err(|e| CliError::Other(format!("Invalid TOML in {}: {}", import_path, e)))?;
+
+    let providers = import_toml
+        .get("providers")
+        .and_then(|p| p.as_table())
+        .ok_or_else(|| {
+            CliError::Other(format!(
+                "No [providers.*] sections found in {}",
+                import_path
+            ))
+        })?;
+
+    // Read existing config to check for duplicates
+    let existing = std::fs::read_to_string(config_file).unwrap_or_default();
+    let mut appended = Vec::new();
+
+    for (name, config) in providers {
+        if name == "default" {
+            continue;
+        }
+        let section = format!("[providers.{}]", name);
+        if existing.contains(&section) {
+            println!("  {} -- already configured, skipping", name);
+            continue;
+        }
+
+        // Serialize the provider config as TOML and append
+        let mut lines = vec![String::new(), section];
+        if let Some(table) = config.as_table() {
+            for (key, value) in table {
+                lines.push(format!("{} = {}", key, format_toml_value(value)));
+            }
+        }
+
+        let block = lines.join("\n");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(config_file)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "Cannot append to {}: {}",
+                    config_file.display(),
+                    e
+                ))
+            })?;
+        use std::io::Write;
+        writeln!(file, "{}", block).map_err(|e| {
+            CliError::Other(format!(
+                "Cannot write to {}: {}",
+                config_file.display(),
+                e
+            ))
+        })?;
+
+        appended.push(name.clone());
+        println!("  Imported provider: {}", name);
+    }
+
+    if appended.is_empty() {
+        println!("  No new providers to import from {}", import_path);
+    } else {
+        println!("  Imported {} provider(s)", appended.len());
+
+        // Set default if there isn't one already
+        if !existing.contains("[providers.default]") {
+            if let Some(first_name) = appended.first() {
+                if let Some(first_config) = providers.get(first_name) {
+                    set_default_from_imported(config_file, first_name, first_config)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Format a TOML value for writing to config.
+fn format_toml_value(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => format!("\"{}\"", s),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(|v| format_toml_value(v)).collect();
+            format!("[{}]", items.join(", "))
+        }
+        toml::Value::Table(t) => {
+            let items: Vec<String> = t
+                .iter()
+                .map(|(k, v)| format!("{} = {}", k, format_toml_value(v)))
+                .collect();
+            format!("{{ {} }}", items.join(", "))
+        }
+        toml::Value::Datetime(d) => d.to_string(),
+    }
+}
+
+/// Set the default provider from an imported provider config.
+fn set_default_from_imported(
+    config_file: &PathBuf,
+    name: &str,
+    config: &toml::Value,
+) -> Result<(), CliError> {
+    let table = match config.as_table() {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    let type_ = table
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai");
+    let api_key = table
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if api_key.is_empty() {
+        return Ok(());
+    }
+
+    let default_block = format!(
+        "\n[providers.default]\ntype = \"{}\"\napi_key = \"{}\"\n",
+        type_, api_key
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(config_file)
+        .map_err(|e| {
+            CliError::Other(format!(
+                "Cannot append to {}: {}",
+                config_file.display(),
+                e
+            ))
+        })?;
+    use std::io::Write;
+    write!(file, "{}", default_block).map_err(|e| {
+        CliError::Other(format!(
+            "Cannot write to {}: {}",
+            config_file.display(),
+            e
+        ))
+    })?;
+
+    println!("  Set default provider: {}", name);
     Ok(())
 }
 
@@ -1608,16 +1807,21 @@ fn save_provider_to_config(
 /// the application as duplicate characters.
 fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String, CliError> {
     match default {
-        Some(d) if !d.is_empty() => print!("{} [{}]: ", prompt, d),
-        _ => print!("{}: ", prompt),
+        Some(d) if !d.is_empty() => eprint!("{} [{}]: ", prompt, d),
+        _ => eprint!("{}: ", prompt),
     }
-    io::stdout()
+    io::stderr()
         .flush()
         .map_err(|e| CliError::Other(e.to_string()))?;
 
+    // Read from /dev/tty explicitly, matching what dialoguer::Select does
+    // internally. This avoids issues where Select leaves stale bytes in
+    // stdin's buffer after switching out of raw terminal mode.
+    let tty = std::fs::File::open("/dev/tty")
+        .map_err(|e| CliError::Other(format!("Cannot open /dev/tty: {}", e)))?;
+    let mut reader = io::BufReader::new(tty);
     let mut line = String::new();
-    io::stdin()
-        .lock()
+    reader
         .read_line(&mut line)
         .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
 
@@ -1632,11 +1836,13 @@ fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String, CliError>
 
 /// Prompt for required (non-empty) text input.
 fn prompt_input_required(prompt: &str) -> Result<String, CliError> {
-    let value = prompt_input(prompt, None)?;
-    if value.is_empty() {
-        return Err(CliError::Other(format!("{} cannot be empty", prompt)));
+    loop {
+        let value = prompt_input(prompt, None)?;
+        if !value.is_empty() {
+            return Ok(value);
+        }
+        eprintln!("  {} cannot be empty, please try again.", prompt);
     }
-    Ok(value)
 }
 
 /// Mask a secret value for display.

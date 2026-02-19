@@ -1097,8 +1097,19 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
 
 async fn run_setup_command(action: SetupCommands) -> Result<(), cli::CliError> {
     match action {
-        SetupCommands::Add { config, batch } => {
-            setup::run_setup_add(config.as_deref(), batch).await
+        SetupCommands::Add {
+            config,
+            batch,
+            env_file,
+            import,
+        } => {
+            setup::run_setup_add(
+                config.as_deref(),
+                batch,
+                env_file.as_deref(),
+                import.as_deref(),
+            )
+            .await
         }
         SetupCommands::Test {
             provider,
