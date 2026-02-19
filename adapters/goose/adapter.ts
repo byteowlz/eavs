@@ -4,8 +4,9 @@
  * Generates Goose-compatible config.yaml from eavs provider configuration.
  * Goose stores config in ~/.config/goose/config.yaml
  *
- * Goose uses environment variables for provider configuration rather than
- * a structured providers object. We generate the relevant env vars.
+ * All requests route through eavs as the proxy. Goose uses environment
+ * variables for provider configuration, so we set the base URLs and API
+ * keys to point at eavs endpoints.
  */
 
 import type {
@@ -18,24 +19,29 @@ import { runAdapter } from "../types/index.ts";
 
 const MANAGED_PREFIX = "EAVS_";
 
-/** Map eavs provider type to Goose env vars */
-function gooseEnvVars(provider: EavsProvider, apiKey: string): Record<string, string> {
+/** Map eavs provider type to Goose env vars, routing through eavs */
+function gooseEnvVars(
+  provider: EavsProvider,
+  baseUrl: string,
+  apiKey: string
+): Record<string, string> {
   const vars: Record<string, string> = {};
+  const base = baseUrl.replace(/\/+$/, "");
+  const providerUrl = `${base}/${provider.name}/v1`;
   const name = provider.name.toUpperCase().replace(/-/g, "_");
-  const type = provider.type.toUpperCase().replace(/-/g, "_");
 
   // Goose uses specific env vars per provider type
   switch (provider.type) {
     case "openai":
-      vars.OPENAI_BASE_PATH = `${providerBaseUrl(provider)}/chat/completions`;
+      vars.OPENAI_BASE_PATH = `${providerUrl}/chat/completions`;
       vars.OPENAI_API_KEY = apiKey;
       break;
     case "anthropic":
-      vars.ANTHROPIC_BASE_PATH = `${providerBaseUrl(provider)}/messages`;
+      vars.ANTHROPIC_BASE_PATH = `${providerUrl}/messages`;
       vars.ANTHROPIC_API_KEY = apiKey;
       break;
     case "azure":
-      vars.AZURE_OPENAI_ENDPOINT = providerBaseUrl(provider);
+      vars.AZURE_OPENAI_ENDPOINT = providerUrl;
       vars.AZURE_OPENAI_API_KEY = apiKey;
       break;
     case "google":
@@ -43,56 +49,34 @@ function gooseEnvVars(provider: EavsProvider, apiKey: string): Record<string, st
       vars.GOOGLE_API_KEY = apiKey;
       break;
     case "ollama":
-      vars.OLLAMA_HOST = "localhost:11434";
+      // Ollama through eavs still uses the eavs URL
+      vars.OLLAMA_HOST = providerUrl;
       break;
     default:
       // Generic provider config using provider name
-      vars[`${name}_BASE_URL`] = providerBaseUrl(provider);
+      vars[`${name}_BASE_URL`] = providerUrl;
       vars[`${name}_API_KEY`] = apiKey;
   }
 
   return vars;
 }
 
-/** Get base URL for provider */
-function providerBaseUrl(provider: EavsProvider): string {
-  const defaults: Record<string, string> = {
-    openai: "https://api.openai.com/v1",
-    anthropic: "https://api.anthropic.com/v1",
-    google: "https://generativelanguage.googleapis.com/v1beta",
-    "google-vertex": "https://generativelanguage.googleapis.com/v1beta",
-    azure: "https://YOUR_PROJECT_NAME.openai.azure.com/",
-    mistral: "https://api.mistral.ai/v1",
-    groq: "https://api.groq.com/openai/v1",
-    cerebras: "https://api.cerebras.ai/v1",
-    xai: "https://api.x.ai/v1",
-    openrouter: "https://openrouter.ai/api/v1",
-    ollama: "http://localhost:11434",
-    deepseek: "https://api.deepseek.com",
-  };
-
-  return defaults[provider.type] ?? "http://localhost:3000";
-}
-
-/** Build Goose config with provider env vars */
+/** Build Goose config with provider env vars routing through eavs */
 function buildGooseConfig(
   providers: EavsProvider[],
-  _baseUrl: string,
+  baseUrl: string,
   apiKey: string
 ): Record<string, unknown> {
   const envVars: Record<string, string> = {};
 
-  // Collect env vars from all providers
   for (const provider of providers) {
     if (provider.name === "default") continue;
-    const vars = gooseEnvVars(provider, apiKey);
+    const vars = gooseEnvVars(provider, baseUrl, apiKey);
     Object.assign(envVars, vars);
   }
 
   return {
-    // Include env vars at top level (Goose reads these)
     ...envVars,
-    // Default extensions (empty)
     extensions: {},
   };
 }
@@ -115,7 +99,6 @@ runAdapter({
   },
 
   merge(req: MergeRequest): Record<string, unknown> {
-    // Parse existing config
     let existing: Record<string, unknown>;
     try {
       existing = parseYaml(req.existing);
@@ -123,7 +106,7 @@ runAdapter({
       return buildGooseConfig(req.providers, req.base_url, req.api_key);
     }
 
-    // Remove eavs-managed env vars (prefixed with EAVS_ or known provider vars)
+    // Remove eavs-managed env vars
     const managedVars = [
       "OPENAI_BASE_PATH",
       "OPENAI_API_KEY",
@@ -145,11 +128,10 @@ runAdapter({
     const eavsVars: Record<string, string> = {};
     for (const provider of req.providers) {
       if (provider.name === "default") continue;
-      const vars = gooseEnvVars(provider, req.api_key);
+      const vars = gooseEnvVars(provider, req.base_url, req.api_key);
       Object.assign(eavsVars, vars);
     }
 
-    // Merge and return
     return {
       ...eavsVars,
       ...existing,
