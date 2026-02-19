@@ -128,3 +128,51 @@ Providers are configured through the Claude Code CLI/API, not static files.
 
 Based on hstry adapter analysis, OpenCode stores session data but provider
 config is likely in a config file. Need to check source for format.
+
+## OpenCode (~/.config/opencode/opencode.json)
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoshare": false,
+  "autoupdate": true,
+  "model": "anthropic/claude-opus-4-5",
+  "provider": {
+    "llamacpp": {
+      "models": {
+        "gpt-oss-120B": { "name": "gpt-oss-120B" }
+      },
+      "name": "Llama.cpp",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "sk-local-anything",
+        "baseURL": "http://100.64.0.12:8080/v1"
+      }
+    }
+  },
+  "mcp": {
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp"
+    }
+  },
+  "mode": {
+    "build": {},
+    "document": {},
+    "journal": {},
+    "plan": {}
+  }
+}
+```
+
+**Mapping to eavs:**
+- Providers have `models` object with model IDs as keys
+- Uses `npm` field for AI SDK package
+- `options` contains `apiKey` and `baseURL`
+- Model reference format: `provider-name/model-id`
+- Auth stored separately in `~/.local/share/opencode/auth.json`
+
+**Key differences:**
+- Model is specified at top level with provider/model format
+- Each provider needs an npm package from AI SDK
+- MCP servers configured separately in same file
