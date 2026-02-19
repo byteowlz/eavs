@@ -41,19 +41,9 @@ const PROVIDER_CHOICES: &[(&str, &str, &str)] = &[
     ("xAI", "xai", "Grok models"),
     ("OpenRouter", "openrouter", "Unified API for many models"),
     (
-        "Azure AI Foundry (OpenAI models)",
-        "openai",
-        "GPT-4o, o1, o3 hosted on Azure Foundry",
-    ),
-    (
-        "Azure AI Foundry (Anthropic models)",
-        "anthropic",
-        "Claude hosted on Azure Foundry",
-    ),
-    (
-        "Azure AI Foundry (Other models)",
-        "openai-compatible",
-        "DeepSeek, Llama, Phi, etc. on Azure Foundry",
+        "Azure AI Foundry",
+        "azure-foundry",
+        "GPT, Claude, DeepSeek, Llama, Phi, etc. on Azure",
     ),
     ("Azure OpenAI", "azure", "Azure OpenAI Service deployments"),
     ("AWS Bedrock", "bedrock", "AWS-hosted models (SigV4 auth)"),
@@ -74,10 +64,27 @@ const PROVIDER_CHOICES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Indices in PROVIDER_CHOICES that correspond to Azure Foundry entries
-const AZURE_FOUNDRY_OPENAI_IDX: usize = 8;
-const AZURE_FOUNDRY_ANTHROPIC_IDX: usize = 9;
-const AZURE_FOUNDRY_OTHER_IDX: usize = 10;
+/// Index in PROVIDER_CHOICES for the Azure AI Foundry entry
+const AZURE_FOUNDRY_IDX: usize = 8;
+
+/// Azure AI Foundry model family sub-choices (shown after selecting Foundry)
+const FOUNDRY_MODEL_CHOICES: &[(&str, &str, &str)] = &[
+    (
+        "OpenAI models",
+        "openai",
+        "GPT-4o, o1, o3, etc.",
+    ),
+    (
+        "Anthropic models",
+        "anthropic",
+        "Claude Opus, Sonnet, Haiku, etc.",
+    ),
+    (
+        "Other models",
+        "openai-compatible",
+        "DeepSeek, Llama, Phi, MAI, etc.",
+    ),
+];
 
 // =============================================================================
 // eavs setup add -- interactive wizard
@@ -264,16 +271,35 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
 
     let (display_name, type_str, _) = PROVIDER_CHOICES[selection];
-    let is_azure_foundry = matches!(
-        selection,
-        AZURE_FOUNDRY_OPENAI_IDX | AZURE_FOUNDRY_ANTHROPIC_IDX | AZURE_FOUNDRY_OTHER_IDX
-    );
+    let is_azure_foundry = selection == AZURE_FOUNDRY_IDX;
 
     println!();
     println!("Selected: {}", display_name);
 
-    // For OpenAI-family providers, let the user choose between API formats
-    let type_str = if type_str == "openai" {
+    // For Azure AI Foundry, ask which model family to determine the API type
+    let (type_str, foundry_model_family) = if is_azure_foundry {
+        println!();
+        let family_items: Vec<String> = FOUNDRY_MODEL_CHOICES
+            .iter()
+            .map(|(name, _, desc)| format!("{:<30} {}", name, desc))
+            .collect();
+
+        let family_sel = Select::new()
+            .with_prompt("Which model family?")
+            .items(&family_items)
+            .default(0)
+            .interact()
+            .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+
+        let (_, family_type, _) = FOUNDRY_MODEL_CHOICES[family_sel];
+        println!("  Model family: {}", FOUNDRY_MODEL_CHOICES[family_sel].0);
+        (family_type, Some(family_sel))
+    } else {
+        (type_str, None)
+    };
+
+    // For OpenAI-family providers (non-Foundry), let the user choose between API formats
+    let type_str = if type_str == "openai" && !is_azure_foundry {
         println!();
         let api_choices = vec![
             "Chat Completions API (/v1/chat/completions)   Standard chat format",
@@ -298,7 +324,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
     println!();
 
     // 2. Provider name
-    let default_name = suggest_provider_name(display_name, selection);
+    let default_name = suggest_provider_name(display_name, selection, foundry_model_family);
     let provider_name = prompt_input(
         "Provider name (used in config and X-Provider header)",
         Some(&default_name),
@@ -311,7 +337,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
 
     // 3. Collect provider-specific fields
     let setup_config =
-        collect_provider_fields(provider_type, type_str, is_azure_foundry, selection)?;
+        collect_provider_fields(provider_type, type_str, is_azure_foundry, foundry_model_family)?;
 
     // 4. Test the configuration
     println!();
@@ -1091,16 +1117,24 @@ fn suggest_test_model_default(provider_type: ProviderType) -> String {
 // =============================================================================
 
 /// Suggest a default provider name based on selection.
-fn suggest_provider_name(display_name: &str, selection: usize) -> String {
-    match selection {
-        AZURE_FOUNDRY_OPENAI_IDX => "foundry-openai".to_string(),
-        AZURE_FOUNDRY_ANTHROPIC_IDX => "foundry-claude".to_string(),
-        AZURE_FOUNDRY_OTHER_IDX => "foundry-other".to_string(),
-        _ => display_name
+fn suggest_provider_name(
+    display_name: &str,
+    selection: usize,
+    foundry_model_family: Option<usize>,
+) -> String {
+    if selection == AZURE_FOUNDRY_IDX {
+        match foundry_model_family {
+            Some(0) => "foundry-openai".to_string(),
+            Some(1) => "foundry-claude".to_string(),
+            Some(_) => "foundry".to_string(),
+            None => "foundry".to_string(),
+        }
+    } else {
+        display_name
             .split_whitespace()
             .next()
             .unwrap_or("provider")
-            .to_lowercase(),
+            .to_lowercase()
     }
 }
 
@@ -1109,7 +1143,7 @@ fn collect_provider_fields(
     provider_type: ProviderType,
     type_str: &str,
     is_azure_foundry: bool,
-    selection: usize,
+    foundry_model_family: Option<usize>,
 ) -> Result<SetupProviderConfig, CliError> {
     let mut config = SetupProviderConfig {
         type_: type_str.to_string(),
@@ -1142,7 +1176,7 @@ fn collect_provider_fields(
 
     // -- Base URL --
     if is_azure_foundry {
-        config.base_url = Some(collect_azure_foundry_base_url(selection)?);
+        config.base_url = Some(collect_azure_foundry_base_url(foundry_model_family)?);
     } else {
         match provider_type {
             ProviderType::Azure => {
@@ -1228,7 +1262,8 @@ fn collect_provider_fields(
     }
 
     // -- Compat settings for OpenAI-compatible --
-    if selection == AZURE_FOUNDRY_OTHER_IDX
+    let is_foundry_other = is_azure_foundry && foundry_model_family.is_some_and(|f| f >= 2);
+    if is_foundry_other
         || (provider_type == ProviderType::OpenAICompatible && !is_azure_foundry)
     {
         let configure_compat = Confirm::new()
@@ -1396,21 +1431,23 @@ fn collect_api_key_or_env(prompt: &str, default_env: &str) -> Result<String, Cli
     }
 }
 
-/// Collect Azure Foundry base URL based on the specific variant.
-fn collect_azure_foundry_base_url(selection: usize) -> Result<String, CliError> {
+/// Collect Azure Foundry base URL based on the model family.
+fn collect_azure_foundry_base_url(foundry_model_family: Option<usize>) -> Result<String, CliError> {
     let resource = prompt_input_required("Azure AI Foundry resource name (e.g. 'my-resource')")?;
 
-    let base_url = match selection {
-        AZURE_FOUNDRY_OPENAI_IDX => {
+    let base_url = match foundry_model_family {
+        Some(0) => {
+            // OpenAI models
             format!("https://{}.services.ai.azure.com/openai/v1", resource)
         }
-        AZURE_FOUNDRY_ANTHROPIC_IDX => {
+        Some(1) => {
+            // Anthropic models
             format!("https://{}.openai.azure.com/anthropic/v1", resource)
         }
-        AZURE_FOUNDRY_OTHER_IDX => {
+        _ => {
+            // Other models (DeepSeek, Llama, Phi, etc.)
             format!("https://{}.services.ai.azure.com/openai/v1", resource)
         }
-        _ => unreachable!(),
     };
 
     println!("  Base URL: {}", base_url);
