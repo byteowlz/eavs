@@ -31,6 +31,8 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 
 ## Closed
 
+- [eavs-6mtk] Export adapters (codex, aider, goose) bypass eavs proxy (closed 2026-02-19)
+- [eavs-12wz] Confusing Azure AI Foundry setup: 3 separate menu entries instead of 1 (closed 2026-02-19)
 - [eavs-83mb] Add allow/deny lists for network proxy mode (closed 2026-02-17)
 - [eavs-08jz] Track upstream rate limit quotas from response headers (closed 2026-02-17)
 - [eavs-yrhd] Add proxy allow/deny lists (closed 2026-02-17)

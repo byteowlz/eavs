@@ -219,6 +219,16 @@ pub enum SetupCommands {
         /// Batch mode: auto-detect API keys from environment
         #[arg(short, long)]
         batch: bool,
+
+        /// Load environment variables from a file before scanning
+        /// (KEY=VALUE format, one per line). Used with --batch.
+        #[arg(long)]
+        env_file: Option<String>,
+
+        /// Import provider configs from a TOML file (appended to config).
+        /// The file should contain [providers.<name>] sections.
+        #[arg(long)]
+        import: Option<String>,
     },
 
     /// Test a provider from the config file (direct API call, no server needed)
