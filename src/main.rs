@@ -535,6 +535,8 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                             | ProviderType::GithubCopilot
                     ),
                     has_api_key,
+                    headers: std::collections::HashMap::new(),
+                    api_version: provider_config.api_version.clone(),
                     models,
                 });
             }

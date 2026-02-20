@@ -117,6 +117,7 @@ impl CatalogModel {
                 output: self.cost.output,
                 cache_read: self.cost.cache_read,
             },
+            compat: std::collections::HashMap::new(),
         }
     }
 }
