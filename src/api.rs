@@ -1300,6 +1300,111 @@ pub async fn oauth_delete_handler(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Catalog lookup -- search models.dev for model metadata
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CatalogLookupQuery {
+    /// Model ID to look up (exact or substring match)
+    pub model_id: String,
+    /// Optional: restrict to a specific provider in the catalog
+    pub provider: Option<String>,
+}
+
+/// Catalog model info returned by the lookup endpoint.
+#[derive(Serialize)]
+pub struct CatalogModelInfo {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub reasoning: bool,
+    pub input: Vec<String>,
+    pub context_window: u64,
+    pub max_tokens: u64,
+    pub cost: crate::config::ModelCost,
+}
+
+/// `GET /catalog/lookup?model_id=...&provider=...`
+///
+/// Searches the models.dev catalog for a model by ID.
+/// Returns matching model metadata (cost, context window, etc.) that can be
+/// used to auto-fill fields when adding models to a provider shortlist.
+///
+/// Requires master key authentication.
+pub async fn catalog_lookup_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<CatalogLookupQuery>,
+) -> Result<Json<Vec<CatalogModelInfo>>, (StatusCode, String)> {
+    let catalog = match state.catalog() {
+        Some(c) => c,
+        None => return Ok(Json(Vec::new())),
+    };
+
+    let model_id = query.model_id.trim();
+    if model_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "model_id is required".to_string()));
+    }
+
+    let model_id_lower = model_id.to_lowercase();
+    let mut results = Vec::new();
+
+    // Iterate all providers and find matching models
+    for pid in catalog.provider_ids() {
+        if let Some(ref filter_pid) = query.provider {
+            if pid != filter_pid.as_str() {
+                continue;
+            }
+        }
+        for model in catalog.catalog_models(pid) {
+            let id_lower = model.id.to_lowercase();
+            if id_lower == model_id_lower || id_lower.contains(&model_id_lower) {
+                let input: Vec<String> = if model.modalities.input.is_empty() {
+                    vec!["text".to_string()]
+                } else {
+                    model
+                        .modalities
+                        .input
+                        .iter()
+                        .filter(|m| *m == "text" || *m == "image")
+                        .cloned()
+                        .collect()
+                };
+                results.push(CatalogModelInfo {
+                    id: model.id.clone(),
+                    name: if model.name.is_empty() {
+                        model.id.clone()
+                    } else {
+                        model.name.clone()
+                    },
+                    provider: pid.to_string(),
+                    reasoning: model.reasoning,
+                    input,
+                    context_window: model.limit.context,
+                    max_tokens: model.limit.output,
+                    cost: crate::config::ModelCost {
+                        input: model.cost.input,
+                        output: model.cost.output,
+                        cache_read: model.cost.cache_read,
+                    },
+                });
+            }
+        }
+    }
+
+    // Sort: exact match first, then by name
+    results.sort_by(|a, b| {
+        let a_exact = a.id.to_lowercase() == model_id_lower;
+        let b_exact = b.id.to_lowercase() == model_id_lower;
+        b_exact.cmp(&a_exact).then(a.name.cmp(&b.name))
+    });
+
+    // Limit results
+    results.truncate(20);
+
+    Ok(Json(results))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

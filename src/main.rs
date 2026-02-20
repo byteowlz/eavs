@@ -736,6 +736,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Admin API - Pricing
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         .route("/admin/quotas", get(api::upstream_quotas_handler))
+        .route("/catalog/lookup", get(api::catalog_lookup_handler))
         // OAuth API
         .route("/auth/login/:provider", post(api::oauth_login_handler))
         .route("/auth/callback", post(api::oauth_callback_handler))
