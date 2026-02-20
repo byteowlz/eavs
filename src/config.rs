@@ -394,6 +394,10 @@ pub struct ModelShortlistEntry {
     /// Cost per million tokens: input, output, cache_read
     #[serde(default)]
     pub cost: ModelCost,
+    /// Compatibility flags for Pi (e.g., supportsDeveloperRole).
+    /// Passed through to models.json as-is.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub compat: HashMap<String, serde_json::Value>,
 }
 
 fn default_input_modalities() -> Vec<String> {

@@ -131,6 +131,14 @@ pub struct ProviderDetail {
     pub oauth: bool,
     /// Whether the provider has a resolved API key (not the key itself)
     pub has_api_key: bool,
+    /// Custom headers the provider requires (e.g., Azure `api-key`).
+    /// Keys/values are NOT resolved (no env: expansion) -- the consuming
+    /// integration (oqto) decides how to handle them.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+    /// API version string (Azure providers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
     /// Model list: config shortlist if set, otherwise full catalog from models.dev
     pub models: Vec<crate::config::ModelShortlistEntry>,
 }
@@ -163,6 +171,17 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                 Vec::new()
             };
 
+            // Collect non-secret headers. For Azure providers, the proxy
+            // injects the api-key header itself, so we expose it here as
+            // "EAVS_API_KEY" (a placeholder the consumer resolves).
+            let mut headers = std::collections::HashMap::new();
+            for (k, _v) in &config.headers {
+                // Don't leak actual header values — the eavs proxy handles
+                // header injection. But signal to the consumer which headers
+                // are required so it can set up the models.json correctly.
+                headers.insert(k.clone(), "EAVS_API_KEY".to_string());
+            }
+
             ProviderDetail {
                 name: name.clone(),
                 type_: config.type_.clone(),
@@ -174,6 +193,8 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                         | ProviderType::GoogleGeminiCli
                 ),
                 has_api_key,
+                headers,
+                api_version: config.api_version.clone(),
                 models,
             }
         })
