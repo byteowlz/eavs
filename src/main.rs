@@ -7,6 +7,7 @@ mod config;
 mod export;
 mod keys;
 mod logging;
+mod mock_provider;
 mod model_catalog;
 mod model_discovery;
 mod network_acl;

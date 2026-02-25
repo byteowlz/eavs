@@ -223,7 +223,7 @@ pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Opt
         | ProviderType::OpenAICompatible => Some("openai-completions"),
         ProviderType::GithubCopilot => Some("openai-responses"),
         ProviderType::Bedrock => Some("anthropic-messages"),
-        ProviderType::Mock => None,
+        ProviderType::Mock => Some("openai-completions"),
     }
 }
 
