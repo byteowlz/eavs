@@ -2,6 +2,44 @@
 
 ## Open
 
+### [eavs-bjsw.17] Register mock models in /providers/detail so they appear in models.json generation (mock/simple-text, mock/tool-call, etc.) (P1, task)
+
+### [eavs-bjsw.16] Full chunk audit logging: log every SSE chunk sent by mock provider with timestamps for debugging (P1, task)
+
+### [eavs-bjsw.15] Configurable delay via X-Mock-Delay-Ms header (default 30ms per chunk) (P1, task)
+
+### [eavs-bjsw.14] Scenario selection via X-Mock-Scenario request header and per-model config in eavs.toml (P1, task)
+
+### [eavs-bjsw.13] Mock scenario: malformed_sse -- return broken SSE formatting (missing data: prefix, double newlines in wrong places) (P1, task)
+
+### [eavs-bjsw.12] Mock scenario: long_text -- stream 500+ tokens to test backpressure and buffer handling (P1, task)
+
+### [eavs-bjsw.11] Mock scenario: thinking -- stream thinking/reasoning content blocks before main response (Anthropic extended thinking format) (P1, task)
+
+### [eavs-bjsw.10] Mock scenario: connection_reset -- drop TCP connection mid-stream after N chunks (P1, task)
+
+### [eavs-bjsw.9] Mock scenario: timeout -- accept request, hold connection open without sending data (test client-side timeout) (P1, task)
+
+### [eavs-bjsw.8] Mock scenario: server_error -- return 500/503 with OpenAI-format error JSON (P1, task)
+
+### [eavs-bjsw.7] Mock scenario: rate_limit -- return 429 with Retry-After header and proper error body (P1, task)
+
+### [eavs-bjsw.6] Mock scenario: error_mid_stream -- stream 3 normal chunks then emit an SSE error event (P1, task)
+
+### [eavs-bjsw.5] Mock scenario: tool_call_then_text -- after tool result in follow-up request, respond with text completion (P1, task)
+
+### [eavs-bjsw.4] Mock scenario: multi_tool -- emit two sequential tool_calls in one response (P1, task)
+
+### [eavs-bjsw.3] Mock scenario: tool_call -- emit properly formatted tool_call chunks (function name + streamed JSON args + finish_reason=tool_calls) (P1, task)
+
+### [eavs-bjsw.2] Mock scenario: simple_text -- stream realistic word-by-word text response with configurable delay (P1, task)
+
+### [eavs-bjsw.1] Extract mock provider into src/mock_provider.rs from inline proxy.rs handler (P1, task)
+
+### [eavs-bjsw] Enhanced mock provider: realistic streaming, tool calls, error simulation, configurable scenarios (P1, feature)
+
+### [eavs-1sfs] Upstream 401 errors cause request to hang instead of returning error (P1, bug)
+
 ### [eavs-a2wb] Add 'eavs setup init' for batch provider setup with model selection (P2, feature)
 setup.sh currently generates eavs config.toml via bash/jq string templating, which is fragile (stdout leaking into TOML, format mismatches). Eavs should own its own config generation.
 
