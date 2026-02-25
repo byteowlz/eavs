@@ -1,0 +1,119 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "eavs-bjsw.1: Extract mock provider into src/mock_provider.rs",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "eavs-bjsw.2: simple_text scenario - word-by-word streaming with delay",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "eavs-bjsw.3: tool_call scenario - tool_call chunks with function name + JSON args",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "eavs-bjsw.4: multi_tool scenario - two sequential tool_calls",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "eavs-bjsw.5: tool_call_then_text scenario - text after tool result",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "6",
+      "content": "eavs-bjsw.6: error_mid_stream scenario - 3 chunks then SSE error",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "7",
+      "content": "eavs-bjsw.7: rate_limit scenario - 429 + Retry-After",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "8",
+      "content": "eavs-bjsw.8: server_error scenario - 500/503 error JSON",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "9",
+      "content": "eavs-bjsw.9: timeout scenario - hold connection open",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "10",
+      "content": "eavs-bjsw.10: connection_reset scenario - drop TCP mid-stream",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "11",
+      "content": "eavs-bjsw.11: thinking scenario - thinking blocks before response",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "12",
+      "content": "eavs-bjsw.12: long_text scenario - 500+ tokens for backpressure",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "13",
+      "content": "eavs-bjsw.13: malformed_sse scenario - broken SSE formatting",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "14",
+      "content": "eavs-bjsw.14: X-Mock-Scenario header + per-model config",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "15",
+      "content": "eavs-bjsw.15: X-Mock-Delay-Ms header (default 30ms)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "16",
+      "content": "eavs-bjsw.16: Full chunk audit logging with timestamps",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "17",
+      "content": "eavs-bjsw.17: Register mock models in /providers/detail",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "18",
+      "content": "Build and verify",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "19",
+      "content": "Close trx issues and commit",
+      "status": "in_progress",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-02-25T08:13:23.113Z"
+}

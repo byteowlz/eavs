@@ -938,16 +938,17 @@ async fn proxy_handler_inner(
 
     // Handle mock provider - return synthetic responses without network calls
     if provider_type.is_mock() {
-        return handle_mock_response(
+        let mock_req = crate::mock_provider::resolve_mock_params(
             &model_name,
             json_body
                 .get("stream")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             &correlation_id,
+            &parts.headers,
             state.analysis_tx.clone(),
-        )
-        .await;
+        );
+        return crate::mock_provider::handle_mock_response(mock_req).await;
     }
 
     // Execute Upstream Request
@@ -1363,91 +1364,7 @@ struct UsageTracker {
     cached_tokens: Arc<std::sync::atomic::AtomicU32>,
 }
 
-/// Handle mock provider requests - returns synthetic responses without network calls.
-/// This is used for benchmarking to measure pure proxy overhead.
-async fn handle_mock_response(
-    model: &str,
-    stream: bool,
-    request_id: &str,
-    analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
-) -> Result<Response, Response> {
-    let timestamp = chrono::Utc::now().timestamp();
-
-    if stream {
-        // Return streaming SSE response
-        let chunks = vec![
-            format!(
-                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"\"}},\"finish_reason\":null}}]}}\n\n",
-                request_id, timestamp, model
-            ),
-            format!(
-                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"This is a mock response for benchmarking.\"}},\"finish_reason\":null}}]}}\n\n",
-                request_id, timestamp, model
-            ),
-            format!(
-                "data: {{\"id\":\"chatcmpl-mock-{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":8,\"total_tokens\":18}}}}\n\n",
-                request_id, timestamp, model
-            ),
-            "data: [DONE]\n\n".to_string(),
-        ];
-
-        // Log the mock response
-        let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            id: request_id.to_string(),
-            chunk: "[mock streaming response]".to_string(),
-        });
-
-        let stream = futures::stream::iter(
-            chunks
-                .into_iter()
-                .map(|c| Ok::<_, std::io::Error>(Bytes::from(c))),
-        );
-
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .header("x-mock-response", "true")
-            .body(Body::from_stream(stream))
-            .unwrap())
-    } else {
-        // Return non-streaming JSON response
-        let response = serde_json::json!({
-            "id": format!("chatcmpl-mock-{}", request_id),
-            "object": "chat.completion",
-            "created": timestamp,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "This is a mock response for benchmarking."
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 8,
-                "total_tokens": 18
-            }
-        });
-
-        // Log the mock response
-        let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            id: request_id.to_string(),
-            chunk: "[mock non-streaming response]".to_string(),
-        });
-
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .header("x-mock-response", "true")
-            .body(Body::from(serde_json::to_vec(&response).unwrap()))
-            .unwrap())
-    }
-}
+// Mock provider handler is in src/mock_provider.rs
 
 /// Extract usage from OpenAI-format streaming chunks.
 fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
@@ -5100,9 +5017,10 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8_lossy(&body_bytes);
 
-        // Should contain SSE data lines
+        // Should contain SSE data lines with word-by-word streaming
         assert!(body_str.contains("data: "));
-        assert!(body_str.contains("mock response"));
+        assert!(body_str.contains("mock"));
+        assert!(body_str.contains("response"));
         assert!(body_str.contains("[DONE]"));
 
         // Verify no upstream requests were made

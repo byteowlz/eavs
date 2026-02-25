@@ -302,7 +302,11 @@ impl ProviderType {
                 vec!["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"]
             }
             Self::GoogleGeminiCli => vec!["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
-            Self::Mock => vec!["mock-model"],
+            Self::Mock => {
+                let mut models = vec!["mock-model"];
+                models.extend(crate::mock_provider::MockScenario::all_model_ids());
+                models
+            }
             // OpenAI-compatible providers should fetch from upstream
             _ => vec![],
         }
@@ -523,6 +527,11 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
     // DeepSeek models
     if model_lower.starts_with("deepseek") {
         return Some("deepseek");
+    }
+
+    // Mock provider models (mock/*, mock-*)
+    if model_lower.starts_with("mock/") || model_lower.starts_with("mock-") || model_lower == "mock" {
+        return Some("mock");
     }
 
     // Note: Microsoft/Azure AI Foundry models (MAI-*, phi-*, etc.) can be accessed
