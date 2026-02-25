@@ -38,4 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Removed dedicated `foundry` provider type. Users should now configure Azure AI Foundry using the appropriate provider type for their model (see config.example.toml for examples)
 
+## [0.5.13] - 2026-02-25
+
+### Added
+- Enhanced mock provider with 12 configurable test scenarios: simple_text, tool_call, multi_tool, tool_call_then_text, error_mid_stream, rate_limit, server_error, timeout, connection_reset, thinking, long_text, malformed_sse
+- Scenario selection via `X-Mock-Scenario` request header or model name (e.g., `mock/tool-call`)
+- Configurable per-chunk streaming delay via `X-Mock-Delay-Ms` header (default: 30ms)
+- Mock scenario models registered in `/providers/detail` for models.json generation
+- Auto-routing for `mock/*` model names to mock provider
+- Full chunk audit logging with timestamps for mock responses
+- `/catalog/lookup` endpoint for model metadata from models.dev
+- Provider detail endpoint now exposes headers, api_version, and compat settings
+
 ## [Unreleased]
