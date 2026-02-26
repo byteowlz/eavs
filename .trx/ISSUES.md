@@ -4,6 +4,9 @@
 
 ### [eavs-1sfs] Upstream 401 errors cause request to hang instead of returning error (P1, bug)
 
+### [eavs-hhc9] Add 'not needed' option for API key in setup wizard (P2, feature)
+When adding openai-compatible or ollama providers (local endpoints), the setup wizard should offer a 'not needed' option for the API key prompt. Currently users must type a value like 'not-needed' manually. The wizard should detect local provider types and default to no-key or offer it as an explicit choice.
+
 ### [eavs-a2wb] Add 'eavs setup init' for batch provider setup with model selection (P2, feature)
 setup.sh currently generates eavs config.toml via bash/jq string templating, which is fragile (stdout leaking into TOML, format mismatches). Eavs should own its own config generation.
 
