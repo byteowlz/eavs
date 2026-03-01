@@ -5,9 +5,9 @@
 ### [eavs-sth0] Secret-aware API proxying: extend eavs to resolve kyz secret references and inject credentials at transport layer (P1, feature)
 ## Summary
 
-Extend eavs with a `/v1/proxy` endpoint for credential-injected API calls. The agent makes normal HTTP requests directly for unauthenticated traffic. When it needs an authenticated API call, it hits eavs with a secret reference -- eavs resolves the credential from kyz, injects it, proxies the request, and returns only the response. The agent never sees the plaintext secret.
+~~Extend eavs with credential proxying~~ -- REVISED: the proxy endpoint belongs on **oqto-runner**, not eavs.
 
-## Key Insight
+Eavs is a shared central service. kyz vaults are per-user. The runner already runs as the target user and has access to their kyz vault. The credential proxy naturally lives on the runner.
 ...
 
 
