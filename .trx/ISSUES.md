@@ -2,6 +2,15 @@
 
 ## Open
 
+### [eavs-sth0] Secret-aware API proxying: extend eavs to resolve kyz secret references and inject credentials at transport layer (P1, feature)
+## Summary
+
+Extend eavs to proxy non-LLM API calls with automatic credential injection. The agent references secrets by opaque name (e.g. `$SECRET:github/deploy-key`), eavs resolves the real value from kyz vaults, injects it into the outbound HTTP request (Bearer header, Basic auth, query param, etc.), and returns only the API response. The agent never sees plaintext credentials.
+
+## Motivation
+...
+
+
 ### [eavs-1sfs] Upstream 401 errors cause request to hang instead of returning error (P1, bug)
 
 ### [eavs-hhc9] Add 'not needed' option for API key in setup wizard (P2, feature)
