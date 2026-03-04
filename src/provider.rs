@@ -530,7 +530,8 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
     }
 
     // Mock provider models (mock/*, mock-*)
-    if model_lower.starts_with("mock/") || model_lower.starts_with("mock-") || model_lower == "mock" {
+    if model_lower.starts_with("mock/") || model_lower.starts_with("mock-") || model_lower == "mock"
+    {
         return Some("mock");
     }
 
@@ -553,11 +554,13 @@ pub struct CompatSettings {
     pub supports_developer_role: Option<bool>,
     /// Which max tokens field to use: "max_completion_tokens" or "max_tokens"
     pub max_tokens_field: Option<String>,
+    /// Whether provider supports `stream_options: { include_usage: true }` (default: true)
+    /// Set to false for providers that reject or ignore this field.
+    pub supports_stream_options: Option<bool>,
 }
 
 impl CompatSettings {
     /// Merge with detected defaults based on base_url.
-    #[allow(dead_code)]
     pub fn with_detected_defaults(self, base_url: &str) -> Self {
         let detected = Self::detect_from_url(base_url);
         Self {
@@ -566,11 +569,13 @@ impl CompatSettings {
                 .supports_developer_role
                 .or(detected.supports_developer_role),
             max_tokens_field: self.max_tokens_field.or(detected.max_tokens_field),
+            supports_stream_options: self
+                .supports_stream_options
+                .or(detected.supports_stream_options),
         }
     }
 
     /// Detect compatibility settings from URL patterns.
-    #[allow(dead_code)]
     fn detect_from_url(base_url: &str) -> Self {
         let url_lower = base_url.to_lowercase();
 
@@ -580,6 +585,7 @@ impl CompatSettings {
                 supports_store: Some(false),
                 supports_developer_role: Some(true),
                 max_tokens_field: Some("max_tokens".to_string()),
+                supports_stream_options: Some(false),
             };
         }
 
@@ -589,6 +595,7 @@ impl CompatSettings {
                 supports_store: Some(false),
                 supports_developer_role: Some(false),
                 max_tokens_field: Some("max_tokens".to_string()),
+                supports_stream_options: Some(false),
             };
         }
 
@@ -598,6 +605,7 @@ impl CompatSettings {
                 supports_store: Some(false),
                 supports_developer_role: Some(false),
                 max_tokens_field: Some("max_tokens".to_string()),
+                supports_stream_options: Some(false),
             };
         }
 
@@ -605,21 +613,22 @@ impl CompatSettings {
         Self::default()
     }
 
-    #[allow(dead_code)]
     pub fn supports_store(&self) -> bool {
         self.supports_store.unwrap_or(true)
     }
 
-    #[allow(dead_code)]
     pub fn supports_developer_role(&self) -> bool {
         self.supports_developer_role.unwrap_or(true)
     }
 
-    #[allow(dead_code)]
     pub fn max_tokens_field(&self) -> &str {
         self.max_tokens_field
             .as_deref()
             .unwrap_or("max_completion_tokens")
+    }
+
+    pub fn supports_stream_options(&self) -> bool {
+        self.supports_stream_options.unwrap_or(true)
     }
 }
 
@@ -746,10 +755,12 @@ mod tests {
         let ollama = CompatSettings::default().with_detected_defaults("http://localhost:11434/v1");
         assert!(!ollama.supports_store());
         assert_eq!(ollama.max_tokens_field(), "max_tokens");
+        assert!(!ollama.supports_stream_options());
 
         let openai = CompatSettings::default().with_detected_defaults("https://api.openai.com/v1");
         assert!(openai.supports_store());
         assert_eq!(openai.max_tokens_field(), "max_completion_tokens");
+        assert!(openai.supports_stream_options());
     }
 
     #[test]
@@ -758,12 +769,14 @@ mod tests {
             supports_store: Some(false),
             supports_developer_role: None,
             max_tokens_field: Some("max_tokens".to_string()),
+            supports_stream_options: Some(false),
         }
         .with_detected_defaults("https://api.openai.com/v1");
 
         // Explicit setting should override detection
         assert!(!custom.supports_store());
         assert_eq!(custom.max_tokens_field(), "max_tokens");
+        assert!(!custom.supports_stream_options());
         // Non-overridden should use detection (OpenAI default)
         assert!(custom.supports_developer_role());
     }

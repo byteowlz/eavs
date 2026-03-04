@@ -166,11 +166,7 @@ fn timestamp() -> i64 {
 }
 
 /// Log an SSE chunk through the analysis channel with a timestamp.
-fn audit_chunk(
-    tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
-    request_id: &str,
-    chunk: &str,
-) {
+fn audit_chunk(tx: &tokio::sync::broadcast::Sender<AnalysisEvent>, request_id: &str, chunk: &str) {
     let _ = tx.send(AnalysisEvent::ResponseChunk {
         timestamp: chrono::Utc::now().timestamp_millis(),
         id: request_id.to_string(),
@@ -179,7 +175,13 @@ fn audit_chunk(
 }
 
 /// Build a single SSE data line for a chat completion chunk.
-fn sse_chunk(id: &str, ts: i64, model: &str, delta: serde_json::Value, finish: Option<&str>) -> String {
+fn sse_chunk(
+    id: &str,
+    ts: i64,
+    model: &str,
+    delta: serde_json::Value,
+    finish: Option<&str>,
+) -> String {
     let mut choice = json!({
         "index": 0,
         "delta": delta,
@@ -301,7 +303,14 @@ fn build_json_response(
     analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
 ) -> Response {
     let serialized = serde_json::to_vec(&body).unwrap();
-    audit_chunk(analysis_tx, request_id, &format!("[mock non-streaming] {}", serde_json::to_string(&body).unwrap_or_default()));
+    audit_chunk(
+        analysis_tx,
+        request_id,
+        &format!(
+            "[mock non-streaming] {}",
+            serde_json::to_string(&body).unwrap_or_default()
+        ),
+    );
 
     Response::builder()
         .status(StatusCode::OK)
@@ -317,11 +326,40 @@ fn build_json_response(
 // ---------------------------------------------------------------------------
 
 const SIMPLE_TEXT_WORDS: &[&str] = &[
-    "The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog.",
-    "This", "is", "a", "mock", "response", "for", "testing", "streaming",
-    "behavior", "in", "the", "proxy.", "Each", "word", "arrives", "as",
-    "a", "separate", "SSE", "chunk", "to", "simulate", "realistic",
-    "token-by-token", "generation.",
+    "The",
+    "quick",
+    "brown",
+    "fox",
+    "jumps",
+    "over",
+    "the",
+    "lazy",
+    "dog.",
+    "This",
+    "is",
+    "a",
+    "mock",
+    "response",
+    "for",
+    "testing",
+    "streaming",
+    "behavior",
+    "in",
+    "the",
+    "proxy.",
+    "Each",
+    "word",
+    "arrives",
+    "as",
+    "a",
+    "separate",
+    "SSE",
+    "chunk",
+    "to",
+    "simulate",
+    "realistic",
+    "token-by-token",
+    "generation.",
 ];
 
 async fn handle_simple_text(req: MockRequest) -> Result<Response, Response> {
@@ -744,7 +782,10 @@ async fn handle_error_mid_stream(req: MockRequest) -> Result<Response, Response>
                 "code": "internal_error"
             }
         });
-        chunks.push(format!("data: {}\n\n", serde_json::to_string(&error_event).unwrap()));
+        chunks.push(format!(
+            "data: {}\n\n",
+            serde_json::to_string(&error_event).unwrap()
+        ));
 
         Ok(build_delayed_stream_response(
             chunks,
@@ -762,7 +803,11 @@ async fn handle_error_mid_stream(req: MockRequest) -> Result<Response, Response>
             }
         });
         let serialized = serde_json::to_vec(&body).unwrap();
-        audit_chunk(&req.analysis_tx, &req.request_id, "[mock error_mid_stream non-streaming]");
+        audit_chunk(
+            &req.analysis_tx,
+            &req.request_id,
+            "[mock error_mid_stream non-streaming]",
+        );
 
         Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -833,14 +878,20 @@ async fn handle_server_error(req: MockRequest) -> Result<Response, Response> {
 // ---------------------------------------------------------------------------
 
 async fn handle_timeout(req: MockRequest) -> Result<Response, Response> {
-    audit_chunk(&req.analysis_tx, &req.request_id, "[mock timeout - holding connection open]");
+    audit_chunk(
+        &req.analysis_tx,
+        &req.request_id,
+        "[mock timeout - holding connection open]",
+    );
 
     // Create a stream that sends the SSE header but then blocks forever
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
 
     tokio::spawn(async move {
         // Send a comment to keep the connection alive, then hold indefinitely
-        let _ = tx.send(Ok(Bytes::from(": mock timeout scenario\n\n"))).await;
+        let _ = tx
+            .send(Ok(Bytes::from(": mock timeout scenario\n\n")))
+            .await;
         // Hold the connection open for 5 minutes (effectively forever for tests)
         tokio::time::sleep(Duration::from_secs(300)).await;
         drop(tx);
@@ -880,7 +931,13 @@ async fn handle_connection_reset(req: MockRequest) -> Result<Response, Response>
 
     tokio::spawn(async move {
         // Role chunk
-        let chunk = sse_chunk(&rid, ts, &model, json!({"role": "assistant", "content": ""}), None);
+        let chunk = sse_chunk(
+            &rid,
+            ts,
+            &model,
+            json!({"role": "assistant", "content": ""}),
+            None,
+        );
         audit_chunk(&analysis_tx, &rid, &chunk);
         let _ = tx.send(Ok(Bytes::from(chunk))).await;
         tokio::time::sleep(delay).await;
@@ -960,8 +1017,17 @@ async fn handle_thinking(req: MockRequest) -> Result<Response, Response> {
 
         // Actual response text
         let response_words = [
-            "The", "weather", "in", "San", "Francisco", "is", "currently",
-            "18C", "and", "partly", "cloudy.",
+            "The",
+            "weather",
+            "in",
+            "San",
+            "Francisco",
+            "is",
+            "currently",
+            "18C",
+            "and",
+            "partly",
+            "cloudy.",
         ];
         for word in &response_words {
             chunks.push(sse_chunk(
@@ -1011,83 +1077,523 @@ async fn handle_thinking(req: MockRequest) -> Result<Response, Response> {
 fn generate_long_text() -> Vec<&'static str> {
     // ~550 words to exceed the 500 token threshold
     let words: Vec<&str> = vec![
-        "In", "the", "realm", "of", "artificial", "intelligence,", "large", "language",
-        "models", "have", "emerged", "as", "powerful", "tools", "for", "understanding",
-        "and", "generating", "human", "language.", "These", "models,", "trained", "on",
-        "vast", "corpora", "of", "text", "data,", "can", "perform", "a", "wide",
-        "range", "of", "tasks", "from", "translation", "to", "creative", "writing.",
-        "The", "architecture", "behind", "these", "systems", "typically", "relies", "on",
-        "transformer", "networks,", "which", "use", "self-attention", "mechanisms", "to",
-        "process", "sequential", "data", "efficiently.", "Unlike", "earlier", "recurrent",
-        "approaches,", "transformers", "can", "handle", "long-range", "dependencies",
-        "by", "attending", "to", "all", "positions", "in", "a", "sequence",
-        "simultaneously.", "This", "parallel", "processing", "capability", "enables",
-        "training", "on", "much", "larger", "datasets", "and", "achieving", "better",
-        "performance", "across", "diverse", "benchmarks.", "The", "scaling", "laws",
-        "governing", "these", "models", "suggest", "that", "increasing", "both", "model",
-        "size", "and", "training", "data", "leads", "to", "predictable", "improvements",
-        "in", "capability.", "However,", "this", "comes", "at", "significant",
-        "computational", "cost,", "requiring", "specialized", "hardware", "such", "as",
-        "GPUs", "and", "TPUs", "for", "both", "training", "and", "inference.",
-        "Recent", "advances", "in", "efficiency,", "including", "quantization,",
-        "distillation,", "and", "sparse", "attention", "patterns,", "have", "made",
-        "it", "possible", "to", "deploy", "these", "models", "in", "more",
-        "resource-constrained", "environments.", "The", "fine-tuning", "process",
-        "allows", "pre-trained", "models", "to", "be", "adapted", "for", "specific",
-        "tasks", "with", "relatively", "small", "amounts", "of", "labeled", "data.",
-        "Instruction", "tuning", "and", "reinforcement", "learning", "from", "human",
-        "feedback", "further", "align", "model", "outputs", "with", "human",
-        "preferences", "and", "values.", "Safety", "considerations", "remain",
-        "paramount,", "as", "these", "models", "can", "generate", "harmful",
-        "or", "misleading", "content", "if", "not", "properly", "constrained.",
-        "Research", "into", "constitutional", "AI,", "red-teaming,", "and",
-        "interpretability", "aims", "to", "address", "these", "challenges.",
-        "The", "deployment", "of", "language", "models", "in", "production",
-        "systems", "introduces", "additional", "concerns", "around", "latency,",
-        "throughput,", "and", "cost", "optimization.", "Streaming", "responses",
-        "token-by-token", "provides", "a", "better", "user", "experience", "than",
-        "waiting", "for", "complete", "generation.", "Load", "balancing", "and",
-        "request", "queuing", "help", "manage", "concurrent", "users", "while",
-        "maintaining", "quality", "of", "service.", "Caching", "strategies",
-        "for", "common", "prompts", "reduce", "redundant", "computation.",
-        "Monitoring", "and", "observability", "tools", "track", "key", "metrics",
-        "such", "as", "time-to-first-token,", "tokens-per-second,", "and",
-        "error", "rates.", "These", "metrics", "inform", "capacity", "planning",
-        "and", "help", "identify", "performance", "regressions.", "The", "proxy",
-        "layer", "between", "clients", "and", "upstream", "providers", "serves",
-        "as", "a", "natural", "point", "for", "implementing", "cross-cutting",
-        "concerns", "like", "authentication,", "rate", "limiting,", "usage",
-        "tracking,", "and", "request", "transformation.", "By", "abstracting",
-        "provider-specific", "APIs", "behind", "a", "common", "interface,",
-        "applications", "gain", "the", "flexibility", "to", "switch", "between",
-        "providers", "without", "code", "changes.", "This", "architecture", "also",
-        "enables", "advanced", "routing", "strategies", "such", "as", "fallback",
-        "chains,", "cost-based", "routing,", "and", "A/B", "testing", "of",
-        "different", "models.", "The", "mock", "provider", "pattern", "extends",
-        "this", "architecture", "by", "allowing", "deterministic", "testing",
-        "of", "all", "these", "behaviors", "without", "incurring", "API",
-        "costs", "or", "depending", "on", "external", "service", "availability.",
-        "Comprehensive", "test", "coverage", "across", "normal", "and", "error",
-        "scenarios", "builds", "confidence", "in", "the", "system", "reliability.",
-        "Furthermore,", "the", "evolution", "of", "multi-modal", "models",
-        "that", "process", "text,", "images,", "audio,", "and", "video",
-        "simultaneously", "opens", "new", "possibilities", "for", "rich",
-        "interactive", "experiences.", "These", "models", "require", "even",
-        "larger", "context", "windows", "and", "more", "sophisticated",
-        "attention", "mechanisms", "to", "handle", "diverse", "input",
-        "modalities.", "The", "alignment", "problem", "becomes", "more",
-        "complex", "in", "multi-modal", "settings,", "as", "the", "model",
-        "must", "reason", "across", "different", "types", "of", "information",
-        "and", "produce", "coherent,", "helpful", "responses.", "Evaluation",
-        "frameworks", "must", "also", "evolve", "to", "assess", "quality",
-        "across", "modalities,", "moving", "beyond", "simple", "text-based",
-        "benchmarks.", "The", "infrastructure", "supporting", "these",
-        "systems", "continues", "to", "advance,", "with", "specialized",
-        "chips,", "optimized", "serving", "frameworks,", "and", "efficient",
-        "memory", "management", "techniques", "enabling", "faster", "and",
-        "more", "cost-effective", "inference.", "This", "concludes", "the",
-        "long", "text", "response", "for", "backpressure", "and", "buffer",
-        "handling", "verification.",
+        "In",
+        "the",
+        "realm",
+        "of",
+        "artificial",
+        "intelligence,",
+        "large",
+        "language",
+        "models",
+        "have",
+        "emerged",
+        "as",
+        "powerful",
+        "tools",
+        "for",
+        "understanding",
+        "and",
+        "generating",
+        "human",
+        "language.",
+        "These",
+        "models,",
+        "trained",
+        "on",
+        "vast",
+        "corpora",
+        "of",
+        "text",
+        "data,",
+        "can",
+        "perform",
+        "a",
+        "wide",
+        "range",
+        "of",
+        "tasks",
+        "from",
+        "translation",
+        "to",
+        "creative",
+        "writing.",
+        "The",
+        "architecture",
+        "behind",
+        "these",
+        "systems",
+        "typically",
+        "relies",
+        "on",
+        "transformer",
+        "networks,",
+        "which",
+        "use",
+        "self-attention",
+        "mechanisms",
+        "to",
+        "process",
+        "sequential",
+        "data",
+        "efficiently.",
+        "Unlike",
+        "earlier",
+        "recurrent",
+        "approaches,",
+        "transformers",
+        "can",
+        "handle",
+        "long-range",
+        "dependencies",
+        "by",
+        "attending",
+        "to",
+        "all",
+        "positions",
+        "in",
+        "a",
+        "sequence",
+        "simultaneously.",
+        "This",
+        "parallel",
+        "processing",
+        "capability",
+        "enables",
+        "training",
+        "on",
+        "much",
+        "larger",
+        "datasets",
+        "and",
+        "achieving",
+        "better",
+        "performance",
+        "across",
+        "diverse",
+        "benchmarks.",
+        "The",
+        "scaling",
+        "laws",
+        "governing",
+        "these",
+        "models",
+        "suggest",
+        "that",
+        "increasing",
+        "both",
+        "model",
+        "size",
+        "and",
+        "training",
+        "data",
+        "leads",
+        "to",
+        "predictable",
+        "improvements",
+        "in",
+        "capability.",
+        "However,",
+        "this",
+        "comes",
+        "at",
+        "significant",
+        "computational",
+        "cost,",
+        "requiring",
+        "specialized",
+        "hardware",
+        "such",
+        "as",
+        "GPUs",
+        "and",
+        "TPUs",
+        "for",
+        "both",
+        "training",
+        "and",
+        "inference.",
+        "Recent",
+        "advances",
+        "in",
+        "efficiency,",
+        "including",
+        "quantization,",
+        "distillation,",
+        "and",
+        "sparse",
+        "attention",
+        "patterns,",
+        "have",
+        "made",
+        "it",
+        "possible",
+        "to",
+        "deploy",
+        "these",
+        "models",
+        "in",
+        "more",
+        "resource-constrained",
+        "environments.",
+        "The",
+        "fine-tuning",
+        "process",
+        "allows",
+        "pre-trained",
+        "models",
+        "to",
+        "be",
+        "adapted",
+        "for",
+        "specific",
+        "tasks",
+        "with",
+        "relatively",
+        "small",
+        "amounts",
+        "of",
+        "labeled",
+        "data.",
+        "Instruction",
+        "tuning",
+        "and",
+        "reinforcement",
+        "learning",
+        "from",
+        "human",
+        "feedback",
+        "further",
+        "align",
+        "model",
+        "outputs",
+        "with",
+        "human",
+        "preferences",
+        "and",
+        "values.",
+        "Safety",
+        "considerations",
+        "remain",
+        "paramount,",
+        "as",
+        "these",
+        "models",
+        "can",
+        "generate",
+        "harmful",
+        "or",
+        "misleading",
+        "content",
+        "if",
+        "not",
+        "properly",
+        "constrained.",
+        "Research",
+        "into",
+        "constitutional",
+        "AI,",
+        "red-teaming,",
+        "and",
+        "interpretability",
+        "aims",
+        "to",
+        "address",
+        "these",
+        "challenges.",
+        "The",
+        "deployment",
+        "of",
+        "language",
+        "models",
+        "in",
+        "production",
+        "systems",
+        "introduces",
+        "additional",
+        "concerns",
+        "around",
+        "latency,",
+        "throughput,",
+        "and",
+        "cost",
+        "optimization.",
+        "Streaming",
+        "responses",
+        "token-by-token",
+        "provides",
+        "a",
+        "better",
+        "user",
+        "experience",
+        "than",
+        "waiting",
+        "for",
+        "complete",
+        "generation.",
+        "Load",
+        "balancing",
+        "and",
+        "request",
+        "queuing",
+        "help",
+        "manage",
+        "concurrent",
+        "users",
+        "while",
+        "maintaining",
+        "quality",
+        "of",
+        "service.",
+        "Caching",
+        "strategies",
+        "for",
+        "common",
+        "prompts",
+        "reduce",
+        "redundant",
+        "computation.",
+        "Monitoring",
+        "and",
+        "observability",
+        "tools",
+        "track",
+        "key",
+        "metrics",
+        "such",
+        "as",
+        "time-to-first-token,",
+        "tokens-per-second,",
+        "and",
+        "error",
+        "rates.",
+        "These",
+        "metrics",
+        "inform",
+        "capacity",
+        "planning",
+        "and",
+        "help",
+        "identify",
+        "performance",
+        "regressions.",
+        "The",
+        "proxy",
+        "layer",
+        "between",
+        "clients",
+        "and",
+        "upstream",
+        "providers",
+        "serves",
+        "as",
+        "a",
+        "natural",
+        "point",
+        "for",
+        "implementing",
+        "cross-cutting",
+        "concerns",
+        "like",
+        "authentication,",
+        "rate",
+        "limiting,",
+        "usage",
+        "tracking,",
+        "and",
+        "request",
+        "transformation.",
+        "By",
+        "abstracting",
+        "provider-specific",
+        "APIs",
+        "behind",
+        "a",
+        "common",
+        "interface,",
+        "applications",
+        "gain",
+        "the",
+        "flexibility",
+        "to",
+        "switch",
+        "between",
+        "providers",
+        "without",
+        "code",
+        "changes.",
+        "This",
+        "architecture",
+        "also",
+        "enables",
+        "advanced",
+        "routing",
+        "strategies",
+        "such",
+        "as",
+        "fallback",
+        "chains,",
+        "cost-based",
+        "routing,",
+        "and",
+        "A/B",
+        "testing",
+        "of",
+        "different",
+        "models.",
+        "The",
+        "mock",
+        "provider",
+        "pattern",
+        "extends",
+        "this",
+        "architecture",
+        "by",
+        "allowing",
+        "deterministic",
+        "testing",
+        "of",
+        "all",
+        "these",
+        "behaviors",
+        "without",
+        "incurring",
+        "API",
+        "costs",
+        "or",
+        "depending",
+        "on",
+        "external",
+        "service",
+        "availability.",
+        "Comprehensive",
+        "test",
+        "coverage",
+        "across",
+        "normal",
+        "and",
+        "error",
+        "scenarios",
+        "builds",
+        "confidence",
+        "in",
+        "the",
+        "system",
+        "reliability.",
+        "Furthermore,",
+        "the",
+        "evolution",
+        "of",
+        "multi-modal",
+        "models",
+        "that",
+        "process",
+        "text,",
+        "images,",
+        "audio,",
+        "and",
+        "video",
+        "simultaneously",
+        "opens",
+        "new",
+        "possibilities",
+        "for",
+        "rich",
+        "interactive",
+        "experiences.",
+        "These",
+        "models",
+        "require",
+        "even",
+        "larger",
+        "context",
+        "windows",
+        "and",
+        "more",
+        "sophisticated",
+        "attention",
+        "mechanisms",
+        "to",
+        "handle",
+        "diverse",
+        "input",
+        "modalities.",
+        "The",
+        "alignment",
+        "problem",
+        "becomes",
+        "more",
+        "complex",
+        "in",
+        "multi-modal",
+        "settings,",
+        "as",
+        "the",
+        "model",
+        "must",
+        "reason",
+        "across",
+        "different",
+        "types",
+        "of",
+        "information",
+        "and",
+        "produce",
+        "coherent,",
+        "helpful",
+        "responses.",
+        "Evaluation",
+        "frameworks",
+        "must",
+        "also",
+        "evolve",
+        "to",
+        "assess",
+        "quality",
+        "across",
+        "modalities,",
+        "moving",
+        "beyond",
+        "simple",
+        "text-based",
+        "benchmarks.",
+        "The",
+        "infrastructure",
+        "supporting",
+        "these",
+        "systems",
+        "continues",
+        "to",
+        "advance,",
+        "with",
+        "specialized",
+        "chips,",
+        "optimized",
+        "serving",
+        "frameworks,",
+        "and",
+        "efficient",
+        "memory",
+        "management",
+        "techniques",
+        "enabling",
+        "faster",
+        "and",
+        "more",
+        "cost-effective",
+        "inference.",
+        "This",
+        "concludes",
+        "the",
+        "long",
+        "text",
+        "response",
+        "for",
+        "backpressure",
+        "and",
+        "buffer",
+        "handling",
+        "verification.",
     ];
     words
 }
@@ -1184,9 +1690,7 @@ async fn handle_malformed_sse(req: MockRequest) -> Result<Response, Response> {
         chunks.push(format!("{}\n\n", serde_json::to_string(&obj).unwrap()));
 
         // Double newline inside data field (breaks event boundary)
-        chunks.push(format!(
-            "data: {{\"content\": \"has\n\nbro\n\nken\"}}\n\n"
-        ));
+        chunks.push(format!("data: {{\"content\": \"has\n\nbro\n\nken\"}}\n\n"));
 
         // Truncated JSON (unclosed brace)
         chunks.push("data: {\"id\":\"chatcmpl-mock-broken\",\"choices\":[{\"delta\":{\"content\":\"form\n\n".to_string());
@@ -1218,8 +1722,13 @@ async fn handle_malformed_sse(req: MockRequest) -> Result<Response, Response> {
         ))
     } else {
         // Non-streaming: return malformed JSON
-        let broken_json = r#"{"id": "chatcmpl-mock-broken", "choices": [{"message": {"content": "malformed"#;
-        audit_chunk(&req.analysis_tx, &req.request_id, "[mock malformed non-streaming]");
+        let broken_json =
+            r#"{"id": "chatcmpl-mock-broken", "choices": [{"message": {"content": "malformed"#;
+        audit_chunk(
+            &req.analysis_tx,
+            &req.request_id,
+            "[mock malformed non-streaming]",
+        );
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -1237,29 +1746,80 @@ mod tests {
 
     #[test]
     fn test_scenario_from_str() {
-        assert_eq!(MockScenario::from_str("simple_text"), Some(MockScenario::SimpleText));
-        assert_eq!(MockScenario::from_str("simple-text"), Some(MockScenario::SimpleText));
-        assert_eq!(MockScenario::from_str("SIMPLE_TEXT"), Some(MockScenario::SimpleText));
-        assert_eq!(MockScenario::from_str("tool_call"), Some(MockScenario::ToolCall));
-        assert_eq!(MockScenario::from_str("tool-call"), Some(MockScenario::ToolCall));
-        assert_eq!(MockScenario::from_str("multi_tool"), Some(MockScenario::MultiTool));
-        assert_eq!(MockScenario::from_str("rate_limit"), Some(MockScenario::RateLimit));
+        assert_eq!(
+            MockScenario::from_str("simple_text"),
+            Some(MockScenario::SimpleText)
+        );
+        assert_eq!(
+            MockScenario::from_str("simple-text"),
+            Some(MockScenario::SimpleText)
+        );
+        assert_eq!(
+            MockScenario::from_str("SIMPLE_TEXT"),
+            Some(MockScenario::SimpleText)
+        );
+        assert_eq!(
+            MockScenario::from_str("tool_call"),
+            Some(MockScenario::ToolCall)
+        );
+        assert_eq!(
+            MockScenario::from_str("tool-call"),
+            Some(MockScenario::ToolCall)
+        );
+        assert_eq!(
+            MockScenario::from_str("multi_tool"),
+            Some(MockScenario::MultiTool)
+        );
+        assert_eq!(
+            MockScenario::from_str("rate_limit"),
+            Some(MockScenario::RateLimit)
+        );
         assert_eq!(MockScenario::from_str("429"), Some(MockScenario::RateLimit));
-        assert_eq!(MockScenario::from_str("500"), Some(MockScenario::ServerError));
-        assert_eq!(MockScenario::from_str("timeout"), Some(MockScenario::Timeout));
-        assert_eq!(MockScenario::from_str("connection_reset"), Some(MockScenario::ConnectionReset));
-        assert_eq!(MockScenario::from_str("thinking"), Some(MockScenario::Thinking));
-        assert_eq!(MockScenario::from_str("long_text"), Some(MockScenario::LongText));
-        assert_eq!(MockScenario::from_str("malformed_sse"), Some(MockScenario::MalformedSse));
+        assert_eq!(
+            MockScenario::from_str("500"),
+            Some(MockScenario::ServerError)
+        );
+        assert_eq!(
+            MockScenario::from_str("timeout"),
+            Some(MockScenario::Timeout)
+        );
+        assert_eq!(
+            MockScenario::from_str("connection_reset"),
+            Some(MockScenario::ConnectionReset)
+        );
+        assert_eq!(
+            MockScenario::from_str("thinking"),
+            Some(MockScenario::Thinking)
+        );
+        assert_eq!(
+            MockScenario::from_str("long_text"),
+            Some(MockScenario::LongText)
+        );
+        assert_eq!(
+            MockScenario::from_str("malformed_sse"),
+            Some(MockScenario::MalformedSse)
+        );
         assert_eq!(MockScenario::from_str("unknown"), None);
     }
 
     #[test]
     fn test_scenario_from_model() {
-        assert_eq!(MockScenario::from_model("mock/simple-text"), Some(MockScenario::SimpleText));
-        assert_eq!(MockScenario::from_model("mock/tool-call"), Some(MockScenario::ToolCall));
-        assert_eq!(MockScenario::from_model("mock-rate-limit"), Some(MockScenario::RateLimit));
-        assert_eq!(MockScenario::from_model("mock/long-text"), Some(MockScenario::LongText));
+        assert_eq!(
+            MockScenario::from_model("mock/simple-text"),
+            Some(MockScenario::SimpleText)
+        );
+        assert_eq!(
+            MockScenario::from_model("mock/tool-call"),
+            Some(MockScenario::ToolCall)
+        );
+        assert_eq!(
+            MockScenario::from_model("mock-rate-limit"),
+            Some(MockScenario::RateLimit)
+        );
+        assert_eq!(
+            MockScenario::from_model("mock/long-text"),
+            Some(MockScenario::LongText)
+        );
         assert_eq!(MockScenario::from_model("gpt-4"), None);
         assert_eq!(MockScenario::from_model("mock-model"), None);
     }
@@ -1276,6 +1836,10 @@ mod tests {
     #[test]
     fn test_long_text_length() {
         let words = generate_long_text();
-        assert!(words.len() >= 500, "long_text must generate 500+ words, got {}", words.len());
+        assert!(
+            words.len() >= 500,
+            "long_text must generate 500+ words, got {}",
+            words.len()
+        );
     }
 }

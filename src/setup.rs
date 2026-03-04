@@ -72,11 +72,7 @@ const AZURE_FOUNDRY_IDX: usize = 8;
 
 /// Azure AI Foundry model family sub-choices (shown after selecting Foundry)
 const FOUNDRY_MODEL_CHOICES: &[(&str, &str, &str)] = &[
-    (
-        "OpenAI models",
-        "openai",
-        "GPT-4o, o1, o3, etc.",
-    ),
+    ("OpenAI models", "openai", "GPT-4o, o1, o3, etc."),
     (
         "Anthropic models",
         "anthropic",
@@ -211,19 +207,11 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
             .append(true)
             .open(config_file)
             .map_err(|e| {
-                CliError::Other(format!(
-                    "Cannot append to {}: {}",
-                    config_file.display(),
-                    e
-                ))
+                CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
             })?;
         use std::io::Write;
         writeln!(file, "{}", block).map_err(|e| {
-            CliError::Other(format!(
-                "Cannot write to {}: {}",
-                config_file.display(),
-                e
-            ))
+            CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
         })?;
 
         appended.push(name.clone());
@@ -285,10 +273,7 @@ fn set_default_from_imported(
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("openai");
-    let api_key = table
-        .get("api_key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let api_key = table.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
 
     if api_key.is_empty() {
         return Ok(());
@@ -303,19 +288,11 @@ fn set_default_from_imported(
         .append(true)
         .open(config_file)
         .map_err(|e| {
-            CliError::Other(format!(
-                "Cannot append to {}: {}",
-                config_file.display(),
-                e
-            ))
+            CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
         })?;
     use std::io::Write;
     write!(file, "{}", default_block).map_err(|e| {
-        CliError::Other(format!(
-            "Cannot write to {}: {}",
-            config_file.display(),
-            e
-        ))
+        CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
     })?;
 
     println!("  Set default provider: {}", name);
@@ -535,8 +512,12 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
     }
 
     // 3. Collect provider-specific fields
-    let setup_config =
-        collect_provider_fields(provider_type, type_str, is_azure_foundry, foundry_model_family)?;
+    let setup_config = collect_provider_fields(
+        provider_type,
+        type_str,
+        is_azure_foundry,
+        foundry_model_family,
+    )?;
 
     // 4. Test the configuration
     println!();
@@ -1388,10 +1369,7 @@ fn collect_provider_fields(
                 }
             }
             ProviderType::OpenAICompatible => {
-                let base_url = prompt_input(
-                    "Base URL (e.g. http://localhost:8000/v1)",
-                    None,
-                )?;
+                let base_url = prompt_input("Base URL (e.g. http://localhost:8000/v1)", None)?;
                 if !base_url.is_empty() {
                     config.base_url = Some(base_url);
                 }
@@ -1421,10 +1399,7 @@ fn collect_provider_fields(
             let api_version = prompt_input("API version", Some("2024-12-01-preview"))?;
             config.api_version = Some(api_version);
 
-            let deployment = prompt_input(
-                "Deployment name (leave empty to use model name)",
-                None,
-            )?;
+            let deployment = prompt_input("Deployment name (leave empty to use model name)", None)?;
             if !deployment.is_empty() {
                 config.deployment = Some(deployment);
             }
@@ -1442,10 +1417,8 @@ fn collect_provider_fields(
                 "AWS_SECRET_ACCESS_KEY",
             )?);
 
-            let session_token = prompt_input(
-                "AWS session token (leave empty if not needed)",
-                None,
-            )?;
+            let session_token =
+                prompt_input("AWS session token (leave empty if not needed)", None)?;
             if !session_token.is_empty() {
                 config.aws_session_token = Some(session_token);
             }
@@ -1462,9 +1435,7 @@ fn collect_provider_fields(
 
     // -- Compat settings for OpenAI-compatible --
     let is_foundry_other = is_azure_foundry && foundry_model_family.is_some_and(|f| f >= 2);
-    if is_foundry_other
-        || (provider_type == ProviderType::OpenAICompatible && !is_azure_foundry)
-    {
+    if is_foundry_other || (provider_type == ProviderType::OpenAICompatible && !is_azure_foundry) {
         let configure_compat = Confirm::new()
             .with_prompt("Configure compatibility settings?")
             .default(false)
