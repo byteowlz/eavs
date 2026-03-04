@@ -21,14 +21,28 @@ pub struct OpenAITransformer {
     pub use_max_tokens: bool,
     /// Whether the provider supports the store field
     pub supports_store: bool,
+    /// Whether the provider supports stream_options: { include_usage: true }
+    pub supports_stream_options: bool,
 }
 
 impl OpenAITransformer {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            supports_stream_options: true,
+            ..Self::default()
+        }
     }
 
-    /// Configure for specific compat settings.
+    /// Configure from resolved CompatSettings.
+    pub fn with_compat_settings(mut self, compat: &crate::provider::CompatSettings) -> Self {
+        self.use_developer_role = !compat.supports_developer_role();
+        self.use_max_tokens = compat.max_tokens_field() == "max_tokens";
+        self.supports_store = compat.supports_store();
+        self.supports_stream_options = compat.supports_stream_options();
+        self
+    }
+
+    /// Configure for specific compat settings (legacy API, kept for tests).
     pub fn with_compat(
         mut self,
         supports_developer_role: bool,
@@ -81,8 +95,8 @@ impl RequestTransformer for OpenAITransformer {
             request["tools"] = Value::Array(openai_tools);
         }
 
-        // Add stream options for usage reporting
-        if context.stream {
+        // Add stream options for usage reporting (if provider supports it)
+        if context.stream && self.supports_stream_options {
             request["stream_options"] = json!({"include_usage": true});
         }
 

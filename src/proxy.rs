@@ -542,8 +542,26 @@ async fn proxy_handler_inner(
     let needs_transform =
         provider_type.needs_transform() && !is_passthrough_endpoint && !is_responses_api_request;
 
-    // Get the transformer for this provider
-    let transformer = ProviderTransformer::for_provider(provider_type);
+    // Resolve compat settings for OpenAI-compatible providers
+    let resolved_compat = provider_config.resolved_compat();
+    if !resolved_compat.supports_developer_role()
+        || !resolved_compat.supports_store()
+        || !resolved_compat.supports_stream_options()
+        || resolved_compat.max_tokens_field() != "max_completion_tokens"
+    {
+        tracing::debug!(
+            provider = %provider_name,
+            developer_role = resolved_compat.supports_developer_role(),
+            store = resolved_compat.supports_store(),
+            stream_options = resolved_compat.supports_stream_options(),
+            max_tokens_field = resolved_compat.max_tokens_field(),
+            "Using compat settings for provider"
+        );
+    }
+
+    // Get the transformer for this provider (with compat settings wired in)
+    let transformer =
+        ProviderTransformer::for_provider_with_compat(provider_type, Some(&resolved_compat));
 
     // 4. Build request body - transform if needed
     let mut transformed_endpoint_path: Option<String> = None;
@@ -1052,7 +1070,10 @@ async fn proxy_handler_inner(
         // Transform response from provider format back to OpenAI format
         if request_stream && !fake_streaming {
             let stream_state = Arc::new(Mutex::new(StreamState::default()));
-            let transformer = Arc::new(ProviderTransformer::for_provider(provider_type));
+            let transformer = Arc::new(ProviderTransformer::for_provider_with_compat(
+                provider_type,
+                Some(&resolved_compat),
+            ));
             let model_for_stream = model_name.clone();
             let request_id = correlation_id.clone();
             let tracker_clone = usage_tracker.clone();
@@ -1166,7 +1187,10 @@ async fn proxy_handler_inner(
                     .into_response()
             })?;
 
-            let transformer = ProviderTransformer::for_provider(provider_type);
+            let transformer = ProviderTransformer::for_provider_with_compat(
+                provider_type,
+                Some(&resolved_compat),
+            );
             let events = transformer.parse_response(&json_body).map_err(|e| {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -1253,7 +1277,10 @@ async fn proxy_handler_inner(
                     .into_response()
             })?;
 
-            let transformer = ProviderTransformer::for_provider(provider_type);
+            let transformer = ProviderTransformer::for_provider_with_compat(
+                provider_type,
+                Some(&resolved_compat),
+            );
             let events = transformer.parse_response(&json_body).map_err(|e| {
                 (
                     StatusCode::BAD_GATEWAY,

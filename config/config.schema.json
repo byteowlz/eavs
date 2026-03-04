@@ -576,6 +576,10 @@
           "type": ["string", "null"],
           "description": "Field name for max tokens ('max_tokens' or 'max_completion_tokens')",
           "enum": ["max_tokens", "max_completion_tokens", null]
+        },
+        "supports_stream_options": {
+          "type": ["boolean", "null"],
+          "description": "Whether the provider supports stream_options: { include_usage: true }. Set to false for providers that reject this field (e.g., some Azure AI Foundry models, Ollama, vLLM)."
         }
       },
       "additionalProperties": false

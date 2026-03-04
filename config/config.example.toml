@@ -172,6 +172,8 @@ api_key = "env:XAI_API_KEY"
 # [providers.foundry-deepseek.compat]
 # supports_store = false
 # max_tokens_field = "max_tokens"
+# supports_stream_options = false       # set false if provider rejects stream_options
+# supports_developer_role = false       # set false if provider doesn't support developer role
 
 # OpenRouter (unified API for many models)
 [providers.openrouter]
@@ -217,6 +219,7 @@ test_model = "my-model"  # Model to use for `eavs setup test` / `eavs setup test
 [providers.vllm.compat]
 supports_store = false
 max_tokens_field = "max_tokens"
+supports_stream_options = false
 
 # =============================================================================
 # Test Model Resolution

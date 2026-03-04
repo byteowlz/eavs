@@ -14,7 +14,7 @@ pub mod mistral;
 pub mod openai;
 pub mod openai_responses;
 
-use crate::provider::ProviderType;
+use crate::provider::{CompatSettings, ProviderType};
 use crate::types::{Context, StreamEvent, StreamState};
 
 // Re-export transformers for convenience
@@ -96,7 +96,22 @@ impl RequestResponseTransformer for OpenAIResponsesTransformer {}
 
 impl ProviderTransformer {
     /// Create a transformer for the given provider type.
+    ///
+    /// For OpenAI-compatible providers, pass compat settings to control
+    /// behavior like developer role, max_tokens field name, and stream_options.
     pub fn for_provider(provider: ProviderType) -> Self {
+        Self::for_provider_with_compat(provider, None)
+    }
+
+    /// Create a transformer for the given provider type with optional compat settings.
+    ///
+    /// When `compat` is `Some`, OpenAI-compatible providers use these settings
+    /// to control request transformation (developer role, max_tokens field,
+    /// stream_options injection, etc.).
+    pub fn for_provider_with_compat(
+        provider: ProviderType,
+        compat: Option<&CompatSettings>,
+    ) -> Self {
         let inner: Box<dyn RequestResponseTransformer + Send + Sync> = match provider {
             ProviderType::OpenAI
             | ProviderType::Groq
@@ -105,7 +120,14 @@ impl ProviderTransformer {
             | ProviderType::OpenRouter
             | ProviderType::OpenAICompatible
             | ProviderType::GithubCopilot // GitHub Copilot uses OpenAI completions API
-            | ProviderType::Mock => Box::new(OpenAITransformer::new()),
+            | ProviderType::Mock => {
+                let transformer = OpenAITransformer::new();
+                let transformer = match compat {
+                    Some(c) => transformer.with_compat_settings(c),
+                    None => transformer,
+                };
+                Box::new(transformer)
+            }
             ProviderType::Anthropic => Box::new(AnthropicTransformer::new()),
             ProviderType::Google
             | ProviderType::GoogleVertex

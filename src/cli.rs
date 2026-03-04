@@ -2116,10 +2116,7 @@ async fn test_routing_method(
                     "HTTP {} {}",
                     code,
                     body_error
-                        .unwrap_or_else(|| status
-                            .canonical_reason()
-                            .unwrap_or("")
-                            .to_string())
+                        .unwrap_or_else(|| status.canonical_reason().unwrap_or("").to_string())
                 ))
             } else {
                 None

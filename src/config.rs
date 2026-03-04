@@ -329,7 +329,6 @@ pub struct ProviderConfig {
     pub api_version: Option<String>,
     /// Compatibility settings for OpenAI-compatible APIs
     #[serde(default)]
-    #[allow(dead_code)]
     pub compat: CompatSettings,
     /// Custom headers to add to requests
     #[serde(default)]
@@ -549,7 +548,6 @@ impl ProviderConfig {
     }
 
     /// Get compat settings merged with URL-detected defaults.
-    #[allow(dead_code)]
     pub fn resolved_compat(&self) -> CompatSettings {
         self.compat
             .clone()
@@ -1442,10 +1440,18 @@ mod tests {
             [compat]
             supports_store = false
             max_tokens_field = "max_tokens"
+            supports_stream_options = false
         "#;
 
         let config: ProviderConfig = toml::from_str(toml_str).unwrap();
         assert!(!config.compat.supports_store.unwrap());
+        assert!(!config.compat.supports_stream_options.unwrap());
+
+        // Test resolved compat merges with URL detection
+        let resolved = config.resolved_compat();
+        assert!(!resolved.supports_store());
+        assert!(!resolved.supports_stream_options());
+        assert_eq!(resolved.max_tokens_field(), "max_tokens");
     }
 
     #[test]

@@ -46,17 +46,13 @@ pub async fn discover_provider_models(
             }
         }
 
-        ProviderType::Anthropic => {
-            Err("Anthropic does not expose a models endpoint".to_string())
-        }
+        ProviderType::Anthropic => Err("Anthropic does not expose a models endpoint".to_string()),
 
         ProviderType::Google | ProviderType::GoogleVertex | ProviderType::GoogleGeminiCli => {
             discover_gemini(&base_url, &api_key).await
         }
 
-        ProviderType::Bedrock => {
-            Err("AWS Bedrock discovery not yet implemented".to_string())
-        }
+        ProviderType::Bedrock => Err("AWS Bedrock discovery not yet implemented".to_string()),
 
         ProviderType::GithubCopilot => {
             Err("GitHub Copilot does not expose a models endpoint".to_string())
@@ -79,8 +75,8 @@ const NON_CHAT_PREFIXES: &[&str] = &[
     "chatgpt-image-",
     "davinci-",
     "babbage-",
-    "gpt-audio",     // gpt-audio, gpt-audio-mini, gpt-audio-*
-    "gpt-realtime",  // gpt-realtime, gpt-realtime-mini, gpt-realtime-*
+    "gpt-audio",    // gpt-audio, gpt-audio-mini, gpt-audio-*
+    "gpt-realtime", // gpt-realtime, gpt-realtime-mini, gpt-realtime-*
 ];
 
 const NON_CHAT_CONTAINS: &[&str] = &[
@@ -91,9 +87,7 @@ const NON_CHAT_CONTAINS: &[&str] = &[
     "-instruct-0914", // completions-only instruct variants
 ];
 
-const NON_CHAT_EXACT: &[&str] = &[
-    "gpt-3.5-turbo-instruct",
-];
+const NON_CHAT_EXACT: &[&str] = &["gpt-3.5-turbo-instruct"];
 
 /// Returns true if the model ID looks like a chat/completion model.
 fn is_chat_model(id: &str) -> bool {
@@ -145,7 +139,10 @@ async fn discover_openai_compatible(
         req = req.header("Authorization", format!("Bearer {api_key}"));
     }
 
-    let resp = req.send().await.map_err(|e| format!("Request failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
@@ -159,10 +156,7 @@ async fn discover_openai_compatible(
         id: String,
     }
 
-    let body: ListResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let body: ListResponse = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
 
     Ok(body
         .data
@@ -219,10 +213,7 @@ async fn discover_gemini(base_url: &str, api_key: &str) -> Result<Vec<Discovered
         supportedGenerationMethods: Vec<String>,
     }
 
-    let body: GeminiResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let body: GeminiResponse = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
 
     Ok(body
         .models
@@ -289,10 +280,7 @@ async fn discover_ollama(base_url: &str) -> Result<Vec<DiscoveredModel>, String>
         quantization_level: Option<String>,
     }
 
-    let body: TagsResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let body: TagsResponse = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
 
     Ok(body
         .models
