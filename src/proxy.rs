@@ -416,6 +416,12 @@ async fn proxy_handler_inner(
             .into_response());
     }
 
+    // Sanitize empty text content parts in messages.
+    // Some providers (e.g. Azure Foundry / Kimi-K2.5) reject requests with
+    // `{"text": "", "type": "text"}` content parts (422 "text is not provided").
+    // Replace empty text with a single space to keep the message structure intact.
+    sanitize_empty_text_parts(&mut json_body);
+
     // Log Request
     let _ = state.analysis_tx.send(AnalysisEvent::Request {
         timestamp: chrono::Utc::now().timestamp_millis(),
@@ -1639,6 +1645,47 @@ fn build_fake_openai_sse_from_events(
         .iter()
         .map(|e| Bytes::from(build_openai_sse_response(e, request_id, model)))
         .collect()
+}
+
+/// Sanitize empty text content parts in the `messages` array.
+///
+/// Some providers (Azure Foundry, Kimi) reject `{"text": "", "type": "text"}`
+/// with a 422 error because they consider an empty string as "text not provided".
+/// This function replaces empty text with a single space to keep message structure
+/// intact while satisfying strict validation.
+///
+/// Handles both array-of-parts content (`"content": [{"type":"text","text":""}]`)
+/// and string content (`"content": ""`).
+fn sanitize_empty_text_parts(json_body: &mut Value) {
+    let Some(messages) = json_body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+
+    for msg in messages.iter_mut() {
+        let Some(content) = msg.get_mut("content") else {
+            continue;
+        };
+
+        match content {
+            // Array content: [{"type": "text", "text": ""}, ...]
+            Value::Array(parts) => {
+                for part in parts.iter_mut() {
+                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            if text.is_empty() {
+                                part["text"] = Value::String(" ".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // String content: ""
+            Value::String(s) if s.is_empty() => {
+                *content = Value::String(" ".to_string());
+            }
+            _ => {}
+        }
+    }
 }
 
 fn apply_injections(json_body: &mut Value, injections: &[Injection]) {
