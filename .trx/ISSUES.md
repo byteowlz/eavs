@@ -12,11 +12,11 @@ The skill should cover:
 
 
 ### [eavs-qcfn.3] Model alias resolution in proxy -- rewrite default/fast/reasoning to real model IDs (P1, task)
-When the proxy receives a request with a model field set to a named alias ("default", "fast", "reasoning", "fallback"), resolve it to the actual model ID from [defaults] config before routing.
+When the proxy receives a request with model field set to a named alias ("default", "fast", "reasoning", "fallback"), OR with model field missing/empty/null, resolve it to the actual model ID from [defaults] config before routing.
 
-Implementation:
-- In proxy.rs, after extracting the model field from the request body, check if it matches a known alias
-- If so, replace it with the resolved model ID and set the provider accordingly
+Resolution order:
+1. model field is a known alias ("default", "fast", "reasoning", "fallback") -> resolve to configured model
+2. model field is missing, empty, or null -> resolve to "default" tier
 ...
 
 
