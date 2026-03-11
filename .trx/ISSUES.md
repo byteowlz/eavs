@@ -2,6 +2,60 @@
 
 ## Open
 
+### [eavs-k8e7] Create Pi skill: eavs-auto-discovery for adding zero-config LLM access to any app (P1, task)
+Create a Pi skill that guides agents through adding eavs auto-discovery to any LLM-powered application, regardless of language.
+
+The skill should cover:
+
+1. Discovery protocol:
+...
+
+
+### [eavs-qcfn.3] Model alias resolution in proxy -- rewrite default/fast/reasoning to real model IDs (P1, task)
+When the proxy receives a request with a model field set to a named alias ("default", "fast", "reasoning", "fallback"), resolve it to the actual model ID from [defaults] config before routing.
+
+Implementation:
+- In proxy.rs, after extracting the model field from the request body, check if it matches a known alias
+- If so, replace it with the resolved model ID and set the provider accordingly
+...
+
+
+### [eavs-qcfn.2] Implement GET /defaults endpoint (P1, task)
+New API endpoint that returns the resolved model defaults.
+
+GET /defaults returns:
+```json
+{
+...
+
+
+### [eavs-qcfn.1] Add [defaults] config section for named model tiers (P1, task)
+Add a new [defaults] section to eavs config.toml that maps named tiers to specific models:
+
+```toml
+[defaults]
+default = "claude-sonnet-4"
+...
+
+
+### [eavs-qcfn] Auto-discovery: model defaults and zero-config endpoint (P1, epic)
+Enable AI-powered applications to use eavs with zero configuration. When eavs is running on localhost:3033, apps should be able to discover it, get recommended models, and send requests without ever specifying a model name or API key.
+
+Three components:
+1. GET /defaults endpoint exposing named model tiers (default, fast, reasoning, fallback)
+2. Model alias resolution in the proxy -- requests with model='default'/'fast'/'reasoning' get rewritten to actual model IDs before routing
+...
+
+
+### [eavs-w6jn] Change default port from 3000 to 3033 (P1, task)
+The default port 3000 conflicts with too many dev servers (Vite, Next.js, Rails, etc.). Change to 3033 as the official eavs default.
+
+Changes needed:
+- src/config.rs line 175: port 3000 -> port 3033
+- Update all documentation references to port 3000
+...
+
+
 ### [eavs-sth0] Secret-aware API proxying: extend eavs to resolve kyz secret references and inject credentials at transport layer (P1, feature)
 ## Summary
 
@@ -12,6 +66,15 @@ Eavs is a shared central service. kyz vaults are per-user. The runner already ru
 
 
 ### [eavs-1sfs] Upstream 401 errors cause request to hang instead of returning error (P1, bug)
+
+### [eavs-qcfn.4] Enrich /health endpoint with version and provider summary (P2, task)
+Currently GET /health just returns 200 OK. Extend it to return useful discovery metadata so a single probe gives apps everything they need to decide if eavs is usable:
+
+```json
+{
+  "status": "ok",
+...
+
 
 ### [eavs-hhc9] Add 'not needed' option for API key in setup wizard (P2, feature)
 When adding openai-compatible or ollama providers (local endpoints), the setup wizard should offer a 'not needed' option for the API key prompt. Currently users must type a value like 'not-needed' manually. The wizard should detect local provider types and default to no-key or offer it as an explicit choice.
@@ -40,6 +103,24 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 **Use case:** Sandboxed agents need GitHub access but shouldn't have direct access to credentials.
 
 **gh CLI token storage (for reference):**
+...
+
+
+### [eavs-qcfn.5] Automatic fallback on provider errors (P3, feature)
+When a request to the default model fails with a rate-limit (429) or server error (5xx), automatically retry with the configured fallback model/provider.
+
+Behavior:
+- Only applies when the original request used a named alias (default, fast, reasoning) -- explicit model requests are not retried on a different model
+- Add X-Eavs-Fallback: true header when fallback is used
+...
+
+
+### [eavs-vsey] Generic API key management for non-LLM providers (Sora, ElevenLabs, etc.) (P3, feature)
+Eavs currently only supports LLM chat completion providers. Users need to store and proxy API keys for non-LLM services like:
+
+- OpenAI Sora (video generation)
+- ElevenLabs (TTS/audio)
+- Replicate (multi-modal)
 ...
 
 
