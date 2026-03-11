@@ -67,6 +67,15 @@ Eavs is a shared central service. kyz vaults are per-user. The runner already ru
 
 ### [eavs-1sfs] Upstream 401 errors cause request to hang instead of returning error (P1, bug)
 
+### [eavs-qcfn.6] CLI: eavs ask -- one-shot LLM queries for scripts (P2, feature)
+Add an 'eavs ask' subcommand for quick one-shot LLM calls from the command line and shell scripts. Uses the same zero-config defaults path (localhost:3033, model aliases, no API key needed).
+
+Usage:
+  eavs ask "what is 2+2"
+  cat file.txt | eavs ask "summarize this"
+...
+
+
 ### [eavs-qcfn.4] Enrich /health endpoint with version and provider summary (P2, task)
 Currently GET /health just returns 200 OK. Extend it to return useful discovery metadata so a single probe gives apps everything they need to decide if eavs is usable:
 
