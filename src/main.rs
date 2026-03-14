@@ -9,6 +9,7 @@ mod keys;
 mod logging;
 mod mock_provider;
 mod model_catalog;
+mod model_defaults;
 mod model_discovery;
 mod network_acl;
 mod oauth;
@@ -756,6 +757,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     let app = Router::new()
         // Health check
         .route("/health", get(api::health_handler))
+        .route("/defaults", get(api::defaults_handler))
         // Control API - Providers
         .route("/providers", get(api::providers_handler))
         .route("/providers/detail", get(api::providers_detail_handler))

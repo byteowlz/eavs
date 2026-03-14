@@ -60,7 +60,7 @@ Already implemented in `adapters/pi/adapter.ts`.
 {
   "providers": {
     "eavs-openai": {
-      "baseUrl": "http://127.0.0.1:3000/openai/v1",
+      "baseUrl": "http://127.0.0.1:3033/openai/v1",
       "api": "openai-responses",
       "apiKey": "eavs-xxx",
       "models": [...]
@@ -100,7 +100,7 @@ Simple YAML format:
 ```yaml
 model: gpt-4o
 api_key: sk-xxx
-base_url: http://localhost:3000/v1
+base_url: http://localhost:3033/v1
 edit_format: diff
 auto_commits: true
 ```

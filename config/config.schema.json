@@ -18,7 +18,7 @@
         "port": {
           "type": "integer",
           "description": "Port number to listen on",
-          "default": 3000,
+          "default": 3033,
           "minimum": 1,
           "maximum": 65535
         }

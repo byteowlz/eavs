@@ -12,7 +12,7 @@
 
 [server]
 host = "127.0.0.1"
-port = 3000
+port = 3033
 
 # =============================================================================
 # Providers
@@ -159,7 +159,7 @@ api_key = "env:XAI_API_KEY"
 # base_url = "https://my-resource.openai.azure.com/anthropic/v1"
 #
 # Usage:
-#   curl http://localhost:3000/v1/chat/completions \
+#   curl http://localhost:3033/v1/chat/completions \
 #     -H "X-Provider: foundry-claude" \
 #     -d '{"model": "claude-opus-4-5", "messages": [...]}'
 

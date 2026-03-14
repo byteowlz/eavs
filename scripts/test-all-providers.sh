@@ -4,7 +4,7 @@
 
 set -e
 
-EAVS_URL="${EAVS_URL:-http://localhost:3000}"
+EAVS_URL="${EAVS_URL:-http://localhost:3033}"
 VERBOSE="${VERBOSE:-0}"
 
 RED='\033[0;31m'

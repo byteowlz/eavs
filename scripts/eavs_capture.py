@@ -27,7 +27,7 @@ Usage:
 
 Requirements:
     - mitmproxy 10.1.5+ (for local capture mode)
-    - Eaves proxy running (default: http://127.0.0.1:3000)
+    - Eaves proxy running (default: http://127.0.0.1:3033)
 
 On first run, you may need to trust mitmproxy's CA certificate.
 See: https://docs.mitmproxy.org/stable/concepts/certificates/
@@ -231,7 +231,7 @@ class EavsCapture:
         loader.add_option(
             name="eavs_port",
             typespec=int,
-            default=3000,
+            default=3033,
             help="Eaves proxy port",
         )
         loader.add_option(

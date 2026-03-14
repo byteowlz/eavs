@@ -35,7 +35,7 @@ eavs serve
 eavs service start
 
 # Test with curl
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3033/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
@@ -435,7 +435,7 @@ mitmproxy --mode local:ChatGPT -s scripts/eavs_capture.py
 eavs serve --host 0.0.0.0 --port 8080
 
 # Background service
-eavs service start [--port 3000]
+eavs service start [--port 3033]
 eavs service stop
 eavs service restart
 eavs service status
@@ -509,14 +509,14 @@ All `/v1/*` requests are forwarded to the configured upstream provider.
 
 ```bash
 # Use default provider
-curl http://localhost:3000/v1/chat/completions ...
+curl http://localhost:3033/v1/chat/completions ...
 
 # Use specific provider
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3033/v1/chat/completions \
   -H "X-Provider: anthropic" ...
 
 # Track conversation
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3033/v1/chat/completions \
   -H "X-Conversation-ID: my-session" ...
 ```
 
@@ -525,19 +525,36 @@ curl http://localhost:3000/v1/chat/completions \
 #### Health Check
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3033/health
 ```
+
+#### Model Defaults (Zero-Config Aliases)
+
+```bash
+# Returns resolved model IDs for default / fast / reasoning / fallback
+curl http://localhost:3033/defaults
+
+# Optional provider override
+curl "http://localhost:3033/defaults?provider=anthropic"
+```
+
+Use aliases in OpenAI-compatible requests:
+
+- `model: "default"`
+- `model: "fast"`
+- `model: "reasoning"`
+- `model: "fallback"`
 
 #### List Providers
 
 ```bash
-curl http://localhost:3000/providers
+curl http://localhost:3033/providers
 ```
 
 #### Inject Context
 
 ```bash
-curl -X POST http://localhost:3000/inject/my-conversation \
+curl -X POST http://localhost:3033/inject/my-conversation \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "system", "content": "You are a pirate."}]}'
 ```
@@ -545,31 +562,31 @@ curl -X POST http://localhost:3000/inject/my-conversation \
 #### Clear Injections
 
 ```bash
-curl -X POST http://localhost:3000/clear/my-conversation
+curl -X POST http://localhost:3033/clear/my-conversation
 ```
 
 #### List Conversations
 
 ```bash
-curl http://localhost:3000/conversations
+curl http://localhost:3033/conversations
 ```
 
 #### Get Conversation Stats
 
 ```bash
-curl http://localhost:3000/conversations/stats
+curl http://localhost:3033/conversations/stats
 ```
 
 #### Get Conversation Details
 
 ```bash
-curl http://localhost:3000/conversations/my-conversation
+curl http://localhost:3033/conversations/my-conversation
 ```
 
 #### Update Conversation Metadata
 
 ```bash
-curl -X PATCH http://localhost:3000/conversations/my-conversation \
+curl -X PATCH http://localhost:3033/conversations/my-conversation \
   -H "Content-Type: application/json" \
   -d '{"provider": "anthropic", "tags": ["test"]}'
 ```
@@ -577,21 +594,21 @@ curl -X PATCH http://localhost:3000/conversations/my-conversation \
 #### Stream Logs (SSE)
 
 ```bash
-curl http://localhost:3000/logs/stream
+curl http://localhost:3033/logs/stream
 ```
 
 #### Provider Detail (for integrations)
 
 ```bash
 # Get all providers with models, pricing, and Pi API mapping
-curl http://localhost:3000/providers/detail \
+curl http://localhost:3033/providers/detail \
   -H "Authorization: Bearer $EAVS_MASTER_KEY"
 ```
 
 #### Admin: Upstream Quotas
 
 ```bash
-curl http://localhost:3000/admin/quotas \
+curl http://localhost:3033/admin/quotas \
   -H "Authorization: Bearer $EAVS_MASTER_KEY"
 ```
 
@@ -600,15 +617,15 @@ curl http://localhost:3000/admin/quotas \
 #### OpenAI Realtime API
 
 ```
-ws://localhost:3000/v1/realtime?model=gpt-4o-realtime-preview
-ws://localhost:3000/<provider>/v1/realtime?model=gpt-4o-realtime-preview
+ws://localhost:3033/v1/realtime?model=gpt-4o-realtime-preview
+ws://localhost:3033/<provider>/v1/realtime?model=gpt-4o-realtime-preview
 ```
 
 #### Codex Responses (WebSocket transport)
 
 ```
-ws://localhost:3000/v1/codex/responses
-ws://localhost:3000/<provider>/v1/codex/responses
+ws://localhost:3033/v1/codex/responses
+ws://localhost:3033/<provider>/v1/codex/responses
 ```
 
 The Codex WebSocket proxy intercepts `response.create` messages for policy application (e.g., `store: true`) and tracks usage from `response.completed` events.

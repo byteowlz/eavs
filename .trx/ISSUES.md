@@ -2,15 +2,6 @@
 
 ## Open
 
-### [eavs-k8e7] Create Pi skill: eavs-auto-discovery for adding zero-config LLM access to any app (P1, task)
-Create a Pi skill that guides agents through adding eavs auto-discovery to any LLM-powered application, regardless of language.
-
-The skill should cover:
-
-1. Discovery protocol:
-...
-
-
 ### [eavs-qcfn.3] Model alias resolution in proxy -- rewrite default/fast/reasoning to real model IDs (P1, task)
 When the proxy receives a request with model field set to a named alias ("default", "fast", "reasoning", "fallback"), OR with model field missing/empty/null, resolve it to the actual model ID from [defaults] config before routing.
 
@@ -35,24 +26,6 @@ Add a new [defaults] section to eavs config.toml that maps named tiers to specif
 ```toml
 [defaults]
 default = "claude-sonnet-4"
-...
-
-
-### [eavs-qcfn] Auto-discovery: model defaults and zero-config endpoint (P1, epic)
-Enable AI-powered applications to use eavs with zero configuration. When eavs is running on localhost:3033, apps should be able to discover it, get recommended models, and send requests without ever specifying a model name or API key.
-
-Three components:
-1. GET /defaults endpoint exposing named model tiers (default, fast, reasoning, fallback)
-2. Model alias resolution in the proxy -- requests with model='default'/'fast'/'reasoning' get rewritten to actual model IDs before routing
-...
-
-
-### [eavs-w6jn] Change default port from 3000 to 3033 (P1, task)
-The default port 3000 conflicts with too many dev servers (Vite, Next.js, Rails, etc.). Change to 3033 as the official eavs default.
-
-Changes needed:
-- src/config.rs line 175: port 3000 -> port 3033
-- Update all documentation references to port 3000
 ...
 
 
@@ -115,6 +88,9 @@ Allow agents to use GitHub CLI (gh) through EAVS without exposing real GitHub to
 ...
 
 
+### [eavs-jpcw] Error message says 'eavs_' but prefix is actually 'eavs-' (P3, bug)
+The proxy error message at proxy.rs:355 and proxy.rs:1816 says 'Keys must start with eavs_' but the actual KEY_PREFIX constant is 'eavs-' (hyphen). Fixed to match.
+
 ### [eavs-qcfn.5] Automatic fallback on provider errors (P3, feature)
 When a request to the default model fails with a rate-limit (429) or server error (5xx), automatically retry with the configured fallback model/provider.
 
@@ -135,6 +111,9 @@ Eavs currently only supports LLM chat completion providers. Users need to store 
 
 ## Closed
 
+- [eavs-qcfn] Auto-discovery: model defaults and zero-config endpoint (closed 2026-03-11)
+- [eavs-w6jn] Change default port from 3000 to 3033 (closed 2026-03-11)
+- [eavs-k8e7] Create Pi skill: eavs-auto-discovery for adding zero-config LLM access to any app (closed 2026-03-11)
 - [eavs-bjsw] Enhanced mock provider: realistic streaming, tool calls, error simulation, configurable scenarios (closed 2026-02-25)
 - [eavs-bjsw.17] Register mock models in /providers/detail so they appear in models.json generation (mock/simple-text, mock/tool-call, etc.) (closed 2026-02-25)
 - [eavs-bjsw.16] Full chunk audit logging: log every SSE chunk sent by mock provider with timestamps for debugging (closed 2026-02-25)

@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "786e424f",
+      "content": "Investigate and implement eavs-k8e7 (Pi skill: eavs-auto-discovery)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "b2eab9ca",
+      "content": "Investigate and implement eavs-w6jn (default port 3000 -> 3033)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "db913608",
+      "content": "Investigate and implement eavs-qcfn (epic: auto-discovery defaults + zero-config endpoint)",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-03-11T18:16:14.887Z"
+}
