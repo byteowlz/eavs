@@ -111,6 +111,52 @@ pub async fn health_handler() -> StatusCode {
     StatusCode::OK
 }
 
+#[derive(Deserialize)]
+pub struct DefaultsQuery {
+    pub provider: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DefaultsResponse {
+    pub provider: String,
+    pub default: String,
+    pub fast: String,
+    pub reasoning: String,
+    pub fallback: String,
+}
+
+/// Zero-config model defaults for alias-based clients.
+///
+/// Supports optional provider override via `?provider=name`.
+pub async fn defaults_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DefaultsQuery>,
+) -> Result<Json<DefaultsResponse>, StatusCode> {
+    let runtime_default_provider = crate::runtime_state::load_runtime_state()
+        .and_then(|s| s.default_provider)
+        .unwrap_or_default();
+
+    let defaults = crate::model_defaults::resolve_model_defaults(
+        &state.config,
+        state.catalog(),
+        query.provider.as_deref(),
+        if runtime_default_provider.is_empty() {
+            None
+        } else {
+            Some(runtime_default_provider.as_str())
+        },
+    )
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(DefaultsResponse {
+        provider: defaults.provider,
+        default: defaults.default,
+        fast: defaults.fast,
+        reasoning: defaults.reasoning,
+        fallback: defaults.fallback,
+    }))
+}
+
 /// List available providers.
 pub async fn providers_handler(State(state): State<AppState>) -> Json<Vec<String>> {
     let providers: Vec<String> = state.config.providers.keys().cloned().collect();

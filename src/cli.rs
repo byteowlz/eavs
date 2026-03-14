@@ -465,7 +465,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -484,7 +484,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -502,7 +502,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -520,7 +520,7 @@ pub enum KeyCommands {
         #[arg(short, long)]
         yes: bool,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -542,7 +542,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3000)
+        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -876,7 +876,7 @@ impl Default for CliConfig {
 
 impl CliConfig {
     /// Create a CliConfig by loading settings from config file.
-    /// Priority: EAVS_URL env > config file > default (127.0.0.1:3000)
+    /// Priority: EAVS_URL env > config file > default (127.0.0.1:3033)
     pub fn from_config(config_path: Option<&str>) -> Self {
         // Try to load config for port
         let config = if let Some(path) = config_path {
@@ -890,11 +890,11 @@ impl CliConfig {
             if !url.trim().is_empty() {
                 url
             } else {
-                let port = config.as_ref().map(|c| c.server.port).unwrap_or(3000);
+                let port = config.as_ref().map(|c| c.server.port).unwrap_or(3033);
                 format!("http://127.0.0.1:{}", port)
             }
         } else {
-            let port = config.as_ref().map(|c| c.server.port).unwrap_or(3000);
+            let port = config.as_ref().map(|c| c.server.port).unwrap_or(3033);
             format!("http://127.0.0.1:{}", port)
         };
 
@@ -3268,7 +3268,7 @@ pub fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u
         crate::config::AppConfig::load().ok()
     };
 
-    config.map(|c| c.server.port).unwrap_or(3000)
+    config.map(|c| c.server.port).unwrap_or(3033)
 }
 
 /// Start the EAVS service in the background
@@ -4282,10 +4282,10 @@ mod tests {
 
     #[test]
     fn test_get_effective_port_default_fallback() {
-        // When no CLI port and no config, should fall back to 3000
+        // When no CLI port and no config, should fall back to 3033
         // This test uses a non-existent config path
         let port = get_effective_port(None, Some("/nonexistent/path/config.toml"));
-        assert_eq!(port, 3000);
+        assert_eq!(port, 3033);
     }
 
     #[test]

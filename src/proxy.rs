@@ -352,7 +352,7 @@ async fn proxy_handler_inner(
                 StatusCode::UNAUTHORIZED,
                 Json(
                     ProxyError::new(
-                        "A valid virtual API key is required. Keys must start with 'eavs_'",
+                        "A valid virtual API key is required. Keys must start with 'eavs-'",
                         "authentication_error",
                     )
                     .with_code("invalid_api_key"),
@@ -1813,7 +1813,7 @@ async fn ws_proxy_handler_inner(
                 StatusCode::UNAUTHORIZED,
                 Json(
                     ProxyError::new(
-                        "A valid virtual API key is required. Keys must start with 'eavs_'",
+                        "A valid virtual API key is required. Keys must start with 'eavs-'",
                         "authentication_error",
                     )
                     .with_code("invalid_api_key"),

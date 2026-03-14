@@ -4,7 +4,7 @@
 
 set -e
 
-EAVS_URL="${EAVS_URL:-http://localhost:3000}"
+EAVS_URL="${EAVS_URL:-http://localhost:3033}"
 PROVIDER="${1:-default}"
 PROMPT="${2:-Hello! Please respond with just 'EAVS test successful' and nothing else.}"
 

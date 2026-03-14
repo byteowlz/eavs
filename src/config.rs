@@ -172,7 +172,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
-            port: 3000,
+            port: 3033,
             max_body_size: 10 * 1024 * 1024, // 10 MB default
             log_redact: true,
         }
