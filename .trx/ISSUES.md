@@ -2,6 +2,9 @@
 
 ## Open
 
+### [eavs-gh49] foundry-wg advertised as pi_api=openai-responses despite type=openai-completions (P1, bug)
+On octo-azure, /providers/detail shows provider type=openai-completions but pi_api=openai-responses for foundry-wg (Kimi-K2.5).\n\nConfig section:\n[providers.foundry-wg]\ntype = "openai-completions"\nbase_url = .../openai/v1/\n\nObserved /providers/detail entry:\n{ name: "foundry-wg", type: "openai-completions", pi_api: "openai-responses" }\n\nExpected:\n- pi_api should align with provider type unless explicit override exists\n- if model-level flags (e.g. reasoning=true) force responses API, document rule and expose explicit config toggle\n\nImpact:\n- Oqto/Pi chooses wrong API shape for endpoint, causing operation mismatch/errors
+
 ### [eavs-qcfn.3] Model alias resolution in proxy -- rewrite default/fast/reasoning to real model IDs (P1, task)
 When the proxy receives a request with model field set to a named alias ("default", "fast", "reasoning", "fallback"), OR with model field missing/empty/null, resolve it to the actual model ID from [defaults] config before routing.
 
@@ -111,6 +114,8 @@ Eavs currently only supports LLM chat completion providers. Users need to store 
 
 ## Closed
 
+- [eavs-k9zb] Add admin provider/model CRUD API + persistent store (avoid config-file edits) (closed 2026-03-16)
+- [eavs-9nsk] Usage/token tracking not updating per virtual key (closed 2026-03-16)
 - [eavs-qcfn] Auto-discovery: model defaults and zero-config endpoint (closed 2026-03-11)
 - [eavs-w6jn] Change default port from 3000 to 3033 (closed 2026-03-11)
 - [eavs-k8e7] Create Pi skill: eavs-auto-discovery for adding zero-config LLM access to any app (closed 2026-03-11)
