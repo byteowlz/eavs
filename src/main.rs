@@ -16,6 +16,7 @@ mod oauth;
 mod plugins;
 mod policy;
 mod provider;
+mod provider_store;
 mod proxy;
 mod runtime_state;
 mod setup;
@@ -740,6 +741,12 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         }
     }
 
+    // Initialize provider store (for admin CRUD API)
+    if let Err(e) = state.init_provider_store().await {
+        tracing::error!("Failed to initialize provider store: {}", e);
+        // Continue without provider store - it's optional
+    }
+
     // Load model catalog from models.dev (async, non-blocking)
     state.init_model_catalog().await;
 
@@ -784,6 +791,14 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/keys/:key_hash", get(api::get_key_handler))
         .route("/admin/keys/:key_hash", delete(api::delete_key_handler))
         .route("/admin/keys/:key_hash/usage", get(api::key_usage_handler))
+        // Admin API - Providers
+        .route("/admin/providers", post(api::upsert_provider_handler))
+        .route("/admin/providers", get(api::list_providers_handler))
+        .route("/admin/providers/:name", get(api::get_provider_handler))
+        .route("/admin/providers/:name", delete(api::delete_provider_handler))
+        .route("/admin/providers/:name/models", post(api::add_model_handler))
+        .route("/admin/providers/:name/models", get(api::get_models_handler))
+        .route("/admin/providers/:name/models/:model_id", delete(api::remove_model_handler))
         // Admin API - Pricing
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         .route("/admin/quotas", get(api::upstream_quotas_handler))

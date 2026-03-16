@@ -2,6 +2,7 @@ use crate::config::{AppConfig, StateConfig};
 use crate::keys::{CostCalculator, KeyStore, KeyValidator, RateLimiter, SharedPricingTable};
 use crate::model_catalog::ModelCatalog;
 use crate::oauth::{OAuthBackend, OAuthPendingAuth, OAuthStore};
+use crate::provider_store::ProviderStore;
 use crate::upstream::{ReqwestUpstream, Upstream};
 use crate::upstream_quota::QuotaTracker;
 use dashmap::DashMap;
@@ -27,6 +28,8 @@ pub struct AppState {
     pub key_store: Arc<OnceCell<Arc<KeyStore>>>,
     /// Key validator (lazily initialized)
     pub key_validator: Arc<OnceCell<Arc<KeyValidator>>>,
+    /// Provider store (lazily initialized)
+    pub provider_store: Arc<OnceCell<Arc<ProviderStore>>>,
     /// OAuth credentials store (lazily initialized)
     pub oauth_store: Arc<OnceCell<Arc<OAuthStore>>>,
     /// Pending OAuth state storage
@@ -416,6 +419,7 @@ impl AppState {
             analysis_tx: tx,
             key_store: Arc::new(OnceCell::new()),
             key_validator: Arc::new(OnceCell::new()),
+            provider_store: Arc::new(OnceCell::new()),
             oauth_store: Arc::new(OnceCell::new()),
             oauth_states: Arc::new(DashMap::new()),
             rate_limiter: Arc::new(RateLimiter::new()),
@@ -536,6 +540,31 @@ impl AppState {
     /// Get the cost calculator if initialized.
     pub fn get_cost_calculator(&self) -> Option<&CostCalculator> {
         self.cost_calculator.get()
+    }
+
+    /// Initialize provider store (call during startup).
+    pub async fn init_provider_store(&self) -> Result<(), String> {
+        let db_path = std::path::PathBuf::from(self.config.keys.resolved_database_path());
+        let provider_db_path = db_path.with_file_name("providers.db");
+
+        tracing::info!("Initializing provider store at {:?}", provider_db_path);
+
+        let store = ProviderStore::new(&provider_db_path)
+            .await
+            .map_err(|e| format!("Failed to initialize provider store: {}", e))?;
+
+        self.provider_store
+            .set(Arc::new(store))
+            .map_err(|_| "Provider store already initialized")?;
+
+        tracing::info!("Provider store initialized");
+
+        Ok(())
+    }
+
+    /// Get the provider store if initialized.
+    pub fn get_provider_store(&self) -> Option<&Arc<ProviderStore>> {
+        self.provider_store.get()
     }
 }
 
