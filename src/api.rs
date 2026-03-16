@@ -199,7 +199,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
 
     let catalog = state.catalog();
 
-    let details: Vec<ProviderDetail> = state
+    let mut details: Vec<ProviderDetail> = state
         .config
         .providers
         .iter()
@@ -245,6 +245,66 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
             }
         })
         .collect();
+
+    // Merge admin-added providers from the provider store (config takes precedence)
+    if let Some(store) = state.get_provider_store() {
+        for entry in store.list_providers() {
+            if state.config.providers.contains_key(&entry.name) {
+                continue; // config providers take precedence
+            }
+
+            let type_str = entry
+                .config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("openai");
+            let provider_type = ProviderType::from_str(type_str);
+            let has_api_key = entry
+                .config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+
+            let models = if let Ok(m) = store.get_models(&entry.name).await {
+                m
+            } else if let Some(cat) = catalog {
+                let catalog_id = eavs_to_catalog_id(&entry.name, type_str);
+                cat.models_for_provider(catalog_id, &[])
+            } else {
+                Vec::new()
+            };
+
+            let mut headers = std::collections::HashMap::new();
+            if let Some(obj) = entry.config.get("headers").and_then(|v| v.as_object()) {
+                for k in obj.keys() {
+                    headers.insert(k.clone(), "EAVS_API_KEY".to_string());
+                }
+            }
+
+            let api_version = entry
+                .config
+                .get("api_version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            details.push(ProviderDetail {
+                name: entry.name,
+                type_: type_str.to_string(),
+                pi_api: pi_api_for_provider(&provider_type),
+                oauth: matches!(
+                    provider_type,
+                    ProviderType::OpenAICodex
+                        | ProviderType::GithubCopilot
+                        | ProviderType::GoogleGeminiCli
+                ),
+                has_api_key,
+                headers,
+                api_version,
+                models,
+            });
+        }
+    }
 
     Json(details)
 }
@@ -371,6 +431,22 @@ pub struct KeyApiError {
 }
 
 impl KeyApiError {
+    fn new(error: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            code: code.into(),
+        }
+    }
+}
+
+/// Error response for provider API.
+#[derive(Serialize)]
+pub struct ProviderApiError {
+    pub error: String,
+    pub code: String,
+}
+
+impl ProviderApiError {
     fn new(error: impl Into<String>, code: impl Into<String>) -> Self {
         Self {
             error: error.into(),
@@ -835,6 +911,229 @@ pub async fn update_pricing_handler(
 pub struct PricingUpdateResponse {
     pub models_updated: usize,
     pub total_models: usize,
+}
+
+
+// ============================================================================
+// Admin Provider/Model Management Endpoints
+// ============================================================================
+
+/// Create or update a provider.
+///
+/// POST /admin/providers
+/// Authorization: Bearer <master_key>
+pub async fn upsert_provider_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::provider_store::ProviderRequest>,
+) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    let config_json = &payload.config;
+    if !config_json.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProviderApiError::new("Invalid config format", "invalid_config")),
+        ));
+    }
+    if !config_json.get("type").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProviderApiError::new("Provider type is required", "missing_type")),
+        ));
+    }
+
+    let entry = store.upsert_provider(payload).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(format!("Failed to upsert provider: {}", e), "upsert_failed")),
+        )
+    })?;
+
+    Ok(Json(entry))
+}
+
+/// Get a provider by name.
+///
+/// GET /admin/providers/:name
+/// Authorization: Bearer <master_key>
+pub async fn get_provider_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    let entry = store.get_provider(&name).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(ProviderApiError::new("Provider not found", "not_found")))
+    })?;
+
+    Ok(Json(entry))
+}
+
+/// List all admin-managed providers.
+///
+/// GET /admin/providers
+/// Authorization: Bearer <master_key>
+pub async fn list_providers_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::provider_store::ProviderEntry>>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    Ok(Json(store.list_providers()))
+}
+
+/// Delete a provider.
+///
+/// DELETE /admin/providers/:name
+/// Authorization: Bearer <master_key>
+pub async fn delete_provider_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    let deleted = store.delete_provider(&name).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(format!("Failed to delete provider: {}", e), "delete_failed")),
+        )
+    })?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(ProviderApiError::new("Provider not found", "not_found"))))
+    }
+}
+
+/// Add a model to a provider's shortlist.
+///
+/// POST /admin/providers/:name/models
+/// Authorization: Bearer <master_key>
+pub async fn add_model_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(payload): Json<crate::config::ModelShortlistEntry>,
+) -> Result<StatusCode, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    store.add_model(&name, payload).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(format!("Failed to add model: {}", e), "add_model_failed")),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get all models for a provider.
+///
+/// GET /admin/providers/:name/models
+/// Authorization: Bearer <master_key>
+pub async fn get_models_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<crate::config::ModelShortlistEntry>>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    let models = store.get_models(&name).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(format!("Failed to get models: {}", e), "get_models_failed")),
+        )
+    })?;
+
+    Ok(Json(models))
+}
+
+/// Remove a model from a provider's shortlist.
+///
+/// DELETE /admin/providers/:name/models/:model_id
+/// Authorization: Bearer <master_key>
+pub async fn remove_model_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((name, model_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+        )
+    })?;
+
+    let deleted = store.remove_model(&name, &model_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(format!("Failed to remove model: {}", e), "remove_model_failed")),
+        )
+    })?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(ProviderApiError::new("Model not found", "not_found"))))
+    }
+}
+
+/// Check master key authorization, returning ProviderApiError on failure.
+fn check_master_key_provider(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<ProviderApiError>)> {
+    check_master_key(headers, state).map_err(|(status, Json(e))| {
+        (status, Json(ProviderApiError::new(e.error, e.code)))
+    })
 }
 
 // ============================================================================

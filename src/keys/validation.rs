@@ -147,6 +147,19 @@ impl KeyValidator {
             tracing::warn!("Failed to update usage for key {}: {}", key_hash, e);
         }
     }
+
+    /// Record a request without usage data (for providers that don't return usage).
+    ///
+    /// This updates last_request_at even when we don't have token counts.
+    pub async fn record_request(&self, key_hash: &str, model: &str, provider: &str) {
+        if let Err(e) = self
+            .store
+            .update_usage(key_hash, 0, 0, 0, 0.0, model, provider)
+            .await
+        {
+            tracing::warn!("Failed to record request for key {}: {}", key_hash, e);
+        }
+    }
 }
 
 /// A successfully validated key with relevant info for the request.

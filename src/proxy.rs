@@ -1444,21 +1444,30 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
         .cached_tokens
         .load(std::sync::atomic::Ordering::SeqCst);
 
-    // Only record if we have any usage data
-    if input == 0 && output == 0 {
-        return;
-    }
-
-    // Calculate cost
-    let cost = if let Some(calc) = state.get_cost_calculator() {
-        calc.calculate_actual_cost(&tracker.model, input, output, cached)
-            .await
-    } else {
-        0.0
-    };
-
-    // Record to validator
+    // Always record the request to update last_request_at
+    // Some providers don't return usage data, but we still want to track request timestamps
     if let Some(validator) = state.get_key_validator() {
+        if input == 0 && output == 0 {
+            // No usage data, but record the request timestamp
+            validator
+                .record_request(&tracker.key_hash, &tracker.model, &tracker.provider)
+                .await;
+            tracing::debug!(
+                key_hash = %tracker.key_hash,
+                "Recorded request (no usage data) for virtual key"
+            );
+            return;
+        }
+
+        // Calculate cost
+        let cost = if let Some(calc) = state.get_cost_calculator() {
+            calc.calculate_actual_cost(&tracker.model, input, output, cached)
+                .await
+        } else {
+            0.0
+        };
+
+        // Record to validator
         validator
             .record_usage(
                 &tracker.key_hash,

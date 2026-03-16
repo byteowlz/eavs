@@ -453,20 +453,16 @@ impl KeyStore {
     }
 
     /// List all keys (returns masked info, not actual keys).
+    ///
+    /// Returns real-time data from the in-memory cache, not the database.
+    /// Usage stats are updated immediately in memory after each request.
     pub async fn list_keys(&self) -> Result<Vec<KeyInfo>, KeyStoreError> {
-        let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account FROM virtual_keys ORDER BY created_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
-
         let mut keys = Vec::new();
-        for row in rows {
-            if let Ok(key) = row.to_virtual_key() {
-                keys.push(key.to_info());
-            }
+        for entry in self.cache.iter() {
+            keys.push(entry.value().to_info());
         }
+        // Sort by created_at descending (newest first)
+        keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(keys)
     }
 
