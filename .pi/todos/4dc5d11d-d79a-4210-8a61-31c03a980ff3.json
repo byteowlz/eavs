@@ -1,0 +1,53 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Create provider_templates.rs module",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Ship baseline provider-templates.toml with known providers",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Auto-generate templates from models.dev catalog (npm→eavs type mapping)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "Add GET /providers/templates API endpoint",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Add POST /admin/providers/from-template endpoint",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "6",
+      "content": "Update model_catalog.rs to parse provider-level fields (api, env, npm)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "7",
+      "content": "Wire into AppState and routes",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "8",
+      "content": "Tests passing (335/335)",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-03-25T08:07:28.700Z"
+}

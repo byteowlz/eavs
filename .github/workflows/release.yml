@@ -71,9 +71,10 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          # Include adapters alongside the binary in the tarball
+          # Include adapters and provider templates alongside the binary in the tarball
           cp -r ${{ github.workspace }}/adapters .
-          tar czvf ../../../eavs-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz eavs adapters
+          cp ${{ github.workspace }}/config/provider-templates.toml .
+          tar czvf ../../../eavs-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz eavs adapters provider-templates.toml
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

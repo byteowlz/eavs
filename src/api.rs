@@ -309,6 +309,100 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
     Json(details)
 }
 
+/// GET /providers/templates
+///
+/// Returns available provider templates for quick setup.
+/// No authentication required — this is read-only metadata.
+/// Templates are merged from the shipped baseline + models.dev catalog.
+pub async fn provider_templates_handler(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::provider_templates::ProviderTemplate>> {
+    let catalog = state.catalog();
+    let templates = crate::provider_templates::build_templates(catalog);
+    Json(templates)
+}
+
+/// POST /admin/providers (extended) — supports `template` field.
+///
+/// If the request body includes `"template": "provider-id"`, the provider config
+/// is pre-filled from the matching template. The caller only needs to supply
+/// the provider name and optionally an api_key override.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProviderFromTemplateRequest {
+    /// Provider name (key in config, e.g., "my-anthropic")
+    pub name: String,
+    /// Template ID to use (e.g., "anthropic", "groq", "minimax")
+    pub template: String,
+    /// API key override (optional — defaults to env: syntax from template)
+    pub api_key: Option<String>,
+    /// Additional config overrides (merged on top of template defaults)
+    #[serde(default)]
+    pub overrides: serde_json::Map<String, serde_json::Value>,
+}
+
+/// POST /admin/providers/from-template
+/// Authorization: Bearer <master_key>
+///
+/// Create a provider from a template with minimal input.
+pub async fn provider_from_template_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProviderFromTemplateRequest>,
+) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    let catalog = state.catalog();
+    let templates = crate::provider_templates::build_templates(catalog);
+
+    let template = templates.iter().find(|t| t.id == payload.template).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ProviderApiError::new(
+                format!("Template '{}' not found", payload.template),
+                "template_not_found",
+            )),
+        )
+    })?;
+
+    // Generate config from template
+    let mut config = crate::provider_templates::template_to_config(template, payload.api_key.as_deref());
+
+    // Apply overrides
+    if let serde_json::Value::Object(ref mut map) = config {
+        for (k, v) in &payload.overrides {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+
+    let store = state.get_provider_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(
+                "Provider store not initialized (enable [keys] in config)",
+                "internal_error",
+            )),
+        )
+    })?;
+
+    let request = crate::provider_store::ProviderRequest {
+        name: payload.name,
+        config,
+        enabled: true,
+    };
+
+    let entry = store.upsert_provider(request).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ProviderApiError::new(
+                format!("Failed to create provider: {}", e),
+                "upsert_failed",
+            )),
+        )
+    })?;
+
+    Ok(Json(entry))
+}
+
 /// Map eavs provider type to Pi's API type string for models.json.
 pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Option<&'static str> {
     use crate::provider::ProviderType;

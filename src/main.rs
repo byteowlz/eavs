@@ -17,6 +17,7 @@ mod plugins;
 mod policy;
 mod provider;
 mod provider_store;
+mod provider_templates;
 mod proxy;
 mod runtime_state;
 mod setup;
@@ -768,6 +769,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Control API - Providers
         .route("/providers", get(api::providers_handler))
         .route("/providers/detail", get(api::providers_detail_handler))
+        .route("/providers/templates", get(api::provider_templates_handler))
         // Control API - Conversations
         .route("/conversations", get(api::conversations_handler))
         .route("/conversations/stats", get(api::stats_handler))
@@ -794,6 +796,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Admin API - Providers
         .route("/admin/providers", post(api::upsert_provider_handler))
         .route("/admin/providers", get(api::list_providers_handler))
+        .route("/admin/providers/from-template", post(api::provider_from_template_handler))
         .route("/admin/providers/:name", get(api::get_provider_handler))
         .route("/admin/providers/:name", delete(api::delete_provider_handler))
         .route("/admin/providers/:name/models", post(api::add_model_handler))

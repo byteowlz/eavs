@@ -22,6 +22,18 @@ pub struct CatalogProvider {
     pub id: String,
     #[serde(default)]
     pub name: String,
+    /// API base URL (e.g., "https://api.minimax.io/anthropic/v1")
+    #[serde(default)]
+    pub api: Option<String>,
+    /// Environment variable names for API keys (e.g., ["ANTHROPIC_API_KEY"])
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// npm package name — indicates the API protocol (e.g., "@ai-sdk/anthropic")
+    #[serde(default)]
+    pub npm: Option<String>,
+    /// Documentation URL
+    #[serde(default)]
+    pub doc: Option<String>,
     #[serde(default)]
     pub models: HashMap<String, CatalogModel>,
 }
@@ -231,6 +243,16 @@ impl ModelCatalog {
         let mut ids: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
         ids.sort();
         ids
+    }
+
+    /// Get a provider entry by ID.
+    pub fn get_provider(&self, id: &str) -> Option<&CatalogProvider> {
+        self.providers.get(id)
+    }
+
+    /// Get all providers (for template generation).
+    pub fn all_providers(&self) -> &HashMap<String, CatalogProvider> {
+        &self.providers
     }
 
     /// Total number of models across all providers.
