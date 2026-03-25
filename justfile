@@ -36,6 +36,8 @@ install:
     @mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters"
     @cp -r adapters/* "${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters/"
     @echo "Adapters installed to ${XDG_DATA_HOME:-$HOME/.local/share}/eavs/adapters/"
+    @cp config/provider-templates.toml "${XDG_DATA_HOME:-$HOME/.local/share}/eavs/provider-templates.toml"
+    @echo "Provider templates installed to ${XDG_DATA_HOME:-$HOME/.local/share}/eavs/provider-templates.toml"
 
 # Clean build artifacts
 clean:

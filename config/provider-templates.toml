@@ -1,0 +1,248 @@
+# Provider Templates — curated baseline for eavs quick-add
+#
+# These entries override or supplement auto-generated templates from models.dev.
+# Fields set here take precedence over catalog-derived values.
+#
+# Format:
+#   [provider-id]
+#   name = "Display Name"
+#   type = "eavs-provider-type"      # openai, anthropic, google, etc.
+#   base_url = "https://..."          # default base URL
+#   env_keys = ["ENV_VAR_NAME"]       # env vars for API key
+#   auth = "api_key"                  # api_key, oauth, aws_sigv4, azure_api_key, none
+#   doc_url = "https://..."           # documentation link
+#   notes = "..."                     # special instructions
+#   manual_only = false               # if true, only included from baseline (never auto-generated)
+#
+#   [[provider-id.extra_fields]]
+#   name = "field_name"
+#   description = "What this field is"
+#   env_hint = "env:VAR_NAME"
+#   required = true
+
+# =============================================================================
+# Tier 1: Major cloud providers (curated, override catalog)
+# =============================================================================
+
+[openai]
+name = "OpenAI"
+type = "openai"
+base_url = "https://api.openai.com/v1"
+env_keys = ["OPENAI_API_KEY"]
+doc_url = "https://platform.openai.com/docs/models"
+
+[anthropic]
+name = "Anthropic"
+type = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+env_keys = ["ANTHROPIC_API_KEY"]
+doc_url = "https://docs.anthropic.com/en/docs/about-claude/models"
+
+[google]
+name = "Google Gemini"
+type = "google"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+env_keys = ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+doc_url = "https://ai.google.dev/gemini-api/docs/pricing"
+
+[mistral]
+name = "Mistral AI"
+type = "mistral"
+base_url = "https://api.mistral.ai/v1"
+env_keys = ["MISTRAL_API_KEY"]
+doc_url = "https://docs.mistral.ai/getting-started/models/"
+
+[xai]
+name = "xAI (Grok)"
+type = "xai"
+base_url = "https://api.x.ai/v1"
+env_keys = ["XAI_API_KEY"]
+doc_url = "https://docs.x.ai/docs/models"
+
+# =============================================================================
+# Tier 2: Inference providers (curated, override catalog)
+# =============================================================================
+
+[groq]
+name = "Groq"
+type = "groq"
+base_url = "https://api.groq.com/openai/v1"
+env_keys = ["GROQ_API_KEY"]
+doc_url = "https://console.groq.com/docs/models"
+
+[cerebras]
+name = "Cerebras"
+type = "cerebras"
+base_url = "https://api.cerebras.ai/v1"
+env_keys = ["CEREBRAS_API_KEY"]
+doc_url = "https://docs.cerebras.ai"
+
+[openrouter]
+name = "OpenRouter"
+type = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_keys = ["OPENROUTER_API_KEY"]
+doc_url = "https://openrouter.ai/models"
+
+[deepseek]
+name = "DeepSeek"
+type = "openai-compatible"
+base_url = "https://api.deepseek.com/v1"
+env_keys = ["DEEPSEEK_API_KEY"]
+doc_url = "https://platform.deepseek.com/api-docs"
+
+[together-ai]
+name = "Together AI"
+type = "openai-compatible"
+base_url = "https://api.together.xyz/v1"
+env_keys = ["TOGETHER_AI_API_KEY"]
+doc_url = "https://docs.together.ai/docs/models"
+
+[fireworks-ai]
+name = "Fireworks AI"
+type = "openai-compatible"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_keys = ["FIREWORKS_API_KEY"]
+doc_url = "https://docs.fireworks.ai/getting-started/quickstart"
+
+[deepinfra]
+name = "DeepInfra"
+type = "openai-compatible"
+base_url = "https://api.deepinfra.com/v1/openai"
+env_keys = ["DEEPINFRA_API_KEY"]
+doc_url = "https://deepinfra.com/docs"
+
+[perplexity]
+name = "Perplexity"
+type = "openai-compatible"
+base_url = "https://api.perplexity.ai"
+env_keys = ["PERPLEXITY_API_KEY"]
+doc_url = "https://docs.perplexity.ai"
+
+# =============================================================================
+# Tier 3: Special auth / complex providers (manual_only — never auto-generated)
+# =============================================================================
+
+[amazon-bedrock]
+name = "Amazon Bedrock"
+type = "bedrock"
+auth = "aws_sigv4"
+env_keys = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+doc_url = "https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html"
+notes = "Uses AWS SigV4 authentication. Configure aws_region, aws_access_key_id, aws_secret_access_key."
+manual_only = true
+
+[[amazon-bedrock.extra_fields]]
+name = "aws_region"
+description = "AWS region (e.g., us-east-1)"
+env_hint = "env:AWS_REGION"
+required = true
+
+[[amazon-bedrock.extra_fields]]
+name = "aws_access_key_id"
+description = "AWS access key ID"
+env_hint = "env:AWS_ACCESS_KEY_ID"
+required = true
+
+[[amazon-bedrock.extra_fields]]
+name = "aws_secret_access_key"
+description = "AWS secret access key"
+env_hint = "env:AWS_SECRET_ACCESS_KEY"
+required = true
+
+[azure]
+name = "Azure OpenAI"
+type = "azure"
+auth = "azure_api_key"
+env_keys = ["AZURE_OPENAI_API_KEY"]
+doc_url = "https://learn.microsoft.com/en-us/azure/ai-services/openai/"
+notes = "Requires base_url pointing to your Azure OpenAI resource. Optionally set api_version and deployment."
+manual_only = true
+
+[[azure.extra_fields]]
+name = "base_url"
+description = "Azure OpenAI endpoint (e.g., https://your-resource.openai.azure.com/)"
+env_hint = "env:AZURE_OPENAI_ENDPOINT"
+required = true
+
+[[azure.extra_fields]]
+name = "api_version"
+description = "API version (e.g., 2024-02-15-preview)"
+env_hint = "env:AZURE_OPENAI_API_VERSION"
+required = false
+
+[google-vertex]
+name = "Google Vertex AI"
+type = "google-vertex"
+env_keys = ["GEMINI_API_KEY"]
+doc_url = "https://cloud.google.com/vertex-ai/docs"
+notes = "Requires gcp_project and gcp_location. Supports ADC or API key auth."
+manual_only = true
+
+[[google-vertex.extra_fields]]
+name = "gcp_project"
+description = "Google Cloud project ID"
+env_hint = "env:GOOGLE_CLOUD_PROJECT"
+required = true
+
+[[google-vertex.extra_fields]]
+name = "gcp_location"
+description = "Google Cloud region (e.g., us-central1)"
+env_hint = "env:GOOGLE_CLOUD_LOCATION"
+required = true
+
+[google-gemini-cli]
+name = "Google Gemini CLI (free tier)"
+type = "google-gemini-cli"
+base_url = "https://cloudcode-pa.googleapis.com"
+auth = "oauth"
+doc_url = "https://cloud.google.com/products/gemini/code-assist"
+notes = "Free tier via OAuth. Use `eavs login google-gemini-cli` to authenticate."
+manual_only = true
+
+[github-copilot]
+name = "GitHub Copilot"
+type = "github-copilot"
+auth = "oauth"
+doc_url = "https://docs.github.com/en/copilot"
+notes = "Uses OAuth device code flow. Use `eavs login github-copilot` to authenticate."
+manual_only = true
+
+[openai-codex]
+name = "OpenAI Codex (ChatGPT backend)"
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+auth = "oauth"
+notes = "ChatGPT backend via OAuth. Use `eavs login openai-codex` to authenticate."
+manual_only = true
+
+# =============================================================================
+# Local / self-hosted (manual_only — user must set base_url)
+# =============================================================================
+
+[ollama]
+name = "Ollama (local)"
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+doc_url = "https://ollama.com"
+notes = "No API key needed. Make sure Ollama is running locally."
+manual_only = true
+
+[lmstudio]
+name = "LM Studio (local)"
+type = "openai-compatible"
+base_url = "http://localhost:1234/v1"
+auth = "none"
+doc_url = "https://lmstudio.ai"
+notes = "No API key needed. Start LM Studio's local server first."
+manual_only = true
+
+[vllm]
+name = "vLLM (local)"
+type = "openai-compatible"
+base_url = "http://localhost:8000/v1"
+auth = "none"
+doc_url = "https://docs.vllm.ai"
+notes = "No API key needed. Set base_url to your vLLM server."
+manual_only = true

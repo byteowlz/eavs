@@ -52,6 +52,7 @@ class Eavs < Formula
 
   def install
     bin.install "eavs"
+    (share/"eavs").install "provider-templates.toml"
   end
 
   test do

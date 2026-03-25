@@ -51,6 +51,7 @@ sha256sums_aarch64=('TBD')
 
 package() {
     install -Dm755 eavs "$pkgdir/usr/bin/eavs"
+    install -Dm644 provider-templates.toml "$pkgdir/usr/share/eavs/provider-templates.toml"
 }
 EOF
 
