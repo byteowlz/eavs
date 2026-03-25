@@ -356,6 +356,10 @@ pub enum SecretCommands {
         /// Check whether each entry actually exists in the keychain
         #[arg(long)]
         check: bool,
+
+        /// List ALL stored secrets (not just those referenced in config)
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -4094,6 +4098,7 @@ pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError
     };
 
     crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
+    register_secret_account(account);
     println!(
         "Stored secret for account '{}' in system keychain.",
         account
@@ -4145,7 +4150,10 @@ pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
     }
 
     match crate::config::delete_keychain_secret(account) {
-        Ok(true) => println!("Deleted keychain entry for account '{}'.", account),
+        Ok(true) => {
+            unregister_secret_account(account);
+            println!("Deleted keychain entry for account '{}'.", account);
+        }
         Ok(false) => println!("No keychain entry found for account '{}'.", account),
         Err(e) => return Err(CliError::Other(e)),
     }
@@ -4153,7 +4161,7 @@ pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
 }
 
 /// List keychain references found in config.
-pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), CliError> {
+pub fn run_secret_list(config_path: Option<&str>, check: bool, all: bool) -> Result<(), CliError> {
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
             .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
@@ -4198,8 +4206,39 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), Cli
         collect_keychain_ref(&mut entries, "keys", "master_key", mk);
     }
 
+    // Collect all known accounts from the registry (for --all)
+    if all {
+        let mut registry_accounts = load_secret_account_registry();
+
+        // Migration: if registry is empty but config has keychain refs,
+        // probe the keychain and seed the registry for future use.
+        if registry_accounts.is_empty() && !entries.is_empty() {
+            for (_, _, account) in &entries {
+                if crate::config::get_keychain_secret(account).is_some() {
+                    registry_accounts.push(account.clone());
+                }
+            }
+            if !registry_accounts.is_empty() {
+                save_secret_account_registry(&registry_accounts);
+            }
+        }
+
+        // Add registry accounts not already referenced in config
+        let config_accounts: std::collections::HashSet<String> =
+            entries.iter().map(|(_, _, a)| a.clone()).collect();
+        for account in &registry_accounts {
+            if !config_accounts.contains(account) {
+                entries.push(("(stored)".to_string(), "-".to_string(), account.clone()));
+            }
+        }
+    }
+
     if entries.is_empty() {
         println!("No keychain: references found in config.");
+        if !all {
+            println!();
+            println!("Tip: use --all to list ALL stored secrets (not just config references).");
+        }
         println!();
         println!("To use keychain storage, set a provider API key like:");
         println!("  [providers.openai]");
@@ -4231,6 +4270,21 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool) -> Result<(), Cli
         println!("{:<20} {:<25} {:<25} {}", section, field, account, status);
     }
 
+    if !all {
+        let registry = load_secret_account_registry();
+        let config_accounts: std::collections::HashSet<String> =
+            entries.iter().map(|(_, _, a)| a.clone()).collect();
+        let extra = registry.iter().filter(|a| !config_accounts.contains(*a)).count();
+        if extra > 0 {
+            println!();
+            println!(
+                "({} additional stored secret{} not in config — use --all to show)",
+                extra,
+                if extra == 1 { "" } else { "s" }
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -4245,6 +4299,60 @@ fn collect_keychain_ref(
         if !account.is_empty() {
             entries.push((section.to_string(), field.to_string(), account.to_string()));
         }
+    }
+}
+
+// --- Secret account registry ---
+// Tracks which accounts have been stored via `eavs secret set`.
+// The system keychain doesn't support enumeration, so we maintain
+// a simple JSON list alongside the keychain entries.
+
+fn secret_registry_path() -> std::path::PathBuf {
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.local/share", home)
+        });
+    std::path::PathBuf::from(data_dir).join("eavs/secret-accounts.json")
+}
+
+fn load_secret_account_registry() -> Vec<String> {
+    let path = secret_registry_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_secret_account_registry(accounts: &[String]) {
+    let path = secret_registry_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut sorted = accounts.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    if let Ok(json) = serde_json::to_string_pretty(&sorted) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+fn register_secret_account(account: &str) {
+    let mut accounts = load_secret_account_registry();
+    if !accounts.iter().any(|a| a == account) {
+        accounts.push(account.to_string());
+        save_secret_account_registry(&accounts);
+    }
+}
+
+fn unregister_secret_account(account: &str) {
+    let mut accounts = load_secret_account_registry();
+    let before = accounts.len();
+    accounts.retain(|a| a != account);
+    if accounts.len() != before {
+        save_secret_account_registry(&accounts);
     }
 }
 

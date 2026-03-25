@@ -213,7 +213,7 @@ fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
         SecretCommands::Set { account, value } => run_secret_set(&account, value.as_deref()),
         SecretCommands::Get { account, reveal } => run_secret_get(&account, reveal),
         SecretCommands::Delete { account, yes } => run_secret_delete(&account, yes),
-        SecretCommands::List { config, check } => run_secret_list(config.as_deref(), check),
+        SecretCommands::List { config, check, all } => run_secret_list(config.as_deref(), check, all),
     }
 }
 
