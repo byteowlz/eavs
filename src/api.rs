@@ -354,18 +354,22 @@ pub async fn provider_from_template_handler(
     let catalog = state.catalog();
     let templates = crate::provider_templates::build_templates(catalog);
 
-    let template = templates.iter().find(|t| t.id == payload.template).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ProviderApiError::new(
-                format!("Template '{}' not found", payload.template),
-                "template_not_found",
-            )),
-        )
-    })?;
+    let template = templates
+        .iter()
+        .find(|t| t.id == payload.template)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ProviderApiError::new(
+                    format!("Template '{}' not found", payload.template),
+                    "template_not_found",
+                )),
+            )
+        })?;
 
     // Generate config from template
-    let mut config = crate::provider_templates::template_to_config(template, payload.api_key.as_deref());
+    let mut config =
+        crate::provider_templates::template_to_config(template, payload.api_key.as_deref());
 
     // Apply overrides
     if let serde_json::Value::Object(ref mut map) = config {
@@ -1007,7 +1011,6 @@ pub struct PricingUpdateResponse {
     pub total_models: usize,
 }
 
-
 // ============================================================================
 // Admin Provider/Model Management Endpoints
 // ============================================================================
@@ -1026,7 +1029,10 @@ pub async fn upsert_provider_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -1034,20 +1040,34 @@ pub async fn upsert_provider_handler(
     if !config_json.is_object() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ProviderApiError::new("Invalid config format", "invalid_config")),
+            Json(ProviderApiError::new(
+                "Invalid config format",
+                "invalid_config",
+            )),
         ));
     }
-    if !config_json.get("type").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+    if !config_json
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ProviderApiError::new("Provider type is required", "missing_type")),
+            Json(ProviderApiError::new(
+                "Provider type is required",
+                "missing_type",
+            )),
         ));
     }
 
     let entry = store.upsert_provider(payload).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(format!("Failed to upsert provider: {}", e), "upsert_failed")),
+            Json(ProviderApiError::new(
+                format!("Failed to upsert provider: {}", e),
+                "upsert_failed",
+            )),
         )
     })?;
 
@@ -1068,12 +1088,18 @@ pub async fn get_provider_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     let entry = store.get_provider(&name).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, Json(ProviderApiError::new("Provider not found", "not_found")))
+        (
+            StatusCode::NOT_FOUND,
+            Json(ProviderApiError::new("Provider not found", "not_found")),
+        )
     })?;
 
     Ok(Json(entry))
@@ -1092,7 +1118,10 @@ pub async fn list_providers_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
@@ -1113,21 +1142,30 @@ pub async fn delete_provider_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     let deleted = store.delete_provider(&name).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(format!("Failed to delete provider: {}", e), "delete_failed")),
+            Json(ProviderApiError::new(
+                format!("Failed to delete provider: {}", e),
+                "delete_failed",
+            )),
         )
     })?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err((StatusCode::NOT_FOUND, Json(ProviderApiError::new("Provider not found", "not_found"))))
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ProviderApiError::new("Provider not found", "not_found")),
+        ))
     }
 }
 
@@ -1146,14 +1184,20 @@ pub async fn add_model_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     store.add_model(&name, payload).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(format!("Failed to add model: {}", e), "add_model_failed")),
+            Json(ProviderApiError::new(
+                format!("Failed to add model: {}", e),
+                "add_model_failed",
+            )),
         )
     })?;
 
@@ -1174,14 +1218,20 @@ pub async fn get_models_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     let models = store.get_models(&name).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(format!("Failed to get models: {}", e), "get_models_failed")),
+            Json(ProviderApiError::new(
+                format!("Failed to get models: {}", e),
+                "get_models_failed",
+            )),
         )
     })?;
 
@@ -1202,21 +1252,30 @@ pub async fn remove_model_handler(
     let store = state.get_provider_store().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new("Provider store not initialized", "internal_error")),
+            Json(ProviderApiError::new(
+                "Provider store not initialized",
+                "internal_error",
+            )),
         )
     })?;
 
     let deleted = store.remove_model(&name, &model_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(format!("Failed to remove model: {}", e), "remove_model_failed")),
+            Json(ProviderApiError::new(
+                format!("Failed to remove model: {}", e),
+                "remove_model_failed",
+            )),
         )
     })?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err((StatusCode::NOT_FOUND, Json(ProviderApiError::new("Model not found", "not_found"))))
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ProviderApiError::new("Model not found", "not_found")),
+        ))
     }
 }
 
@@ -1225,9 +1284,8 @@ fn check_master_key_provider(
     headers: &HeaderMap,
     state: &AppState,
 ) -> Result<(), (StatusCode, Json<ProviderApiError>)> {
-    check_master_key(headers, state).map_err(|(status, Json(e))| {
-        (status, Json(ProviderApiError::new(e.error, e.code)))
-    })
+    check_master_key(headers, state)
+        .map_err(|(status, Json(e))| (status, Json(ProviderApiError::new(e.error, e.code))))
 }
 
 // ============================================================================
@@ -1871,6 +1929,7 @@ mod tests {
             capture: Default::default(),
             transform: Default::default(),
             network: Default::default(),
+            mock_responses: Default::default(),
         };
         AppState::new(config)
     }
@@ -1908,6 +1967,7 @@ mod tests {
             capture: Default::default(),
             transform: Default::default(),
             network: Default::default(),
+            mock_responses: Default::default(),
         };
         AppState::new(config)
     }
