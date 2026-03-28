@@ -104,6 +104,9 @@ pub struct AppConfig {
     /// Network access control (domain allow/deny lists)
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Mock provider predefined responses
+    #[serde(default)]
+    pub mock_responses: MockResponsesConfig,
 }
 
 impl AppConfig {
@@ -121,6 +124,7 @@ impl AppConfig {
             capture: CaptureConfig::default(),
             transform: TransformConfig::default(),
             network: NetworkConfig::default(),
+            mock_responses: MockResponsesConfig::default(),
         }
     }
 }
@@ -826,6 +830,54 @@ impl Default for KeysConfig {
             oauth_backend: default_oauth_backend(),
         }
     }
+}
+
+/// Configuration for mock provider predefined responses.
+///
+/// Allows defining named responses that can be triggered by sending
+/// a user message with `##<name>` to the mock provider.
+///
+/// Example config:
+///   [mock_responses.success]
+///   content = "All tests passed"
+///
+///   [mock_responses.error]
+///   type = "error"
+///   code = "rate_limit_exceeded"
+///   message = "Too many requests"
+///   status = 429
+///
+///   [mock_responses.tool1]
+///   type = "tool_call"
+///   name = "get_weather"
+///   arguments = '{"location": "NYC"}'
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MockResponsesConfig {
+    /// Map of response name -> response definition
+    #[serde(flatten)]
+    pub responses: HashMap<String, MockResponse>,
+}
+
+/// A single predefined mock response.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MockResponse {
+    /// Response content (for normal text responses)
+    pub content: String,
+    /// Response type: "text", "error", "tool_call"
+    #[serde(rename = "type")]
+    pub response_type: String,
+    /// Error code (for error responses)
+    pub code: String,
+    /// Error message (for error responses)
+    pub message: String,
+    /// HTTP status code (for error responses)
+    pub status: u16,
+    /// Tool function name (for tool_call responses)
+    pub name: String,
+    /// Tool arguments JSON string (for tool_call responses)
+    pub arguments: String,
 }
 
 /// Configuration for transparent traffic capture via mitmproxy.

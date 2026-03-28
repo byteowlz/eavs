@@ -14,9 +14,9 @@ use axum::{
 };
 use bytes::Bytes;
 use serde_json::json;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use crate::state::AnalysisEvent;
+use crate::{config::MockResponse, state::AnalysisEvent};
 
 /// Default delay between streamed chunks in milliseconds.
 const DEFAULT_CHUNK_DELAY_MS: u64 = 30;
@@ -48,6 +48,8 @@ pub enum MockScenario {
     LongText,
     /// Return broken SSE formatting.
     MalformedSse,
+    /// Dynamic mode: return custom response from headers (normal or error).
+    Dynamic,
 }
 
 impl MockScenario {
@@ -66,6 +68,7 @@ impl MockScenario {
             "thinking" | "reasoning" => Some(Self::Thinking),
             "long_text" | "long" | "backpressure" => Some(Self::LongText),
             "malformed_sse" | "malformed" | "broken" => Some(Self::MalformedSse),
+            "dynamic" => Some(Self::Dynamic),
             _ => None,
         }
     }
@@ -93,6 +96,7 @@ impl MockScenario {
             "mock/thinking",
             "mock/long-text",
             "mock/malformed-sse",
+            "mock/dynamic",
         ]
     }
 }
@@ -105,6 +109,10 @@ pub struct MockRequest {
     pub scenario: MockScenario,
     pub delay_ms: u64,
     pub analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
+    /// Optional trigger extracted from user message, e.g. `##success`.
+    pub dynamic_trigger: Option<String>,
+    /// Predefined responses loaded from config.toml [mock_responses.*].
+    pub predefined_responses: HashMap<String, MockResponse>,
 }
 
 /// Resolve mock scenario and delay from request headers and model name.
@@ -114,6 +122,8 @@ pub fn resolve_mock_params(
     request_id: &str,
     headers: &HeaderMap,
     analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
+    dynamic_trigger: Option<String>,
+    predefined_responses: HashMap<String, MockResponse>,
 ) -> MockRequest {
     // Scenario priority: X-Mock-Scenario header > model name > default
     let scenario = headers
@@ -136,6 +146,8 @@ pub fn resolve_mock_params(
         scenario,
         delay_ms,
         analysis_tx,
+        dynamic_trigger,
+        predefined_responses,
     }
 }
 
@@ -154,6 +166,7 @@ pub async fn handle_mock_response(req: MockRequest) -> Result<Response, Response
         MockScenario::Thinking => handle_thinking(req).await,
         MockScenario::LongText => handle_long_text(req).await,
         MockScenario::MalformedSse => handle_malformed_sse(req).await,
+        MockScenario::Dynamic => handle_dynamic(req).await,
     }
 }
 
@@ -1740,6 +1753,249 @@ async fn handle_malformed_sse(req: MockRequest) -> Result<Response, Response> {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Scenario: dynamic
+// ---------------------------------------------------------------------------
+
+async fn handle_dynamic(req: MockRequest) -> Result<Response, Response> {
+    let trigger = req
+        .dynamic_trigger
+        .as_deref()
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    if trigger.is_empty() {
+        let body = json!({
+            "error": {
+                "message": "dynamic scenario requires a user message trigger like ##success",
+                "type": "invalid_request_error",
+                "code": "missing_dynamic_trigger"
+            }
+        });
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .header("x-mock-response", "true")
+            .header("x-mock-scenario", "dynamic")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap());
+    }
+
+    let def = req
+        .predefined_responses
+        .get(&trigger)
+        .or_else(|| {
+            req.predefined_responses
+                .iter()
+                .find_map(|(k, v)| k.eq_ignore_ascii_case(&trigger).then_some(v))
+        });
+
+    let Some(def) = def else {
+        let body = json!({
+            "error": {
+                "message": format!("unknown mock trigger ##{} (define it under [mock_responses.{}] in config.toml)", trigger, trigger),
+                "type": "invalid_request_error",
+                "code": "unknown_dynamic_trigger"
+            }
+        });
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .header("x-mock-response", "true")
+            .header("x-mock-scenario", "dynamic")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap());
+    };
+
+    let kind = if def.response_type.trim().is_empty() {
+        "text"
+    } else {
+        def.response_type.trim()
+    };
+
+    match kind {
+        "error" => {
+            let status = StatusCode::from_u16(if def.status == 0 { 500 } else { def.status })
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let body = json!({
+                "error": {
+                    "message": if def.message.is_empty() { "Mock error" } else { &def.message },
+                    "type": "mock_error",
+                    "code": if def.code.is_empty() { "mock_error" } else { &def.code }
+                }
+            });
+            Ok(Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .header("x-mock-response", "true")
+                .header("x-mock-scenario", "dynamic")
+                .header("x-mock-trigger", trigger)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap())
+        }
+        "tool_call" => {
+            let ts = timestamp();
+            let delay = Duration::from_millis(req.delay_ms);
+            let tool_name = if def.name.is_empty() {
+                "mock_tool"
+            } else {
+                def.name.as_str()
+            };
+            let tool_args = if def.arguments.is_empty() {
+                "{}"
+            } else {
+                def.arguments.as_str()
+            };
+
+            if req.stream {
+                let mut chunks = Vec::new();
+                chunks.push(sse_chunk(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({"role": "assistant", "content": null}),
+                    None,
+                ));
+                chunks.push(sse_chunk(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_mock_dynamic_001",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": ""
+                            }
+                        }]
+                    }),
+                    None,
+                ));
+                chunks.push(sse_chunk(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": tool_args
+                            }
+                        }]
+                    }),
+                    None,
+                ));
+                chunks.push(sse_chunk_with_usage(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({}),
+                    Some("tool_calls"),
+                    10,
+                    10,
+                ));
+                chunks.push("data: [DONE]\n\n".to_string());
+
+                Ok(build_delayed_stream_response(
+                    chunks,
+                    delay,
+                    &req.request_id,
+                    req.analysis_tx,
+                ))
+            } else {
+                let body = json!({
+                    "id": format!("chatcmpl-mock-{}", req.request_id),
+                    "object": "chat.completion",
+                    "created": ts,
+                    "model": req.model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_mock_dynamic_001",
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": tool_args
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 10,
+                        "total_tokens": 20
+                    }
+                });
+                Ok(build_json_response(body, &req.request_id, &req.analysis_tx))
+            }
+        }
+        _ => {
+            let ts = timestamp();
+            let delay = Duration::from_millis(req.delay_ms);
+            let content = if def.content.is_empty() {
+                format!("mock response for ##{}", trigger)
+            } else {
+                def.content.clone()
+            };
+
+            if req.stream {
+                let mut chunks = Vec::new();
+                chunks.push(sse_chunk(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({"role": "assistant", "content": ""}),
+                    None,
+                ));
+                let words: Vec<&str> = content.split_whitespace().collect();
+                for (i, word) in words.iter().enumerate() {
+                    let prefix = if i == 0 { "" } else { " " };
+                    chunks.push(sse_chunk(
+                        &req.request_id,
+                        ts,
+                        &req.model,
+                        json!({"content": format!("{}{}", prefix, word)}),
+                        None,
+                    ));
+                }
+                chunks.push(sse_chunk_with_usage(
+                    &req.request_id,
+                    ts,
+                    &req.model,
+                    json!({}),
+                    Some("stop"),
+                    10,
+                    words.len() as u32,
+                ));
+                chunks.push("data: [DONE]\n\n".to_string());
+
+                Ok(build_delayed_stream_response(
+                    chunks,
+                    delay,
+                    &req.request_id,
+                    req.analysis_tx,
+                ))
+            } else {
+                let body = non_streaming_response(
+                    &req.request_id,
+                    &req.model,
+                    &content,
+                    10,
+                    content.split_whitespace().count() as u32,
+                );
+                Ok(build_json_response(body, &req.request_id, &req.analysis_tx))
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1827,7 +2083,7 @@ mod tests {
     #[test]
     fn test_all_model_ids() {
         let ids = MockScenario::all_model_ids();
-        assert_eq!(ids.len(), 12);
+        assert_eq!(ids.len(), 13);
         assert!(ids.contains(&"mock/simple-text"));
         assert!(ids.contains(&"mock/tool-call"));
         assert!(ids.contains(&"mock/malformed-sse"));

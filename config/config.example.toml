@@ -232,6 +232,64 @@ supports_stream_options = false
 #   3. Built-in default for the provider type (e.g., gpt-4o-mini for OpenAI)
 
 # =============================================================================
+# Mock Provider: Predefined Dynamic Responses
+# =============================================================================
+# Use with provider type "mock" and model "mock/dynamic" (or header X-Mock-Scenario: dynamic).
+# Trigger by sending a user message with just: ##<name>
+#
+# Tip for frontend/order tests: use numbered names (01_*, 02_*, ...) and assert render order.
+#
+# --- Plain text responses ---
+# [mock_responses.01_intro]
+# content = "Hello! This is the first message."
+#
+# [mock_responses.02_followup]
+# content = "Second message: ordering check passed."
+#
+# [mock_responses.markdown_card]
+# content = "## Release Notes\n- ✅ Upload complete\n- ⚠️ 1 warning\n- ℹ️ Click for details"
+#
+# [mock_responses.multiline]
+# content = "Line 1\nLine 2\nLine 3"
+#
+# --- Error responses ---
+# [mock_responses.bad_request]
+# type = "error"
+# code = "invalid_request"
+# message = "Missing required field: messages"
+# status = 400
+#
+# [mock_responses.rate_limited]
+# type = "error"
+# code = "rate_limit_exceeded"
+# message = "Too many requests"
+# status = 429
+#
+# [mock_responses.server_boom]
+# type = "error"
+# code = "internal_error"
+# message = "Unexpected upstream failure"
+# status = 500
+#
+# --- Tool-call responses ---
+# [mock_responses.tool_weather]
+# type = "tool_call"
+# name = "get_weather"
+# arguments = '{"location":"Berlin","unit":"celsius"}'
+#
+# [mock_responses.tool_search]
+# type = "tool_call"
+# name = "web_search"
+# arguments = '{"query":"latest rust release"}'
+#
+# --- Realistic chat snippets ---
+# [mock_responses.assistant_short]
+# content = "Sure — done."
+#
+# [mock_responses.assistant_long]
+# content = "I reviewed the request and prepared a full summary with next steps, risks, and a rollout checklist."
+
+# =============================================================================
 # Logging
 # =============================================================================
 

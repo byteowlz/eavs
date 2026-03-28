@@ -962,6 +962,21 @@ async fn proxy_handler_inner(
 
     // Handle mock provider - return synthetic responses without network calls
     if provider_type.is_mock() {
+        let dynamic_trigger = json_body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|messages| {
+                messages.iter().rev().find_map(|msg| {
+                    if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+                        return None;
+                    }
+                    msg.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.trim().to_string())
+                })
+            })
+            .and_then(|content| content.strip_prefix("##").map(|s| s.trim().to_lowercase()));
+
         let mock_req = crate::mock_provider::resolve_mock_params(
             &model_name,
             json_body
@@ -971,6 +986,8 @@ async fn proxy_handler_inner(
             &correlation_id,
             &parts.headers,
             state.analysis_tx.clone(),
+            dynamic_trigger,
+            state.config.mock_responses.responses.clone(),
         );
         return crate::mock_provider::handle_mock_response(mock_req).await;
     }
@@ -3965,6 +3982,7 @@ mod tests {
             capture: Default::default(),
             transform: Default::default(),
             network: Default::default(),
+            mock_responses: Default::default(),
         }
     }
 
