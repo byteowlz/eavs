@@ -27,7 +27,7 @@ dashmap = "5.5" # For concurrent state map
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 
 # Virtual API Keys
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 tiktoken-rs = "0.6"
 sha2 = "0.10"
 hmac = "0.12"
