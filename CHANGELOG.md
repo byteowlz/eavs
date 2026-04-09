@@ -51,3 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider detail endpoint now exposes headers, api_version, and compat settings
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-04-09
+
+### Fixed
+- Dynamic mock responses now work with array-style message content (OpenAI format with `content: [{type: "text", text: "..."}]`), fixing compatibility with TUI clients
+
+### Added
+- Provider templates for quick provider setup (`eavs setup` with templates)
+- `eavs secret list --all` to show all stored secrets
+- Dynamic mock mode with predefined responses from config (`[mock_responses.<name>]`)
+
+### Changed
+- Security: disabled sqlx default features to remove unused mysql/rsa dependencies
