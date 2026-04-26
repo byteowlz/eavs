@@ -213,7 +213,9 @@ fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
         SecretCommands::Set { account, value } => run_secret_set(&account, value.as_deref()),
         SecretCommands::Get { account, reveal } => run_secret_get(&account, reveal),
         SecretCommands::Delete { account, yes } => run_secret_delete(&account, yes),
-        SecretCommands::List { config, check, all } => run_secret_list(config.as_deref(), check, all),
+        SecretCommands::List { config, check, all } => {
+            run_secret_list(config.as_deref(), check, all)
+        }
     }
 }
 
@@ -796,12 +798,27 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Admin API - Providers
         .route("/admin/providers", post(api::upsert_provider_handler))
         .route("/admin/providers", get(api::list_providers_handler))
-        .route("/admin/providers/from-template", post(api::provider_from_template_handler))
+        .route(
+            "/admin/providers/from-template",
+            post(api::provider_from_template_handler),
+        )
         .route("/admin/providers/:name", get(api::get_provider_handler))
-        .route("/admin/providers/:name", delete(api::delete_provider_handler))
-        .route("/admin/providers/:name/models", post(api::add_model_handler))
-        .route("/admin/providers/:name/models", get(api::get_models_handler))
-        .route("/admin/providers/:name/models/:model_id", delete(api::remove_model_handler))
+        .route(
+            "/admin/providers/:name",
+            delete(api::delete_provider_handler),
+        )
+        .route(
+            "/admin/providers/:name/models",
+            post(api::add_model_handler),
+        )
+        .route(
+            "/admin/providers/:name/models",
+            get(api::get_models_handler),
+        )
+        .route(
+            "/admin/providers/:name/models/:model_id",
+            delete(api::remove_model_handler),
+        )
         // Admin API - Pricing
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         .route("/admin/quotas", get(api::upstream_quotas_handler))
