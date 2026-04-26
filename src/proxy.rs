@@ -971,7 +971,32 @@ async fn proxy_handler_inner(
                         return None;
                     }
                     msg.get("content")
-                        .and_then(|c| c.as_str())
+                        .and_then(|c| {
+                            // Handle both string content and array content (OpenAI format)
+                            if let Some(s) = c.as_str() {
+                                // Plain string content
+                                Some(s.to_string())
+                            } else if let Some(arr) = c.as_array() {
+                                // Array content format: extract text from text parts
+                                let text_parts: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|part| {
+                                        if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                            part.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                if text_parts.is_empty() {
+                                    None
+                                } else {
+                                    Some(text_parts.join(""))
+                                }
+                            } else {
+                                None
+                            }
+                        })
                         .map(|s| s.trim().to_string())
                 })
             })

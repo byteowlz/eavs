@@ -4274,7 +4274,10 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool, all: bool) -> Res
         let registry = load_secret_account_registry();
         let config_accounts: std::collections::HashSet<String> =
             entries.iter().map(|(_, _, a)| a.clone()).collect();
-        let extra = registry.iter().filter(|a| !config_accounts.contains(*a)).count();
+        let extra = registry
+            .iter()
+            .filter(|a| !config_accounts.contains(*a))
+            .count();
         if extra > 0 {
             println!();
             println!(

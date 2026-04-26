@@ -158,8 +158,12 @@ fn external_template_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(prefix).join("share/eavs/provider-templates.toml"));
     }
     // Common Homebrew locations
-    paths.push(PathBuf::from("/opt/homebrew/share/eavs/provider-templates.toml"));
-    paths.push(PathBuf::from("/usr/local/share/eavs/provider-templates.toml"));
+    paths.push(PathBuf::from(
+        "/opt/homebrew/share/eavs/provider-templates.toml",
+    ));
+    paths.push(PathBuf::from(
+        "/usr/local/share/eavs/provider-templates.toml",
+    ));
 
     // XDG data (cargo install / just install)
     let data_dir = std::env::var("XDG_DATA_HOME")
@@ -186,11 +190,7 @@ fn load_baseline() -> HashMap<String, BaselineEntry> {
                     return entries;
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to parse {}: {}",
-                        path.display(),
-                        e
-                    );
+                    warn!("Failed to parse {}: {}", path.display(), e);
                     // Continue to next path / fallback
                 }
             }
@@ -270,7 +270,10 @@ pub fn build_templates(catalog: Option<&ModelCatalog>) -> Vec<ProviderTemplate> 
             let template = ProviderTemplate {
                 id: id.clone(),
                 name: entry.name.clone().unwrap_or_else(|| id.clone()),
-                type_: entry.type_.clone().unwrap_or_else(|| "openai-compatible".to_string()),
+                type_: entry
+                    .type_
+                    .clone()
+                    .unwrap_or_else(|| "openai-compatible".to_string()),
                 base_url: entry.base_url.clone(),
                 env_keys: entry.env_keys.clone().unwrap_or_default(),
                 auth: entry.auth.clone().unwrap_or_default(),
@@ -344,10 +347,7 @@ pub fn build_templates(catalog: Option<&ModelCatalog>) -> Vec<ProviderTemplate> 
 }
 
 /// Generate a ProviderConfig JSON blob from a template + user-supplied values.
-pub fn template_to_config(
-    template: &ProviderTemplate,
-    api_key: Option<&str>,
-) -> serde_json::Value {
+pub fn template_to_config(template: &ProviderTemplate, api_key: Option<&str>) -> serde_json::Value {
     let mut config = serde_json::Map::new();
     config.insert("type".to_string(), serde_json::json!(template.type_));
 
@@ -378,9 +378,15 @@ mod tests {
         let baseline = load_baseline();
         assert!(baseline.contains_key("openai"), "should have openai");
         assert!(baseline.contains_key("anthropic"), "should have anthropic");
-        assert!(baseline.contains_key("amazon-bedrock"), "should have bedrock");
+        assert!(
+            baseline.contains_key("amazon-bedrock"),
+            "should have bedrock"
+        );
         assert!(baseline.contains_key("ollama"), "should have ollama");
-        assert!(baseline.len() >= 15, "should have at least 15 baseline templates");
+        assert!(
+            baseline.len() >= 15,
+            "should have at least 15 baseline templates"
+        );
     }
 
     #[test]
@@ -388,12 +394,21 @@ mod tests {
         let templates = build_templates(None);
         assert!(!templates.is_empty(), "should have templates from baseline");
 
-        let openai = templates.iter().find(|t| t.id == "openai").expect("openai template");
+        let openai = templates
+            .iter()
+            .find(|t| t.id == "openai")
+            .expect("openai template");
         assert_eq!(openai.type_, "openai");
-        assert_eq!(openai.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(
+            openai.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
         assert!(openai.env_keys.contains(&"OPENAI_API_KEY".to_string()));
 
-        let bedrock = templates.iter().find(|t| t.id == "amazon-bedrock").expect("bedrock template");
+        let bedrock = templates
+            .iter()
+            .find(|t| t.id == "amazon-bedrock")
+            .expect("bedrock template");
         assert_eq!(bedrock.auth, AuthHint::AwsSigv4);
         assert!(!bedrock.extra_fields.is_empty());
     }
@@ -402,12 +417,21 @@ mod tests {
     fn test_npm_to_eavs_type_mapping() {
         assert_eq!(npm_to_eavs_type("@ai-sdk/anthropic"), Some("anthropic"));
         assert_eq!(npm_to_eavs_type("@ai-sdk/openai"), Some("openai"));
-        assert_eq!(npm_to_eavs_type("@ai-sdk/openai-compatible"), Some("openai-compatible"));
+        assert_eq!(
+            npm_to_eavs_type("@ai-sdk/openai-compatible"),
+            Some("openai-compatible")
+        );
         assert_eq!(npm_to_eavs_type("@ai-sdk/google"), Some("google"));
         assert_eq!(npm_to_eavs_type("@ai-sdk/amazon-bedrock"), Some("bedrock"));
-        assert_eq!(npm_to_eavs_type("@openrouter/ai-sdk-provider"), Some("openrouter"));
+        assert_eq!(
+            npm_to_eavs_type("@openrouter/ai-sdk-provider"),
+            Some("openrouter")
+        );
         // Unknown packages get openai-compatible fallback
-        assert_eq!(npm_to_eavs_type("some-unknown-package"), Some("openai-compatible"));
+        assert_eq!(
+            npm_to_eavs_type("some-unknown-package"),
+            Some("openai-compatible")
+        );
     }
 
     #[test]
@@ -442,14 +466,20 @@ mod tests {
         // Without catalog, manual_only providers should still appear from baseline
         let templates = build_templates(None);
         let bedrock = templates.iter().find(|t| t.id == "amazon-bedrock");
-        assert!(bedrock.is_some(), "manual_only providers should appear from baseline");
+        assert!(
+            bedrock.is_some(),
+            "manual_only providers should appear from baseline"
+        );
     }
 
     #[test]
     fn test_templates_sorted() {
         let templates = build_templates(None);
         for i in 1..templates.len() {
-            assert!(templates[i - 1].id <= templates[i].id, "templates should be sorted by id");
+            assert!(
+                templates[i - 1].id <= templates[i].id,
+                "templates should be sorted by id"
+            );
         }
     }
 }

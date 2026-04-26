@@ -98,8 +98,7 @@ impl ProviderStore {
 
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ProviderStoreError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| ProviderStoreError::Io(e.to_string()))?;
         }
 
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -208,13 +207,12 @@ impl ProviderStore {
         let now = Utc::now();
 
         // Check if provider already exists
-        let existing = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM providers WHERE name = ?",
-        )
-        .bind(&request.name)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
+        let existing =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM providers WHERE name = ?")
+                .bind(&request.name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
 
         let config_json = serde_json::to_string(&request.config)
             .map_err(|e| ProviderStoreError::Serialization(e.to_string()))?;
@@ -258,15 +256,15 @@ impl ProviderStore {
             config: request.config,
             created_at: if existing > 0 {
                 // Get original created_at
-                sqlx::query_scalar::<_, String>(
-                    "SELECT created_at FROM providers WHERE name = ?",
-                )
-                .bind(&request.name)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| ProviderStoreError::Database(e.to_string()))?
-                .parse::<DateTime<Utc>>()
-                .map_err(|e: chrono::ParseError| ProviderStoreError::Serialization(e.to_string()))?
+                sqlx::query_scalar::<_, String>("SELECT created_at FROM providers WHERE name = ?")
+                    .bind(&request.name)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ProviderStoreError::Database(e.to_string()))?
+                    .parse::<DateTime<Utc>>()
+                    .map_err(|e: chrono::ParseError| {
+                        ProviderStoreError::Serialization(e.to_string())
+                    })?
             } else {
                 now
             },
@@ -320,13 +318,12 @@ impl ProviderStore {
         model: ModelShortlistEntry,
     ) -> Result<(), ProviderStoreError> {
         // Check if provider exists
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM providers WHERE name = ?",
-        )
-        .bind(provider_name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT COUNT(*) FROM providers WHERE name = ?")
+                .bind(provider_name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
 
         if exists.is_none() || exists == Some(0) {
             return Err(ProviderStoreError::NotFound);
@@ -344,7 +341,7 @@ impl ProviderStore {
         .bind(provider_name)
         .bind(&model.id)
         .bind(&model_data_json)
-            .bind(Utc::now().to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await
         .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
@@ -358,14 +355,13 @@ impl ProviderStore {
         provider_name: &str,
         model_id: &str,
     ) -> Result<bool, ProviderStoreError> {
-        let result = sqlx::query(
-            "DELETE FROM provider_models WHERE provider_name = ? AND model_id = ?",
-        )
-        .bind(provider_name)
-        .bind(model_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
+        let result =
+            sqlx::query("DELETE FROM provider_models WHERE provider_name = ? AND model_id = ?")
+                .bind(provider_name)
+                .bind(model_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
     }
