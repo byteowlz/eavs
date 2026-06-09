@@ -18,12 +18,20 @@
 //! `eavs-sth0`); this is pure capture + allow/deny + observability.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::config::{NetworkConfig, TransparentConfig};
 use crate::network_acl::check_host_allowed;
+
+/// Max DNS message size we relay (covers EDNS0; classic 512 + headroom).
+const DNS_BUF: usize = 4096;
+
+/// Upstream DNS response timeout.
+const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 12-byte PROXY protocol v2 signature.
 const PROXY_V2_SIG: [u8; 12] = [
@@ -34,17 +42,79 @@ const PROXY_V2_SIG: [u8; 12] = [
 /// ClientHello with SNI or an HTTP request line + Host header).
 const PEEK_LIMIT: usize = 8192;
 
-/// Spawn the transparent egress listener if enabled. Returns immediately;
-/// the listener runs until the process exits.
+/// Spawn the transparent egress listener and DNS relay if enabled. Returns
+/// immediately; both run until the process exits.
 pub fn spawn(transparent: TransparentConfig, network: NetworkConfig) {
     if !transparent.enabled {
         return;
     }
+    let dns = transparent.clone();
     tokio::spawn(async move {
         if let Err(e) = run(transparent, network).await {
             tracing::error!("transparent egress listener stopped: {e:#}");
         }
     });
+    tokio::spawn(async move {
+        if let Err(e) = run_dns(dns).await {
+            tracing::error!("egress DNS relay stopped: {e:#}");
+        }
+    });
+}
+
+/// Forward agent DNS queries to the configured upstream resolver. A dumb UDP
+/// relay -- no filtering here; egress is enforced at the TCP/SNI layer, and a
+/// resolved name is harmless without an allowed connection to follow.
+async fn run_dns(cfg: TransparentConfig) -> std::io::Result<()> {
+    let addr = format!("{}:{}", cfg.host, cfg.dns_port);
+    let sock = Arc::new(UdpSocket::bind(&addr).await?);
+    tracing::info!(
+        "Egress DNS relay listening on {} -> {}",
+        addr,
+        cfg.dns_upstream
+    );
+    let mut buf = vec![0u8; DNS_BUF];
+    loop {
+        let (n, client) = match sock.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("DNS relay recv failed: {e}");
+                continue;
+            }
+        };
+        let query = buf[..n].to_vec();
+        let sock = Arc::clone(&sock);
+        let upstream = cfg.dns_upstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = relay_dns_query(&sock, &upstream, &query, client).await {
+                tracing::debug!("DNS relay for {client} failed: {e:#}");
+            }
+        });
+    }
+}
+
+/// Send one query to `upstream` from a fresh ephemeral socket and relay the
+/// reply back to `client` via the shared listener socket.
+async fn relay_dns_query(
+    listener: &UdpSocket,
+    upstream: &str,
+    query: &[u8],
+    client: SocketAddr,
+) -> std::io::Result<()> {
+    let out = UdpSocket::bind("0.0.0.0:0").await?;
+    out.connect(upstream).await?;
+    out.send(query).await?;
+    let mut resp = vec![0u8; DNS_BUF];
+    let n = match tokio::time::timeout(DNS_TIMEOUT, out.recv(&mut resp)).await {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "upstream DNS timeout",
+            ));
+        }
+    };
+    listener.send_to(&resp[..n], client).await?;
+    Ok(())
 }
 
 async fn run(transparent: TransparentConfig, network: NetworkConfig) -> std::io::Result<()> {
@@ -392,5 +462,38 @@ mod tests {
     #[test]
     fn non_http_non_tls_has_no_hostname() {
         assert!(extract_hostname(b"\x00\x01\x02 random binary").is_none());
+    }
+
+    #[tokio::test]
+    async fn dns_relay_forwards_query_and_returns_response() {
+        // Fake upstream resolver: echoes a canned reply for whatever it receives.
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let canned = b"RESPONSE-BYTES".to_vec();
+        let canned_for_task = canned.clone();
+        tokio::spawn(async move {
+            let mut b = vec![0u8; DNS_BUF];
+            let (_n, from) = upstream.recv_from(&mut b).await.unwrap();
+            upstream.send_to(&canned_for_task, from).await.unwrap();
+        });
+
+        // The shared "listener" socket the relay uses to answer the client.
+        let listener = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // The client that should receive the relayed response.
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+
+        relay_dns_query(
+            &listener,
+            &upstream_addr.to_string(),
+            b"QUERY-BYTES",
+            client_addr,
+        )
+        .await
+        .expect("relay should succeed");
+
+        let mut got = vec![0u8; DNS_BUF];
+        let n = client.recv(&mut got).await.unwrap();
+        assert_eq!(&got[..n], canned.as_slice());
     }
 }
