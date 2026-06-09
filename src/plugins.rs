@@ -197,6 +197,7 @@ mod tests {
             capture: Default::default(),
             transform: TransformConfig::default(),
             network: Default::default(),
+            transparent: Default::default(),
             mock_responses: Default::default(),
         }
     }
