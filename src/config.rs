@@ -183,6 +183,11 @@ pub struct TransparentConfig {
     /// `false` = monitor (log the verdict but allow all). Set the default
     /// profile to a monitor listener for fleet-wide egress observability.
     pub enforce: bool,
+    /// UDP port for the DNS relay. The agent must resolve names before it can
+    /// connect; its DNS (DNAT'd here) is forwarded to `dns_upstream`.
+    pub dns_port: u16,
+    /// Upstream resolver the DNS relay forwards queries to (`ip:port`).
+    pub dns_upstream: String,
 }
 
 impl Default for TransparentConfig {
@@ -192,6 +197,8 @@ impl Default for TransparentConfig {
             host: "0.0.0.0".to_string(),
             port: 3041,
             enforce: true,
+            dns_port: 3053,
+            dns_upstream: "1.1.1.1:53".to_string(),
         }
     }
 }
