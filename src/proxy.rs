@@ -981,8 +981,11 @@ async fn proxy_handler_inner(
                                 let text_parts: Vec<String> = arr
                                     .iter()
                                     .filter_map(|part| {
-                                        if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                            part.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                        if part.get("type").and_then(|t| t.as_str()) == Some("text")
+                                        {
+                                            part.get("text")
+                                                .and_then(|t| t.as_str())
+                                                .map(|s| s.to_string())
                                         } else {
                                             None
                                         }
@@ -4007,6 +4010,7 @@ mod tests {
             capture: Default::default(),
             transform: Default::default(),
             network: Default::default(),
+            transparent: Default::default(),
             mock_responses: Default::default(),
         }
     }

@@ -104,6 +104,9 @@ pub struct AppConfig {
     /// Network access control (domain allow/deny lists)
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Transparent egress proxy for the oqto sandbox netns
+    #[serde(default)]
+    pub transparent: TransparentConfig,
     /// Mock provider predefined responses
     #[serde(default)]
     pub mock_responses: MockResponsesConfig,
@@ -124,6 +127,7 @@ impl AppConfig {
             capture: CaptureConfig::default(),
             transform: TransformConfig::default(),
             network: NetworkConfig::default(),
+            transparent: TransparentConfig::default(),
             mock_responses: MockResponsesConfig::default(),
         }
     }
@@ -158,6 +162,38 @@ pub struct NetworkConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// Transparent egress proxy (oqto sandbox `NetworkMode::Proxy`).
+///
+/// Receives connections relayed by the in-namespace shim, each prefixed with a
+/// PROXY protocol v2 header carrying the agent's real destination. eavs enforces
+/// the domain ACL (reusing `network`) and splices to that destination. Disabled
+/// by default; enabling it is what makes proxy-mode egress functional.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TransparentConfig {
+    /// Enable the transparent egress listener.
+    pub enabled: bool,
+    /// Listen address. `0.0.0.0` so it answers on every per-session veth IP.
+    pub host: String,
+    /// Listen port (the shim connects here over the veth).
+    pub port: u16,
+    /// `true` = enforce the domain ACL (deny on failure / missing hostname);
+    /// `false` = monitor (log the verdict but allow all). Set the default
+    /// profile to a monitor listener for fleet-wide egress observability.
+    pub enforce: bool,
+}
+
+impl Default for TransparentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "0.0.0.0".to_string(),
+            port: 3041,
+            enforce: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
