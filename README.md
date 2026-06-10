@@ -189,6 +189,11 @@ Configure multiple logging backends:
 ```toml
 [logging]
 default = "stdout"
+# Log full request/response CONTENT (prompts, the `messages` array, model
+# output). Default false -- only metadata (model, method, status, duration) is
+# logged. Enabling this records potentially sensitive conversation data;
+# `log_redact` covers API keys/tokens, NOT message content.
+log_bodies = false
 
 [[logging.backends]]
 type = "stdout"

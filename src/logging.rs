@@ -284,6 +284,25 @@ impl LogSink for NullSink {
 /// Logger manager that dispatches to multiple backends.
 pub struct Logger {
     sinks: Vec<Box<dyn LogSink>>,
+    /// When false (default), request/response *content* is stripped before any
+    /// sink sees it -- only metadata is logged. See `LoggingConfig::log_bodies`.
+    log_bodies: bool,
+}
+
+/// Strip a request body to non-content routing metadata, dropping the
+/// `messages`/prompt content entirely.
+fn redact_request_body(body: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for key in ["model", "stream", "max_tokens", "temperature", "top_p"] {
+        if let Some(v) = body.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    out.insert(
+        "_content_redacted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    serde_json::Value::Object(out)
 }
 
 impl Logger {
@@ -338,13 +357,51 @@ impl Logger {
             sinks.push(Box::new(StdoutSink::new("json")));
         }
 
-        Self { sinks }
+        Self {
+            sinks,
+            log_bodies: config.log_bodies,
+        }
     }
 
     /// Log an event to all backends.
+    ///
+    /// When `log_bodies` is disabled (the default), conversation *content* never
+    /// reaches a sink: response chunks (pure model output) are dropped and
+    /// request bodies are stripped to routing metadata.
     pub fn log(&self, event: &AnalysisEvent) {
-        for sink in &self.sinks {
-            sink.log(event);
+        if self.log_bodies {
+            for sink in &self.sinks {
+                sink.log(event);
+            }
+            return;
+        }
+        match event {
+            // Pure model output -- never logged without explicit opt-in.
+            AnalysisEvent::ResponseChunk { .. } => {}
+            AnalysisEvent::Request {
+                timestamp,
+                id,
+                method,
+                uri,
+                body,
+            } => {
+                let redacted = AnalysisEvent::Request {
+                    timestamp: *timestamp,
+                    id: id.clone(),
+                    method: method.clone(),
+                    uri: uri.clone(),
+                    body: redact_request_body(body),
+                };
+                for sink in &self.sinks {
+                    sink.log(&redacted);
+                }
+            }
+            // Metadata-only events (ResponseComplete, Error) pass through.
+            other => {
+                for sink in &self.sinks {
+                    sink.log(other);
+                }
+            }
         }
     }
 
@@ -454,11 +511,87 @@ mod tests {
             default: "none".to_string(),
             sink: String::new(),
             backends: Vec::new(),
+            log_bodies: false,
         };
         let logger = Logger::from_config(&config);
 
         // Should still have stdout as fallback since backends is empty
         assert!(logger.sink_names().contains(&"stdout"));
+    }
+
+    /// Sink that records every event (serialized) for assertions.
+    struct CaptureSink(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl LogSink for CaptureSink {
+        fn log(&self, event: &AnalysisEvent) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::to_string(event).unwrap());
+        }
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+    }
+
+    fn request_with_secret() -> AnalysisEvent {
+        AnalysisEvent::Request {
+            timestamp: 0,
+            id: "x".into(),
+            method: "POST".into(),
+            uri: "/v1/chat".into(),
+            body: serde_json::json!({
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "SECRET PROMPT"}]
+            }),
+        }
+    }
+
+    #[test]
+    fn redacts_content_when_log_bodies_disabled() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let logger = Logger {
+            sinks: vec![Box::new(CaptureSink(captured.clone()))],
+            log_bodies: false,
+        };
+        logger.log(&request_with_secret());
+        logger.log(&AnalysisEvent::ResponseChunk {
+            timestamp: 0,
+            id: "x".into(),
+            chunk: "SECRET OUTPUT".into(),
+        });
+
+        let logs = captured.lock().unwrap();
+        let joined = logs.join("\n");
+        assert!(
+            !joined.contains("SECRET PROMPT"),
+            "prompt must be redacted: {joined}"
+        );
+        assert!(
+            !joined.contains("SECRET OUTPUT"),
+            "model output must not log: {joined}"
+        );
+        assert!(
+            joined.contains("gpt-4"),
+            "model metadata should remain: {joined}"
+        );
+        assert!(joined.contains("_content_redacted"));
+        // The response chunk (pure content) is dropped -> only the request log.
+        assert_eq!(logs.len(), 1);
+    }
+
+    #[test]
+    fn logs_content_when_opted_in() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let logger = Logger {
+            sinks: vec![Box::new(CaptureSink(captured.clone()))],
+            log_bodies: true,
+        };
+        logger.log(&request_with_secret());
+        assert!(captured
+            .lock()
+            .unwrap()
+            .join("\n")
+            .contains("SECRET PROMPT"));
     }
 
     #[test]

@@ -616,6 +616,13 @@ pub struct LoggingConfig {
     /// Legacy support for "sink" field
     #[serde(default)]
     pub sink: String,
+    /// Log full request/response CONTENT (prompts, the `messages` array, model
+    /// output). Default `false`: only metadata is logged (model, method, uri,
+    /// status, duration). Enable deliberately -- it records potentially
+    /// sensitive conversation data. `log_redact` only covers keys/tokens, not
+    /// message content.
+    #[serde(default)]
+    pub log_bodies: bool,
 }
 
 impl Default for LoggingConfig {
@@ -624,6 +631,7 @@ impl Default for LoggingConfig {
             default: "stdout".to_string(),
             backends: Vec::new(),
             sink: String::new(),
+            log_bodies: false,
         }
     }
 }
@@ -1502,6 +1510,7 @@ mod tests {
             default: "file".to_string(),
             sink: String::new(),
             backends: Vec::new(),
+            log_bodies: false,
         };
         assert_eq!(config.effective_default(), "file");
 
@@ -1510,6 +1519,7 @@ mod tests {
             default: "stdout".to_string(),
             sink: "file".to_string(),
             backends: Vec::new(),
+            log_bodies: false,
         };
         assert_eq!(legacy.effective_default(), "file");
     }
