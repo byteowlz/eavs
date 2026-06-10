@@ -370,10 +370,8 @@ fn mistral_translate_tool_choice_required_to_any(choice: &mut Value) {
         Value::String(s) if s == "required" => {
             *choice = Value::String("any".to_string());
         }
-        Value::Object(obj) => {
-            if obj.get("type").and_then(|t| t.as_str()) == Some("required") {
-                obj.insert("type".to_string(), Value::String("any".to_string()));
-            }
+        Value::Object(obj) if obj.get("type").and_then(|t| t.as_str()) == Some("required") => {
+            obj.insert("type".to_string(), Value::String("any".to_string()));
         }
         _ => {}
     }

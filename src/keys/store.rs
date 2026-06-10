@@ -462,7 +462,7 @@ impl KeyStore {
             keys.push(entry.value().to_info());
         }
         // Sort by created_at descending (newest first)
-        keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        keys.sort_by_key(|k| std::cmp::Reverse(k.created_at));
         Ok(keys)
     }
 

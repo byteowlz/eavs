@@ -230,11 +230,6 @@ impl ProviderType {
         )
     }
 
-    /// Check if this provider uses the Responses API format.
-    pub fn uses_responses_api(&self) -> bool {
-        matches!(self, Self::OpenAICodex | Self::OpenAIResponses)
-    }
-
     /// Check if this provider supports the /v1/models endpoint natively.
     /// Providers that don't support it will get a synthetic response.
     pub fn supports_models_endpoint(&self) -> bool {

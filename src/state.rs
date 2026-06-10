@@ -544,7 +544,7 @@ impl AppState {
 
     /// Initialize provider store (call during startup).
     pub async fn init_provider_store(&self) -> Result<(), String> {
-        let db_path = std::path::PathBuf::from(self.config.keys.resolved_database_path());
+        let db_path = self.config.keys.resolved_database_path();
         let provider_db_path = db_path.with_file_name("providers.db");
 
         tracing::info!("Initializing provider store at {:?}", provider_db_path);

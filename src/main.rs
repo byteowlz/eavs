@@ -515,7 +515,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                             for name in &adapters {
                                 // Try to get info for each
                                 if let Ok(info) = export::adapter_info(name) {
-                                    let display = info["displayName"].as_str().unwrap_or(name);
+                                    let _display = info["displayName"].as_str().unwrap_or(name);
                                     let desc = info["description"].as_str().unwrap_or("");
                                     let file = info["outputFile"].as_str().unwrap_or("");
                                     println!("  {:<12} {} ({})", name, desc, file);
@@ -640,7 +640,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 .iter()
                 .map(|&id| (id, catalog.catalog_models(id).len()))
                 .collect();
-            providers.sort_by(|a, b| b.1.cmp(&a.1));
+            providers.sort_by_key(|p| std::cmp::Reverse(p.1));
 
             println!("{:<30} {:>8}", "PROVIDER", "MODELS");
             println!("{}", "-".repeat(40));

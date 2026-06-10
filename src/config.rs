@@ -99,6 +99,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub capture: CaptureConfig,
     /// Request/response transform plugins
+    // Config deserialization surface; read indirectly via TOML, not by name in code.
+    #[allow(dead_code)]
     #[serde(default)]
     pub transform: TransformConfig,
     /// Network access control (domain allow/deny lists)

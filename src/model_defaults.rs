@@ -10,18 +10,6 @@ pub struct ResolvedModelDefaults {
     pub fallback: String,
 }
 
-impl ResolvedModelDefaults {
-    pub fn resolve_alias(&self, model: &str) -> Option<&str> {
-        match model {
-            "default" => Some(&self.default),
-            "fast" => Some(&self.fast),
-            "reasoning" => Some(&self.reasoning),
-            "fallback" => Some(&self.fallback),
-            _ => None,
-        }
-    }
-}
-
 pub fn resolve_model_defaults(
     config: &AppConfig,
     catalog: Option<&ModelCatalog>,

@@ -1653,21 +1653,17 @@ fn build_fake_openai_sse_from_events(
     let mut tool_index = 0usize;
     for block in &message.content {
         match block {
-            ContentBlock::Text(t) => {
-                if !t.text.is_empty() {
-                    out_events.push(StreamEvent::TextDelta {
-                        content_index: 0,
-                        delta: t.text.clone(),
-                    });
-                }
+            ContentBlock::Text(t) if !t.text.is_empty() => {
+                out_events.push(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: t.text.clone(),
+                });
             }
-            ContentBlock::Thinking(t) => {
-                if !t.thinking.is_empty() {
-                    out_events.push(StreamEvent::ThinkingDelta {
-                        content_index: 0,
-                        delta: t.thinking.clone(),
-                    });
-                }
+            ContentBlock::Thinking(t) if !t.thinking.is_empty() => {
+                out_events.push(StreamEvent::ThinkingDelta {
+                    content_index: 0,
+                    delta: t.thinking.clone(),
+                });
             }
             ContentBlock::ToolCall(tc) => {
                 out_events.push(StreamEvent::ToolCallStart {
@@ -2904,18 +2900,6 @@ fn apply_http_auth_headers(headers: &mut HeaderMap, provider_type: ProviderType,
 
 fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
     apply_extra_headers(headers, provider_type);
-}
-
-fn oauth_default_redirect_uri() -> String {
-    std::env::var("EAVS_OAUTH_REDIRECT_URI").unwrap_or_else(|_| "http://localhost".to_string())
-}
-
-async fn resolve_oauth_access_token(
-    state: &AppState,
-    provider_name: &str,
-    oauth_user: &str,
-) -> Result<String, String> {
-    resolve_oauth_access_token_with_account(state, provider_name, oauth_user, None).await
 }
 
 async fn resolve_oauth_access_token_with_account(

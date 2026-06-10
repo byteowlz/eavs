@@ -54,3 +54,7 @@ criterion/
 .cargo/
 !.cargo/config.toml
 .pi/todos/
+
+# Python bytecode cache (e.g. mitmproxy capture addon)
+__pycache__/
+*.pyc

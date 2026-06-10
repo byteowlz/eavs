@@ -59,6 +59,8 @@ impl QuotaTracker {
     }
 
     /// Get the latest quota snapshot for a provider/account.
+    // Tracker accessor exercised by unit tests; kept as part of the QuotaTracker API.
+    #[allow(dead_code)]
     pub async fn get(&self, key: &QuotaKey) -> Option<UpstreamQuota> {
         let map = self.inner.read().await;
         map.get(key).cloned()
@@ -71,6 +73,8 @@ impl QuotaTracker {
     }
 
     /// Remove stale entries older than the given duration.
+    // Maintenance helper exercised by unit tests; kept as part of the QuotaTracker API.
+    #[allow(dead_code)]
     pub async fn cleanup(&self, max_age: Duration) {
         let mut map = self.inner.write().await;
         let now = Instant::now();
@@ -82,11 +86,11 @@ impl QuotaTracker {
 ///
 /// Supports:
 /// - OpenAI: x-ratelimit-limit-requests, x-ratelimit-remaining-requests,
-///           x-ratelimit-reset-requests, x-ratelimit-limit-tokens,
-///           x-ratelimit-remaining-tokens, x-ratelimit-reset-tokens
+///   x-ratelimit-reset-requests, x-ratelimit-limit-tokens,
+///   x-ratelimit-remaining-tokens, x-ratelimit-reset-tokens
 /// - Anthropic: anthropic-ratelimit-requests-limit, anthropic-ratelimit-requests-remaining,
-///              anthropic-ratelimit-requests-reset, anthropic-ratelimit-tokens-limit,
-///              anthropic-ratelimit-tokens-remaining, anthropic-ratelimit-tokens-reset
+///   anthropic-ratelimit-requests-reset, anthropic-ratelimit-tokens-limit,
+///   anthropic-ratelimit-tokens-remaining, anthropic-ratelimit-tokens-reset
 /// - Google: No standard rate limit headers (uses HTTP 429 + Retry-After)
 pub fn parse_quota_headers(headers: &http::HeaderMap) -> Option<UpstreamQuota> {
     // Try OpenAI format first
