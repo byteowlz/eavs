@@ -1753,8 +1753,6 @@ async fn handle_malformed_sse(req: MockRequest) -> Result<Response, Response> {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Scenario: dynamic
 // ---------------------------------------------------------------------------
@@ -1783,14 +1781,11 @@ async fn handle_dynamic(req: MockRequest) -> Result<Response, Response> {
             .unwrap());
     }
 
-    let def = req
-        .predefined_responses
-        .get(&trigger)
-        .or_else(|| {
-            req.predefined_responses
-                .iter()
-                .find_map(|(k, v)| k.eq_ignore_ascii_case(&trigger).then_some(v))
-        });
+    let def = req.predefined_responses.get(&trigger).or_else(|| {
+        req.predefined_responses
+            .iter()
+            .find_map(|(k, v)| k.eq_ignore_ascii_case(&trigger).then_some(v))
+    });
 
     let Some(def) = def else {
         let body = json!({
