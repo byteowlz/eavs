@@ -296,6 +296,11 @@ supports_stream_options = false
 [logging]
 default = "stdout"
 
+# Log full request/response content (prompts, messages, model output).
+# Default false: only metadata is logged. Enabling records sensitive
+# conversation data (log_redact only covers keys/tokens, not content).
+log_bodies = false
+
 # Optional: Configure multiple logging backends
 # Uncomment the backends you want to use:
 
