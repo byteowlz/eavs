@@ -106,7 +106,7 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     /// Transparent egress proxy (PROXY-protocol front end + domain ACL)
     #[serde(default)]
-    pub transparent: TransparentConfig,
+    pub egress: EgressConfig,
     /// Mock provider predefined responses
     #[serde(default)]
     pub mock_responses: MockResponsesConfig,
@@ -127,7 +127,7 @@ impl AppConfig {
             capture: CaptureConfig::default(),
             transform: TransformConfig::default(),
             network: NetworkConfig::default(),
-            transparent: TransparentConfig::default(),
+            egress: EgressConfig::default(),
             mock_responses: MockResponsesConfig::default(),
         }
     }
@@ -164,21 +164,20 @@ fn default_true() -> bool {
     true
 }
 
-/// Transparent egress proxy.
+/// Egress firewall (transparent egress proxy + domain ACL).
 ///
 /// Receives connections from a transparent-redirect front end, each prefixed
 /// with a PROXY protocol v2 header carrying the client's real destination. eavs
 /// enforces the domain ACL (reusing `network`) and splices to that destination.
-/// Disabled by default. (The oqto sandbox egress relay is one such front end,
-/// but the listener is front-end-agnostic.)
+/// Disabled by default; front-end agnostic.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
-pub struct TransparentConfig {
-    /// Enable the transparent egress listener.
+pub struct EgressConfig {
+    /// Enable the egress firewall (listener + DNS relay).
     pub enabled: bool,
-    /// Listen address. `0.0.0.0` so it answers on every per-session veth IP.
+    /// Listen address. `0.0.0.0` answers on every front-end address.
     pub host: String,
-    /// Listen port (the shim connects here over the veth).
+    /// Listen port (the front-end connects here).
     pub port: u16,
     /// `true` = enforce the domain ACL (deny on failure / missing hostname);
     /// `false` = monitor (log the verdict but allow all). Set the default
@@ -192,7 +191,7 @@ pub struct TransparentConfig {
     pub dns_upstream: String,
 }
 
-impl Default for TransparentConfig {
+impl Default for EgressConfig {
     fn default() -> Self {
         Self {
             enabled: false,

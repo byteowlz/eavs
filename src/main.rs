@@ -4,6 +4,7 @@ mod aws_sigv4;
 mod capture;
 mod cli;
 mod config;
+mod egress;
 mod export;
 mod keys;
 mod logging;
@@ -24,7 +25,6 @@ mod setup;
 mod state;
 mod transform;
 mod transform_plugins;
-mod transparent;
 mod types;
 mod upstream;
 mod upstream_quota;
@@ -730,8 +730,8 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     let keys_enabled = config.keys.enabled;
     let capture_config = config.capture.clone();
     let server_port = config.server.port;
-    let transparent_config = config.transparent.clone();
-    let transparent_network = config.network.clone();
+    let egress_config = config.egress.clone();
+    let egress_network = config.network.clone();
 
     // Initialize state
     let state = AppState::new(config);
@@ -877,7 +877,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     };
 
     // Transparent egress proxy for the oqto sandbox netns (no-op unless enabled).
-    transparent::spawn(transparent_config, transparent_network);
+    egress::spawn(egress_config, egress_network);
 
     // Run server
     tracing::info!("Listening on {}", addr);

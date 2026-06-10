@@ -1,4 +1,4 @@
-//! Transparent egress proxy.
+//! Egress firewall: a transparent egress proxy with a domain ACL.
 //!
 //! Accepts TCP connections from a transparent-redirect front end that prepends a
 //! **PROXY protocol v2** header announcing the client's original destination
@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-use crate::config::{NetworkConfig, TransparentConfig};
+use crate::config::{EgressConfig, NetworkConfig};
 use crate::network_acl::check_host_allowed;
 
 /// Max DNS message size we relay (covers EDNS0; classic 512 + headroom).
@@ -43,16 +43,16 @@ const PROXY_V2_SIG: [u8; 12] = [
 /// ClientHello with SNI or an HTTP request line + Host header).
 const PEEK_LIMIT: usize = 8192;
 
-/// Spawn the transparent egress listener and DNS relay if enabled. Returns
-/// immediately; both run until the process exits.
-pub fn spawn(transparent: TransparentConfig, network: NetworkConfig) {
-    if !transparent.enabled {
+/// Spawn the egress listener and DNS relay if enabled. Returns immediately;
+/// both run until the process exits.
+pub fn spawn(cfg: EgressConfig, network: NetworkConfig) {
+    if !cfg.enabled {
         return;
     }
-    let dns = transparent.clone();
+    let dns = cfg.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(transparent, network).await {
-            tracing::error!("transparent egress listener stopped: {e:#}");
+        if let Err(e) = run(cfg, network).await {
+            tracing::error!("egress listener stopped: {e:#}");
         }
     });
     tokio::spawn(async move {
@@ -65,7 +65,7 @@ pub fn spawn(transparent: TransparentConfig, network: NetworkConfig) {
 /// Forward client DNS queries to the configured upstream resolver. A dumb UDP
 /// relay -- no filtering here; egress is enforced at the TCP/SNI layer, and a
 /// resolved name is harmless without an allowed connection to follow.
-async fn run_dns(cfg: TransparentConfig) -> std::io::Result<()> {
+async fn run_dns(cfg: EgressConfig) -> std::io::Result<()> {
     let addr = format!("{}:{}", cfg.host, cfg.dns_port);
     let sock = Arc::new(UdpSocket::bind(&addr).await?);
     tracing::info!(
@@ -118,31 +118,27 @@ async fn relay_dns_query(
     Ok(())
 }
 
-async fn run(transparent: TransparentConfig, network: NetworkConfig) -> std::io::Result<()> {
-    let addr = format!("{}:{}", transparent.host, transparent.port);
+async fn run(cfg: EgressConfig, network: NetworkConfig) -> std::io::Result<()> {
+    let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!(
-        "Transparent egress proxy listening on {} (posture: {})",
+        "Egress firewall listening on {} (posture: {})",
         addr,
-        if transparent.enforce {
-            "enforce"
-        } else {
-            "monitor"
-        }
+        if cfg.enforce { "enforce" } else { "monitor" }
     );
     loop {
         let (inbound, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("transparent accept failed: {e}");
+                tracing::warn!("egress accept failed: {e}");
                 continue;
             }
         };
         let network = network.clone();
-        let enforce = transparent.enforce;
+        let enforce = cfg.enforce;
         tokio::spawn(async move {
             if let Err(e) = handle(inbound, network, enforce).await {
-                tracing::debug!("transparent conn from {peer} ended: {e:#}");
+                tracing::debug!("egress conn from {peer} ended: {e:#}");
             }
         });
     }
