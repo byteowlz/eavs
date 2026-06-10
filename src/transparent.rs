@@ -465,6 +465,120 @@ mod tests {
         assert!(extract_hostname(b"\x00\x01\x02 random binary").is_none());
     }
 
+    /// Minimal well-formed TLS ClientHello carrying `host` as SNI.
+    fn tls_client_hello(host: &str) -> Vec<u8> {
+        let host = host.as_bytes();
+        let mut ch = vec![0x01]; // client_hello
+        let len_pos = ch.len();
+        ch.extend_from_slice(&[0, 0, 0]); // handshake length placeholder
+        ch.extend_from_slice(&[0x03, 0x03]); // version
+        ch.extend_from_slice(&[0u8; 32]); // random
+        ch.push(0); // session id len
+        ch.extend_from_slice(&2u16.to_be_bytes()); // cipher suites len
+        ch.extend_from_slice(&[0x00, 0x2f]); // one suite
+        ch.push(1); // compression methods len
+        ch.push(0); // null
+        let mut sni_ext = Vec::new();
+        sni_ext.extend_from_slice(&0u16.to_be_bytes()); // server_name
+        let mut name_entry = vec![0x00];
+        name_entry.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        name_entry.extend_from_slice(host);
+        let mut sni_body = Vec::new();
+        sni_body.extend_from_slice(&(name_entry.len() as u16).to_be_bytes());
+        sni_body.extend_from_slice(&name_entry);
+        sni_ext.extend_from_slice(&(sni_body.len() as u16).to_be_bytes());
+        sni_ext.extend_from_slice(&sni_body);
+        ch.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+        ch.extend_from_slice(&sni_ext);
+        let body = ch.len() - len_pos - 3;
+        ch[len_pos..len_pos + 3].copy_from_slice(&[
+            (body >> 16) as u8,
+            (body >> 8) as u8,
+            body as u8,
+        ]);
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(ch.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&ch);
+        rec
+    }
+
+    /// Drive a full connection through `handle()`: client -> [PROXY hdr + SNI
+    /// ClientHello] -> handle -> fake upstream (the PROXY dst). Returns whatever
+    /// the client reads back (the upstream echoes), or empty if dropped.
+    async fn run_handle(allow: &[&str], enforce: bool) -> Vec<u8> {
+        use std::net::Ipv4Addr;
+        // Fake upstream = the "real destination" in the PROXY header. Echoes.
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = upstream.accept().await {
+                let mut b = vec![0u8; 4096];
+                if let Ok(n) = s.read(&mut b).await {
+                    let _ = s.write_all(&b[..n]).await; // echo
+                }
+            }
+        });
+
+        // Socket pair for handle()'s inbound side.
+        let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let front_addr = front.local_addr().unwrap();
+        let mut client = TcpStream::connect(front_addr).await.unwrap();
+        let (server_side, _) = front.accept().await.unwrap();
+
+        let network = NetworkConfig {
+            allow_domains: allow.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let h = tokio::spawn(async move {
+            let _ = handle(server_side, network, enforce).await;
+        });
+
+        // Client speaks: PROXY v2 header (dst = upstream) then a ClientHello.
+        let SocketAddr::V4(up4) = up_addr else {
+            unreachable!()
+        };
+        let mut hdr = PROXY_V2_SIG.to_vec();
+        hdr.push(0x21);
+        hdr.push(0x11);
+        hdr.extend_from_slice(&12u16.to_be_bytes());
+        hdr.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+        hdr.extend_from_slice(&up4.ip().octets());
+        hdr.extend_from_slice(&12345u16.to_be_bytes());
+        hdr.extend_from_slice(&up4.port().to_be_bytes());
+        client.write_all(&hdr).await.unwrap();
+        client
+            .write_all(&tls_client_hello("allowed.test"))
+            .await
+            .unwrap();
+
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut got)).await;
+        // handle()'s copy_bidirectional may still be pumping the (idle) client->
+        // upstream half; we have what we need, so cancel rather than await it.
+        h.abort();
+        got
+    }
+
+    #[tokio::test]
+    async fn listener_splices_allowed_host_to_original_dst() {
+        // SNI host is allowed -> handle connects the PROXY dst and splices, so
+        // the client gets the upstream's echo of the ClientHello it sent.
+        let got = run_handle(&["allowed.test"], true).await;
+        assert!(
+            got.windows(3).any(|w| w == [0x16, 0x03, 0x01]),
+            "expected the upstream echo (a TLS record) to be spliced back; got {} bytes",
+            got.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_drops_denied_host_under_enforce() {
+        // SNI host not in the allow list + enforce -> connection dropped, no
+        // upstream connection, nothing echoed back.
+        let got = run_handle(&["only-this.test"], true).await;
+        assert!(got.is_empty(), "denied host must be dropped; got {got:?}");
+    }
+
     #[tokio::test]
     async fn dns_relay_forwards_query_and_returns_response() {
         // Fake upstream resolver: echoes a canned reply for whatever it receives.
