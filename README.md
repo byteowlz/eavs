@@ -11,6 +11,7 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 - **WebSocket Proxy**: OpenAI Realtime API and Codex Responses WebSocket transport
 - **Policy Engine**: Request/response rewriting rules (e.g., force `store: true` for Codex models)
 - **Network Access Control**: Domain allow/deny lists with private IP blocking (SSRF prevention)
+- **Transparent Egress Proxy**: Capture and filter *all* of a client's TCP egress (not just LLM calls) via a PROXY-protocol front end -- domain ACL with enforce/monitor posture, plus a DNS relay
 - **Upstream Quota Tracking**: Parse rate limit headers from providers, surface via API and CLI
 - **Model Catalog**: Browse 2800+ models across 90+ providers via [models.dev](https://models.dev/) integration
 - **Transparent Traffic Capture**: Automatically intercept LLM API calls from any app via mitmproxy integration
@@ -314,6 +315,39 @@ block_private_ips = true
 ```
 
 Precedence: deny list > private IP check > allow list. Empty lists impose no restriction.
+
+### Transparent Egress Proxy
+
+A general transparent egress proxy for front ends that redirect a client's TCP
+traffic and announce the original destination with a **PROXY protocol v2**
+header (for example, the oqto sandbox's in-namespace egress relay -- but the
+listener is front-end agnostic). eavs reads the original destination from the
+header, derives the hostname from the TLS ClientHello SNI or HTTP `Host` header,
+enforces the `[network]` domain ACL, and splices the connection to the real
+destination. A companion DNS relay answers the client's lookups.
+
+This is distinct from **Transparent Traffic Capture** (below): that uses
+mitmproxy to intercept *LLM API* calls; this captures *arbitrary* TCP egress and
+does allow/deny filtering with no MITM.
+
+```toml
+[transparent]
+# Enable the transparent egress listener + DNS relay (default: false)
+enabled = true
+# Listen address (0.0.0.0 answers on every front-end address)
+host = "0.0.0.0"
+port = 3041
+# enforce = deny on ACL failure / missing hostname; false = monitor (log only)
+enforce = true
+# DNS relay: forwards client lookups to an upstream resolver
+dns_port = 3053
+dns_upstream = "1.1.1.1:53"
+```
+
+Posture: `enforce` blocks disallowed hosts; `enforce = false` (monitor) logs the
+verdict but allows everything -- useful for fleet-wide egress observability.
+Allow/deny domains come from the `[network]` section above. Credential injection
+(MITM into allowlisted hosts) is not part of this and is tracked separately.
 
 ### Upstream Quota Tracking
 
