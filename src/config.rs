@@ -104,7 +104,7 @@ pub struct AppConfig {
     /// Network access control (domain allow/deny lists)
     #[serde(default)]
     pub network: NetworkConfig,
-    /// Transparent egress proxy for the oqto sandbox netns
+    /// Transparent egress proxy (PROXY-protocol front end + domain ACL)
     #[serde(default)]
     pub transparent: TransparentConfig,
     /// Mock provider predefined responses
@@ -164,12 +164,13 @@ fn default_true() -> bool {
     true
 }
 
-/// Transparent egress proxy (oqto sandbox `NetworkMode::Proxy`).
+/// Transparent egress proxy.
 ///
-/// Receives connections relayed by the in-namespace shim, each prefixed with a
-/// PROXY protocol v2 header carrying the agent's real destination. eavs enforces
-/// the domain ACL (reusing `network`) and splices to that destination. Disabled
-/// by default; enabling it is what makes proxy-mode egress functional.
+/// Receives connections from a transparent-redirect front end, each prefixed
+/// with a PROXY protocol v2 header carrying the client's real destination. eavs
+/// enforces the domain ACL (reusing `network`) and splices to that destination.
+/// Disabled by default. (The oqto sandbox egress relay is one such front end,
+/// but the listener is front-end-agnostic.)
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct TransparentConfig {
@@ -183,8 +184,9 @@ pub struct TransparentConfig {
     /// `false` = monitor (log the verdict but allow all). Set the default
     /// profile to a monitor listener for fleet-wide egress observability.
     pub enforce: bool,
-    /// UDP port for the DNS relay. The agent must resolve names before it can
-    /// connect; its DNS (DNAT'd here) is forwarded to `dns_upstream`.
+    /// UDP port for the DNS relay. A redirected client must resolve names
+    /// before it can connect; its DNS (redirected here) is forwarded to
+    /// `dns_upstream`.
     pub dns_port: u16,
     /// Upstream resolver the DNS relay forwards queries to (`ip:port`).
     pub dns_upstream: String,

@@ -1,12 +1,9 @@
-//! Transparent egress proxy for the oqto sandbox network namespace.
+//! Transparent egress proxy.
 //!
-//! oqto-sandbox `NetworkMode::Proxy` puts an agent in a network namespace whose
-//! TCP egress is captured and relayed here by a tiny in-namespace shim. The shim
-//! recovers the agent's real destination (via `SO_ORIGINAL_DST`, which works
-//! inside the namespace where the DNAT happened) and prepends a **PROXY protocol
-//! v2** header before splicing the connection to this listener.
-//!
-//! This listener:
+//! Accepts TCP connections from a transparent-redirect front end that prepends a
+//! **PROXY protocol v2** header announcing the client's original destination
+//! (which the front end recovered at the redirect point, e.g. via
+//! `SO_ORIGINAL_DST`). For each connection this listener:
 //! 1. parses the PROXY v2 header -> exact original destination IP:port,
 //! 2. peeks the first client bytes for a hostname (TLS ClientHello SNI or HTTP
 //!    `Host:` header) to drive the domain ACL,
@@ -14,8 +11,12 @@
 //!    posture (enforce = deny on failure / no hostname; monitor = log only),
 //! 4. connects to the original destination and splices bytes (passthrough).
 //!
-//! Credential injection / MITM is intentionally out of scope here (tracked as
-//! `eavs-sth0`); this is pure capture + allow/deny + observability.
+//! The front end is anything that speaks PROXY v2 over a redirected connection
+//! -- the oqto sandbox's in-namespace egress relay is one consumer, but nothing
+//! here is specific to it.
+//!
+//! Credential injection / MITM is out of scope here (tracked separately); this
+//! is pure capture + allow/deny + observability.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -61,7 +62,7 @@ pub fn spawn(transparent: TransparentConfig, network: NetworkConfig) {
     });
 }
 
-/// Forward agent DNS queries to the configured upstream resolver. A dumb UDP
+/// Forward client DNS queries to the configured upstream resolver. A dumb UDP
 /// relay -- no filtering here; egress is enforced at the TCP/SNI layer, and a
 /// resolved name is harmless without an allowed connection to follow.
 async fn run_dns(cfg: TransparentConfig) -> std::io::Result<()> {
