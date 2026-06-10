@@ -1703,7 +1703,7 @@ async fn handle_malformed_sse(req: MockRequest) -> Result<Response, Response> {
         chunks.push(format!("{}\n\n", serde_json::to_string(&obj).unwrap()));
 
         // Double newline inside data field (breaks event boundary)
-        chunks.push(format!("data: {{\"content\": \"has\n\nbro\n\nken\"}}\n\n"));
+        chunks.push("data: {\"content\": \"has\n\nbro\n\nken\"}\n\n".to_string());
 
         // Truncated JSON (unclosed brace)
         chunks.push("data: {\"id\":\"chatcmpl-mock-broken\",\"choices\":[{\"delta\":{\"content\":\"form\n\n".to_string());

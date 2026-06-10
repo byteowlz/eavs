@@ -1955,9 +1955,7 @@ pub async fn run_test_routing(
                     .map(|s| s.to_string());
 
                 let code = r.status().as_u16();
-                let (success, note) = if resolved.is_some() {
-                    (true, None)
-                } else if r.status().is_success() {
+                let (success, note) = if resolved.is_some() || r.status().is_success() {
                     (true, None)
                 } else if code == 401 || code == 403 {
                     (true, Some("routing OK (auth failed)".to_string()))
@@ -2096,9 +2094,7 @@ async fn test_routing_method(
             //   the route, just rejected credentials)
             // - 404 = routing failed (unknown path/provider)
             // - Connection error = server unreachable
-            let (success, note) = if resolved.is_some() {
-                (true, None)
-            } else if status.is_success() {
+            let (success, note) = if resolved.is_some() || status.is_success() {
                 (true, None)
             } else if code == 401 || code == 403 {
                 let detail = body_error.clone().unwrap_or_else(|| {
@@ -2170,6 +2166,9 @@ fn print_routing_result(result: &RoutingTestResult) {
 ///
 /// This creates a temporary virtual key bound to the OAuth user,
 /// sends a test request, and validates the response.
+// CLI command entrypoint mapping 1:1 to user-facing flags; grouping into a struct
+// would only obscure the argument set.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_test_oauth(
     user_id: &str,
     provider: Option<String>,

@@ -164,18 +164,6 @@ impl OAuthStore {
             .await
     }
 
-    /// Delete credentials for a specific account label.
-    pub async fn delete_credentials_for_account(
-        &self,
-        user_id: &str,
-        provider: OAuthProvider,
-        account_label: &str,
-    ) -> Result<bool, OAuthStoreError> {
-        self.backend
-            .delete_credentials(user_id, provider, account_label)
-            .await
-    }
-
     pub async fn list_providers(&self, user_id: &str) -> Result<Vec<String>, OAuthStoreError> {
         self.backend.list_providers(user_id).await
     }
@@ -480,11 +468,6 @@ impl KeychainBackend {
         }
 
         Ok(Self { _probe_ok: () })
-    }
-
-    /// Build the keychain "username" for a credential entry.
-    fn entry_key(user_id: &str, provider: OAuthProvider) -> String {
-        format!("{}/{}/default", user_id, provider.as_str())
     }
 
     fn entry_key_with_label(user_id: &str, provider: OAuthProvider, account_label: &str) -> String {

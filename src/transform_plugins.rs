@@ -85,6 +85,8 @@ pub struct TransformOutput {
 ///
 /// Returns the modified headers and body, or the original if no plugins match
 /// or all plugins fail.
+// Part of the transform-plugin API pair with run_response_transforms; kept symmetric.
+#[allow(dead_code)]
 pub async fn run_request_transforms(
     plugins: &[TransformPluginConfig],
     provider: &str,

@@ -221,7 +221,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
             // injects the api-key header itself, so we expose it here as
             // "EAVS_API_KEY" (a placeholder the consumer resolves).
             let mut headers = std::collections::HashMap::new();
-            for (k, _v) in &config.headers {
+            for k in config.headers.keys() {
                 // Don't leak actual header values — the eavs proxy handles
                 // header injection. But signal to the consumer which headers
                 // are required so it can set up the models.json correctly.

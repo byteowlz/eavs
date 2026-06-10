@@ -41,24 +41,6 @@ fn default_enabled() -> bool {
     true
 }
 
-/// Add model to provider shortlist request.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AddModelRequest {
-    /// Provider name
-    pub provider: String,
-    /// Model entry to add
-    pub model: ModelShortlistEntry,
-}
-
-/// Remove model from provider shortlist request.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RemoveModelRequest {
-    /// Provider name
-    pub provider: String,
-    /// Model ID to remove
-    pub model_id: String,
-}
-
 /// Errors from the provider store.
 #[derive(Debug)]
 pub enum ProviderStoreError {
@@ -66,7 +48,6 @@ pub enum ProviderStoreError {
     Serialization(String),
     Io(String),
     NotFound,
-    Conflict(String),
 }
 
 impl std::fmt::Display for ProviderStoreError {
@@ -76,7 +57,6 @@ impl std::fmt::Display for ProviderStoreError {
             Self::Serialization(e) => write!(f, "Serialization error: {}", e),
             Self::Io(e) => write!(f, "IO error: {}", e),
             Self::NotFound => write!(f, "Provider not found"),
-            Self::Conflict(e) => write!(f, "Conflict: {}", e),
         }
     }
 }
@@ -401,6 +381,8 @@ struct ProviderRow {
 }
 
 impl ProviderRow {
+    // Consumes self to move owned row fields into the entry without cloning.
+    #[allow(clippy::wrong_self_convention)]
     fn to_entry(self) -> Result<ProviderEntry, ProviderStoreError> {
         let config: serde_json::Value = serde_json::from_str(&self.config)
             .map_err(|e| ProviderStoreError::Serialization(e.to_string()))?;
@@ -430,6 +412,8 @@ struct ModelRow {
 }
 
 impl ModelRow {
+    // Consumes self to move the owned row field into deserialization without cloning.
+    #[allow(clippy::wrong_self_convention)]
     fn to_model(self) -> Result<ModelShortlistEntry, ProviderStoreError> {
         serde_json::from_str(&self.model_data)
             .map_err(|e| ProviderStoreError::Serialization(e.to_string()))

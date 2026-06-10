@@ -244,7 +244,7 @@ fn format_toml_value(value: &toml::Value) -> String {
         toml::Value::Float(f) => f.to_string(),
         toml::Value::Boolean(b) => b.to_string(),
         toml::Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(|v| format_toml_value(v)).collect();
+            let items: Vec<String> = arr.iter().map(format_toml_value).collect();
             format!("[{}]", items.join(", "))
         }
         toml::Value::Table(t) => {

@@ -173,19 +173,6 @@ impl ModelCatalog {
         }
     }
 
-    /// Load only from cache (no network). Returns empty if no cache.
-    pub fn load_cached_only() -> Self {
-        let cache_path = cache_file_path();
-        let providers = try_load_cache_any_age(&cache_path).unwrap_or_default();
-        if !providers.is_empty() {
-            debug!(
-                "Loaded model catalog from cache ({} providers)",
-                providers.len()
-            );
-        }
-        Self { providers }
-    }
-
     /// Force fetch and update cache.
     pub async fn refresh() -> Result<Self> {
         let providers = fetch_catalog().await?;
