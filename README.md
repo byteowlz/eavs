@@ -320,11 +320,11 @@ Precedence: deny list > private IP check > allow list. Empty lists impose no res
 
 A general transparent egress proxy for front ends that redirect a client's TCP
 traffic and announce the original destination with a **PROXY protocol v2**
-header (for example, the oqto sandbox's in-namespace egress relay -- but the
-listener is front-end agnostic). eavs reads the original destination from the
-header, derives the hostname from the TLS ClientHello SNI or HTTP `Host` header,
-enforces the `[network]` domain ACL, and splices the connection to the real
-destination. A companion DNS relay answers the client's lookups.
+header. The listener is front-end agnostic -- any redirector that speaks PROXY
+v2 works. eavs reads the original destination from the header, derives the
+hostname from the TLS ClientHello SNI or HTTP `Host` header, enforces the
+`[network]` domain ACL, and splices the connection to the real destination. A
+companion DNS relay answers the client's lookups.
 
 This is distinct from **Transparent Traffic Capture** (below): that uses
 mitmproxy to intercept *LLM API* calls; this captures *arbitrary* TCP egress and
