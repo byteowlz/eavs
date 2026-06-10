@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-10
+
+### Added
+- **Egress Firewall** (`[egress]`): a transparent egress proxy for front ends
+  that redirect TCP traffic and announce the original destination via a PROXY
+  protocol v2 header. Recovers the destination, derives the hostname from TLS
+  SNI / HTTP Host, enforces the `[network]` domain ACL (enforce or monitor
+  posture), and splices. Includes a DNS relay. Front-end agnostic; disabled by
+  default.
+
+### Changed
+- **Logging is now content-safe by default.** Request/response bodies (prompts,
+  `messages`, model output) are no longer logged unless `logging.log_bodies =
+  true`. Previously JSON/file backends serialized full conversation content.
+  Redaction happens before any sink, so no backend sees content when disabled.
+
 ## [0.5.10] - 2026-02-19
 
 ### Added
