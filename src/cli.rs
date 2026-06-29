@@ -3114,19 +3114,7 @@ pub async fn ensure_server_running(
 // =============================================================================
 
 fn xdg_state_dir() -> PathBuf {
-    if let Ok(val) = std::env::var("XDG_STATE_HOME") {
-        if !val.trim().is_empty() {
-            return PathBuf::from(val);
-        }
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.trim().is_empty() {
-            return PathBuf::from(home).join(".local/state");
-        }
-    }
-
-    PathBuf::from("/tmp")
+    crate::paths::state_dir().unwrap_or_else(|_| std::env::temp_dir())
 }
 
 /// Get the PID file path for a given port
@@ -4310,14 +4298,8 @@ fn collect_keychain_ref(
 // a simple JSON list alongside the keychain entries.
 
 fn secret_registry_path() -> std::path::PathBuf {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{}/.local/share", home)
-        });
-    std::path::PathBuf::from(data_dir).join("eavs/secret-accounts.json")
+    let data_dir = crate::paths::data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    data_dir.join("eavs").join("secret-accounts.json")
 }
 
 fn load_secret_account_registry() -> Vec<String> {

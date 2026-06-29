@@ -27,16 +27,6 @@ pub fn save_runtime_state(state: &RuntimeState) -> Result<(), String> {
 }
 
 pub fn runtime_state_path() -> Option<PathBuf> {
-    let state_home = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(|home| PathBuf::from(home).join(".local/state"))
-        })?;
-
+    let state_home = crate::paths::state_dir().ok()?;
     Some(state_home.join("eavs").join("state.toml"))
 }

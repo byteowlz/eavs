@@ -14,6 +14,7 @@ mod model_defaults;
 mod model_discovery;
 mod network_acl;
 mod oauth;
+mod paths;
 mod plugins;
 mod policy;
 mod provider;

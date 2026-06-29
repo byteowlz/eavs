@@ -39,12 +39,7 @@ pub fn adapters_dir() -> Result<PathBuf> {
     }
 
     // 3. XDG data dir
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".local/share")
-        });
+    let data_home = crate::paths::data_dir().unwrap_or_else(|_| PathBuf::from("."));
     let xdg_adapters = data_home.join("eavs/adapters");
     if xdg_adapters.is_dir() {
         return Ok(xdg_adapters);
