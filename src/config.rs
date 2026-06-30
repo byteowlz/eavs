@@ -1090,13 +1090,7 @@ impl KeysConfig {
     /// Get the XDG data directory path for word lists.
     #[allow(dead_code)]
     fn get_xdg_data_path() -> PathBuf {
-        let data_home = env_var_nonempty("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-            })
-            .unwrap_or_else(|| PathBuf::from("."));
-
+        let data_home = crate::paths::data_dir().unwrap_or_else(|_| PathBuf::from("."));
         data_home.join("eavs").join("word_lists.toml")
     }
 }
@@ -1186,10 +1180,7 @@ impl AppConfig {
     }
 
     fn get_xdg_config_path() -> Option<PathBuf> {
-        let config_home = env_var_nonempty("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env_var_nonempty("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-
+        let config_home = crate::paths::config_dir().ok()?;
         Some(config_home.join("eavs").join("config.toml"))
     }
 
