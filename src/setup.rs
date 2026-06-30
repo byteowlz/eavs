@@ -1656,16 +1656,8 @@ fn resolve_config_path(config_path: Option<&str>) -> Result<PathBuf, CliError> {
         return Ok(PathBuf::from(path));
     }
 
-    let config_home = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".config"))
-        })
-        .ok_or_else(|| CliError::Other("Cannot determine config directory".to_string()))?;
+    let config_home = crate::paths::config_dir()
+        .map_err(|_| CliError::Other("Cannot determine config directory".to_string()))?;
 
     Ok(config_home.join("eavs").join("config.toml"))
 }

@@ -140,37 +140,51 @@ fn npm_to_eavs_type(npm: &str) -> Option<&'static str> {
 /// 4. `$XDG_DATA_HOME/eavs/provider-templates.toml` (cargo install / just install)
 /// 5. Compiled-in fallback
 fn external_template_paths() -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
     let mut paths = Vec::new();
 
-    // User override
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("{}/.config", home));
-    paths.push(PathBuf::from(config_dir).join("eavs/provider-templates.toml"));
-
-    // System (AUR, dpkg, etc.)
-    paths.push(PathBuf::from("/usr/share/eavs/provider-templates.toml"));
-
-    // Homebrew
-    if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
-        paths.push(PathBuf::from(prefix).join("share/eavs/provider-templates.toml"));
+    // User override (config dir).
+    if let Ok(config_dir) = crate::paths::config_dir() {
+        paths.push(config_dir.join("eavs").join("provider-templates.toml"));
     }
-    // Common Homebrew locations
-    paths.push(PathBuf::from(
-        "/opt/homebrew/share/eavs/provider-templates.toml",
-    ));
-    paths.push(PathBuf::from(
-        "/usr/local/share/eavs/provider-templates.toml",
-    ));
 
-    // XDG data (cargo install / just install)
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("{}/.local/share", home));
-    paths.push(PathBuf::from(data_dir).join("eavs/provider-templates.toml"));
+    // Install-location discovery: alongside the executable's own dir first.
+    // This is portable (works on any OS, incl. relocatable / portable installs).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            // e.g. <prefix>/bin/eavs -> <prefix>/share/eavs/...
+            if let Some(prefix) = exe_dir.parent() {
+                paths.push(
+                    prefix
+                        .join("share")
+                        .join("eavs")
+                        .join("provider-templates.toml"),
+                );
+            }
+            // Also check right next to the binary (portable layout).
+            paths.push(exe_dir.join("provider-templates.toml"));
+        }
+    }
+
+    // Unix system install prefixes (AUR, dpkg, Homebrew, etc.).
+    #[cfg(unix)]
+    {
+        paths.push(PathBuf::from("/usr/share/eavs/provider-templates.toml"));
+
+        if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
+            paths.push(PathBuf::from(prefix).join("share/eavs/provider-templates.toml"));
+        }
+        paths.push(PathBuf::from(
+            "/opt/homebrew/share/eavs/provider-templates.toml",
+        ));
+        paths.push(PathBuf::from(
+            "/usr/local/share/eavs/provider-templates.toml",
+        ));
+    }
+
+    // XDG data dir (cargo install / just install).
+    if let Ok(data_dir) = crate::paths::data_dir() {
+        paths.push(data_dir.join("eavs").join("provider-templates.toml"));
+    }
 
     paths
 }

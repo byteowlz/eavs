@@ -277,14 +277,7 @@ pub fn eavs_to_catalog_id<'a>(eavs_name: &'a str, eavs_type: &str) -> &'a str {
 // --- Cache helpers ---
 
 fn cache_file_path() -> PathBuf {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            PathBuf::from(home).join(".local/share")
-        });
+    let data_dir = crate::paths::data_dir().unwrap_or_else(|_| std::env::temp_dir());
     data_dir.join("eavs").join("models_catalog.json")
 }
 
