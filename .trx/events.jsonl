@@ -27,3 +27,14 @@
 {"id":"evt_db8n1vqd","issue_id":"eavs-j7sm","action":"created","timestamp":"2026-06-10T12:35:38.811807601Z"}
 {"id":"evt_c2vvebv4","issue_id":"eavs-j7sm","action":"updated","timestamp":"2026-06-10T12:35:42.426110469Z","changes":[{"field":"status","from":"open","to":"in_progress"}]}
 {"id":"evt_0d6r3bdh","issue_id":"eavs-j7sm","action":"closed","timestamp":"2026-06-10T12:40:21.163229185Z","note":"Resolved all 24 remaining clippy warnings under -D warnings; build + 348 tests green; fmt clean. Removed provably-dead code; #[allow] only for tested/API/config-surface items."}
+{"id":"evt_4x0dn58y","issue_id":"eavs-23tb","action":"created","timestamp":"2026-07-03T18:28:33.959206569Z"}
+{"id":"evt_n1f0rax7","issue_id":"eavs-23tb.1","action":"created","timestamp":"2026-07-03T18:39:54.953832282Z"}
+{"id":"evt_543abdgd","issue_id":"eavs-23tb.2","action":"created","timestamp":"2026-07-03T18:40:01.384856426Z"}
+{"id":"evt_rsx66wbx","issue_id":"eavs-23tb.3","action":"created","timestamp":"2026-07-03T18:40:15.145236422Z"}
+{"id":"evt_fampqahk","issue_id":"eavs-23tb.4","action":"created","timestamp":"2026-07-03T18:40:20.826557880Z"}
+{"id":"evt_1e717wey","issue_id":"eavs-23tb.5","action":"created","timestamp":"2026-07-03T18:40:36.987921278Z"}
+{"id":"evt_rrb2e7vw","issue_id":"eavs-23tb.6","action":"created","timestamp":"2026-07-03T18:40:43.095926984Z"}
+{"id":"evt_7hb3m5zy","issue_id":"eavs-23tb.7","action":"created","timestamp":"2026-07-03T18:40:46.776471017Z"}
+{"id":"evt_k893t8t6","issue_id":"eavs-23tb.8","action":"created","timestamp":"2026-07-03T18:40:49.657753764Z"}
+{"id":"evt_y0a55kh3","issue_id":"eavs-23tb.6","action":"dep_added","timestamp":"2026-07-03T18:41:05.044176635Z","note":"eavs-23tb.1"}
+{"id":"evt_s2hqawwj","issue_id":"eavs-gh49","action":"dep_added","timestamp":"2026-07-03T18:41:09.902453684Z","note":"eavs-23tb.4"}
