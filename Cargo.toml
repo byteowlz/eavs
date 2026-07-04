@@ -1,6 +1,6 @@
 [package]
 name = "eavs"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 
 [dependencies]
@@ -40,10 +40,16 @@ toml = "0.8" # For word lists parsing
 ureq = "2.10" # For synchronous HTTP (word lists download)
 url = "2" # For URL parsing in CLI
 libc = "0.2.178"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Linux uses the kernel keyutils backend (`linux-native`) rather than the D-Bus
+# secret-service backend: `sync-secret-service` pulls `libdbus-sys`, a target-
+# linked C lib that can't cross-compile under zig, and the D-Bus daemon isn't
+# present in headless/container deploys anyway. When no OS keyring is reachable,
+# OAuth/API-key storage falls back to sqlite (see src/oauth/storage.rs).
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 rpassword = "7"
 async-trait = "0.1"
 dialoguer = "0.11"
+zstd = "0.13.3"
 
 [features]
 integration = []
