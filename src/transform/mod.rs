@@ -129,9 +129,9 @@ impl ProviderTransformer {
                 Box::new(transformer)
             }
             ProviderType::Anthropic => Box::new(AnthropicTransformer::new()),
-            ProviderType::Google
-            | ProviderType::GoogleVertex
-            | ProviderType::GoogleGeminiCli => Box::new(GoogleTransformer::new()),
+            ProviderType::Google | ProviderType::GoogleVertex => {
+                Box::new(GoogleTransformer::new())
+            }
             ProviderType::Azure => Box::new(AzureTransformer::new()),
             ProviderType::Mistral => Box::new(MistralTransformer::new()),
             ProviderType::Bedrock => Box::new(BedrockTransformer::new()),

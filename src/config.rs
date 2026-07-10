@@ -470,6 +470,8 @@ pub struct ModelCost {
     pub output: f64,
     #[serde(default)]
     pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
 }
 
 impl Default for ProviderConfig {
@@ -1122,6 +1124,19 @@ impl AppConfig {
         // Merge legacy "upstream" into "providers" for backward compatibility
         if config.providers.is_empty() && !config.upstream.is_empty() {
             config.providers = config.upstream.clone();
+        }
+
+        // Warn about unrecognized provider types instead of silently treating
+        // them as OpenAI (which mis-advertises the API, e.g. to pi via pi_api).
+        for (name, provider) in &config.providers {
+            if crate::provider::ProviderType::try_from_str(&provider.type_).is_none() {
+                tracing::warn!(
+                    provider = %name,
+                    r#type = %provider.type_,
+                    "Unrecognized provider type; falling back to 'openai'. \
+                     Did you mean 'openai-compatible'?"
+                );
+            }
         }
 
         // Ensure we have at least a default provider

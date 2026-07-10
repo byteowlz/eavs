@@ -7,7 +7,7 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 ## Features
 
 - **Multi-Provider Support**: OpenAI, Anthropic, Google, Mistral, Groq, Cerebras, xAI, OpenRouter, Microsoft Foundry, Azure, AWS Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio)
-- **OAuth Authentication**: Anthropic, OpenAI Codex, Google Gemini CLI, GitHub Copilot -- with multi-account support per provider
+- **OAuth Authentication**: Anthropic, OpenAI Codex, GitHub Copilot -- with multi-account support per provider
 - **WebSocket Proxy**: OpenAI Realtime API and Codex Responses WebSocket transport
 - **Policy Engine**: Request/response rewriting rules (e.g., force `store: true` for Codex models)
 - **Network Access Control**: Domain allow/deny lists with private IP blocking (SSRF prevention)
@@ -136,7 +136,6 @@ Supported providers:
 - `anthropic` - Anthropic Claude
 - `google` - Google Gemini
 - `google-vertex` - Google Vertex AI (ADC or API key, requires `gcp_project` + `gcp_location`)
-- `google-gemini-cli` - Google Cloud Code Assist / Gemini CLI (OAuth, free tier)
 - `github-copilot` - GitHub Copilot (device code OAuth, auto token exchange + dynamic base URL)
 - `mistral` - Mistral AI
 - `groq` - Groq (fast inference)
@@ -271,7 +270,6 @@ eavs login
 # Login to a specific provider
 eavs login anthropic
 eavs login openai        # OpenAI Codex (ChatGPT Pro)
-eavs login google         # Google Gemini CLI
 eavs login github-copilot # GitHub Copilot
 
 # Login with a specific account label (multi-account)

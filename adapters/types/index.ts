@@ -12,6 +12,7 @@ export interface ModelCost {
   input: number;
   output: number;
   cache_read: number;
+  cache_write?: number;
 }
 
 /** A model entry from the eavs catalog or config shortlist */
@@ -23,6 +24,16 @@ export interface EavsModel {
   context_window: number;
   max_tokens: number;
   cost: ModelCost;
+  /** Per-model compat flags, already in the target harness's schema */
+  compat?: Record<string, unknown>;
+}
+
+/** Provider-level compat flags from eavs config / URL detection */
+export interface EavsCompat {
+  supports_store?: boolean;
+  supports_developer_role?: boolean;
+  max_tokens_field?: string;
+  supports_stream_options?: boolean;
 }
 
 /** A configured provider from eavs */
@@ -37,6 +48,8 @@ export interface EavsProvider {
   oauth: boolean;
   /** Whether the provider has a resolved API key */
   has_api_key: boolean;
+  /** Provider-level compat flags (explicit config + URL-detected defaults) */
+  compat?: EavsCompat;
   /** Model list: config shortlist if set, otherwise full catalog */
   models: EavsModel[];
 }

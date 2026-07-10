@@ -48,7 +48,7 @@ pub async fn discover_provider_models(
 
         ProviderType::Anthropic => Err("Anthropic does not expose a models endpoint".to_string()),
 
-        ProviderType::Google | ProviderType::GoogleVertex | ProviderType::GoogleGeminiCli => {
+        ProviderType::Google | ProviderType::GoogleVertex => {
             discover_gemini(&base_url, &api_key).await
         }
 

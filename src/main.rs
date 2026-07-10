@@ -579,20 +579,20 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                     Vec::new()
                 };
 
+                let mut headers = std::collections::HashMap::new();
+                for k in provider_config.headers.keys() {
+                    headers.insert(k.clone(), "EAVS_API_KEY".to_string());
+                }
+
                 details.push(ProviderDetail {
                     name: name.clone(),
                     type_: provider_config.type_.clone(),
                     pi_api: pi_api_for_provider(&provider_type),
-                    oauth: matches!(
-                        provider_type,
-                        ProviderType::Anthropic
-                            | ProviderType::OpenAI
-                            | ProviderType::Google
-                            | ProviderType::GithubCopilot
-                    ),
+                    oauth: api::provider_uses_oauth(&provider_type),
                     has_api_key,
-                    headers: std::collections::HashMap::new(),
+                    headers,
                     api_version: provider_config.api_version.clone(),
+                    compat: api::provider_compat_json(provider_config),
                     models,
                 });
             }
@@ -846,12 +846,17 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             "/:provider/v1/realtime",
             get(proxy::provider_ws_proxy_handler),
         )
-        // Codex Responses WebSocket proxy - default route
-        .route("/v1/codex/responses", get(proxy::codex_ws_handler))
-        // Provider-prefixed Codex Responses WebSocket proxy
+        // Codex Responses proxy - default route
+        // GET is the WebSocket upgrade, POST the SSE transport (pi falls back
+        // to SSE when the WebSocket is unavailable or connection-limited)
+        .route(
+            "/v1/codex/responses",
+            get(proxy::codex_ws_handler).post(proxy::proxy_handler),
+        )
+        // Provider-prefixed Codex Responses proxy
         .route(
             "/:provider/v1/codex/responses",
-            get(proxy::provider_codex_ws_handler),
+            get(proxy::provider_codex_ws_handler).post(proxy::provider_codex_sse_handler),
         )
         // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
         // This allows explicit provider selection via URL path

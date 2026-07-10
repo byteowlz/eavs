@@ -1278,9 +1278,7 @@ fn suggest_test_model_default(provider_type: ProviderType) -> String {
     match provider_type {
         ProviderType::OpenAI | ProviderType::OpenAIResponses => "gpt-4o-mini".to_string(),
         ProviderType::Anthropic => "claude-sonnet-4-20250514".to_string(),
-        ProviderType::Google | ProviderType::GoogleVertex | ProviderType::GoogleGeminiCli => {
-            "gemini-2.0-flash".to_string()
-        }
+        ProviderType::Google | ProviderType::GoogleVertex => "gemini-2.0-flash".to_string(),
         ProviderType::Mistral => "mistral-small-latest".to_string(),
         ProviderType::Groq => "llama-3.3-70b-versatile".to_string(),
         ProviderType::Cerebras => "llama-3.3-70b".to_string(),
