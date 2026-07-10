@@ -2230,9 +2230,6 @@ pub async fn run_test_oauth(
     let model = model.unwrap_or_else(|| match oauth_provider {
         OAuthProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
         OAuthProvider::OpenAICodex => "gpt-4o".to_string(),
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
-            "gemini-1.5-flash".to_string()
-        }
         OAuthProvider::GithubCopilot => "gpt-4o".to_string(),
     });
 
@@ -2240,7 +2237,6 @@ pub async fn run_test_oauth(
     let eavs_provider = match oauth_provider {
         OAuthProvider::Anthropic => "anthropic",
         OAuthProvider::OpenAICodex => "openai",
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => "google",
         OAuthProvider::GithubCopilot => "openai", // GitHub Copilot uses OpenAI-compatible API
     };
 
@@ -3549,8 +3545,8 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
 // =============================================================================
 
 use crate::oauth::{
-    anthropic, github_copilot, google, openai_codex, pkce, OAuthBackend, OAuthCredentials,
-    OAuthProvider, OAuthStore,
+    anthropic, github_copilot, openai_codex, pkce, OAuthBackend, OAuthCredentials, OAuthProvider,
+    OAuthStore,
 };
 
 /// Resolve the OAuth backend from config.
@@ -3562,7 +3558,6 @@ fn resolve_oauth_backend(config: &crate::config::AppConfig) -> OAuthBackend {
 const OAUTH_PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic (Claude)"),
     ("openai", "OpenAI (ChatGPT/Codex)"),
-    ("google", "Google (Gemini CLI)"),
     ("github-copilot", "GitHub Copilot"),
 ];
 
@@ -3668,9 +3663,6 @@ pub async fn run_login(
         }
         OAuthProvider::OpenAICodex => {
             run_pkce_flow_openai(&client, &user_id, callback_port).await?
-        }
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
-            run_pkce_flow_google(&client, &user_id, callback_port, provider).await?
         }
     };
 
@@ -3855,44 +3847,6 @@ async fn run_pkce_flow_openai(
     println!("Authorization code received, exchanging for tokens...");
 
     let credentials = openai_codex::exchange_code(client, &config, user_id, &code, &code_verifier)
-        .await
-        .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
-
-    Ok(credentials)
-}
-
-/// Run Google PKCE flow with local callback server
-async fn run_pkce_flow_google(
-    client: &reqwest::Client,
-    user_id: &str,
-    callback_port: u16,
-    provider: OAuthProvider,
-) -> Result<OAuthCredentials, CliError> {
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
-    let config = google::config_from_env(provider, redirect_uri.clone())
-        .map_err(|e| CliError::Other(format!("Google config error: {}", e)))?;
-
-    let (code_verifier, _) = pkce::generate_pkce_pair();
-    let state = uuid::Uuid::new_v4().to_string();
-
-    let auth_url = google::build_authorize_url(&config, &state, &code_verifier)
-        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
-
-    println!();
-    println!("Opening browser for authentication...");
-    println!();
-    println!("If the browser doesn't open, visit:");
-    println!("{}", auth_url);
-    println!();
-
-    let _ = open_browser(&auth_url);
-
-    // Start local callback server
-    let code = wait_for_oauth_callback(callback_port).await?;
-
-    println!("Authorization code received, exchanging for tokens...");
-
-    let credentials = google::exchange_code(client, &config, user_id, &code, &code_verifier)
         .await
         .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
 

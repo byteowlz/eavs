@@ -48,7 +48,11 @@ pub fn build_authorize_url(
         .append_pair("scope", &config.scope)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state);
+        .append_pair("state", state)
+        // Extra params the Codex login flow expects (match pi/codex-cli):
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", "codex_cli_rs");
 
     Ok(url.to_string())
 }

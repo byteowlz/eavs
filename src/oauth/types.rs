@@ -33,8 +33,6 @@ pub enum OAuthProvider {
     Anthropic,
     GithubCopilot,
     OpenAICodex,
-    GoogleGeminiCli,
-    GoogleAntigravity,
 }
 
 impl OAuthProvider {
@@ -43,8 +41,6 @@ impl OAuthProvider {
             Self::Anthropic => "anthropic",
             Self::GithubCopilot => "github-copilot",
             Self::OpenAICodex => "openai-codex",
-            Self::GoogleGeminiCli => "google-gemini-cli",
-            Self::GoogleAntigravity => "google-antigravity",
         }
     }
 
@@ -53,8 +49,6 @@ impl OAuthProvider {
             "anthropic" => Some(Self::Anthropic),
             "github-copilot" | "copilot" => Some(Self::GithubCopilot),
             "openai-codex" | "openai" | "chatgpt" => Some(Self::OpenAICodex),
-            "google-gemini-cli" | "gemini-cli" | "gemini" => Some(Self::GoogleGeminiCli),
-            "google-antigravity" | "antigravity" => Some(Self::GoogleAntigravity),
             _ => None,
         }
     }

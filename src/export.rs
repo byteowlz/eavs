@@ -124,7 +124,7 @@ fn build_provider_data(providers: &[ProviderDetail]) -> Value {
                 .models
                 .iter()
                 .map(|m| {
-                    serde_json::json!({
+                    let mut model = serde_json::json!({
                         "id": m.id,
                         "name": if m.name.is_empty() { &m.id } else { &m.name },
                         "reasoning": m.reasoning,
@@ -135,19 +135,28 @@ fn build_provider_data(providers: &[ProviderDetail]) -> Value {
                             "input": m.cost.input,
                             "output": m.cost.output,
                             "cache_read": m.cost.cache_read,
+                            "cache_write": m.cost.cache_write,
                         }
-                    })
+                    });
+                    if !m.compat.is_empty() {
+                        model["compat"] = serde_json::json!(m.compat);
+                    }
+                    model
                 })
                 .collect();
 
-            serde_json::json!({
+            let mut provider = serde_json::json!({
                 "name": p.name,
                 "type": p.type_,
                 "pi_api": p.pi_api,
                 "oauth": p.oauth,
                 "has_api_key": p.has_api_key,
                 "models": models,
-            })
+            });
+            if let Some(ref compat) = p.compat {
+                provider["compat"] = compat.clone();
+            }
+            provider
         })
         .collect();
 

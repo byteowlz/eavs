@@ -414,9 +414,7 @@
             "openai-codex",
             "openai-responses",
             "github-copilot",
-            "google-vertex",
-            "google-gemini-cli",
-            "google-antigravity"
+            "google-vertex"
           ],
           "default": "openai"
         },

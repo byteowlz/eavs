@@ -73,7 +73,7 @@ pub enum AuthHint {
     /// Standard API key (Bearer or x-api-key)
     #[default]
     ApiKey,
-    /// OAuth device code flow (e.g., GitHub Copilot, Gemini CLI)
+    /// OAuth device code flow (e.g., GitHub Copilot)
     #[serde(alias = "oauth")]
     OAuth,
     /// AWS SigV4 signing

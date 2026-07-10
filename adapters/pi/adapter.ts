@@ -39,10 +39,34 @@ function piApiType(provider: EavsProvider): string | null {
     openrouter: "openai-completions",
     "openai-compatible": "openai-completions",
     "github-copilot": "openai-responses",
-    bedrock: "anthropic-messages",
+    bedrock: "openai-completions",
   };
 
   return mapping[provider.type] ?? null;
+}
+
+/**
+ * Translate eavs provider compat flags to Pi's OpenAICompletionsCompat.
+ * Pi normally auto-detects quirks from the base URL, but behind eavs it
+ * only sees the proxy URL, so quirks must be spelled out explicitly.
+ * Only meaningful for the openai-completions API.
+ */
+function piProviderCompat(
+  provider: EavsProvider
+): Record<string, unknown> | undefined {
+  const c = provider.compat;
+  if (!c) return undefined;
+
+  const out: Record<string, unknown> = {};
+  if (typeof c.supports_store === "boolean") out.supportsStore = c.supports_store;
+  if (typeof c.supports_developer_role === "boolean")
+    out.supportsDeveloperRole = c.supports_developer_role;
+  if (typeof c.max_tokens_field === "string")
+    out.maxTokensField = c.max_tokens_field;
+  if (typeof c.supports_stream_options === "boolean")
+    out.supportsUsageInStreaming = c.supports_stream_options;
+
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Build eavs provider entries in Pi format */
@@ -71,14 +95,21 @@ function buildEavsProviders(
         input: m.cost?.input ?? 0,
         output: m.cost?.output ?? 0,
         cacheRead: m.cost?.cache_read ?? 0,
-        cacheWrite: 0,
+        cacheWrite: m.cost?.cache_write ?? 0,
       },
+      ...(m.compat && Object.keys(m.compat).length > 0
+        ? { compat: m.compat }
+        : {}),
     }));
+
+    const compat =
+      api === "openai-completions" ? piProviderCompat(provider) : undefined;
 
     result[`${MANAGED_PREFIX}${provider.name}`] = {
       baseUrl: `${base}/${provider.name}/v1`,
       api,
       apiKey: apiKey,
+      ...(compat ? { compat } : {}),
       models,
     };
   }

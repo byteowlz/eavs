@@ -1,6 +1,6 @@
 use crate::keys::{CreateKeyRequest, CreateKeyResponse, KeyInfo, KeyPermissions};
 use crate::oauth::{
-    anthropic, github_copilot, google, openai_codex, pkce, OAuthLoginResponse, OAuthPendingAuth,
+    anthropic, github_copilot, openai_codex, pkce, OAuthLoginResponse, OAuthPendingAuth,
     OAuthProvider,
 };
 use crate::state::{AppState, ConversationMetadata, InjectionPayload};
@@ -185,8 +185,46 @@ pub struct ProviderDetail {
     /// API version string (Azure providers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
+    /// Provider-level compat flags (explicit config merged with URL-detected
+    /// defaults). Adapters translate these to the consumer's compat schema —
+    /// pi can't auto-detect quirks behind the proxy because the base URL it
+    /// sees is eavs, not the real upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<serde_json::Value>,
     /// Model list: config shortlist if set, otherwise full catalog from models.dev
     pub models: Vec<crate::config::ModelShortlistEntry>,
+}
+
+/// Whether a provider type authenticates via an eavs-managed OAuth flow.
+pub fn provider_uses_oauth(provider_type: &crate::provider::ProviderType) -> bool {
+    use crate::provider::ProviderType;
+    matches!(
+        provider_type,
+        ProviderType::OpenAICodex | ProviderType::GithubCopilot
+    )
+}
+
+/// Serialize a provider's resolved compat settings, omitting unset fields.
+pub fn provider_compat_json(config: &crate::config::ProviderConfig) -> Option<serde_json::Value> {
+    let compat = config.resolved_compat();
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = compat.supports_store {
+        obj.insert("supports_store".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = compat.supports_developer_role {
+        obj.insert("supports_developer_role".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = compat.max_tokens_field {
+        obj.insert("max_tokens_field".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = compat.supports_stream_options {
+        obj.insert("supports_stream_options".to_string(), serde_json::json!(v));
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
 }
 
 /// Get detailed provider information.
@@ -232,15 +270,11 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                 name: name.clone(),
                 type_: config.type_.clone(),
                 pi_api: pi_api_for_provider(&provider_type),
-                oauth: matches!(
-                    provider_type,
-                    ProviderType::OpenAICodex
-                        | ProviderType::GithubCopilot
-                        | ProviderType::GoogleGeminiCli
-                ),
+                oauth: provider_uses_oauth(&provider_type),
                 has_api_key,
                 headers,
                 api_version: config.api_version.clone(),
+                compat: provider_compat_json(config),
                 models,
             }
         })
@@ -288,19 +322,20 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
+            let compat =
+                serde_json::from_value::<crate::config::ProviderConfig>(entry.config.clone())
+                    .ok()
+                    .and_then(|c| provider_compat_json(&c));
+
             details.push(ProviderDetail {
                 name: entry.name,
                 type_: type_str.to_string(),
                 pi_api: pi_api_for_provider(&provider_type),
-                oauth: matches!(
-                    provider_type,
-                    ProviderType::OpenAICodex
-                        | ProviderType::GithubCopilot
-                        | ProviderType::GoogleGeminiCli
-                ),
+                oauth: provider_uses_oauth(&provider_type),
                 has_api_key,
                 headers,
                 api_version,
+                compat,
                 models,
             });
         }
@@ -415,9 +450,10 @@ pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Opt
         ProviderType::OpenAIResponses => Some("openai-responses"),
         ProviderType::OpenAICodex => Some("openai-codex-responses"),
         ProviderType::Anthropic => Some("anthropic-messages"),
-        ProviderType::Google | ProviderType::GoogleVertex | ProviderType::GoogleGeminiCli => {
-            Some("google-generative-ai")
-        }
+        ProviderType::Google | ProviderType::GoogleVertex => Some("google-generative-ai"),
+        // Bedrock needs eavs's OpenAI-format translation layer (SigV4 + AWS
+        // event streams), so native pi APIs can't be relayed for it.
+        ProviderType::Bedrock => Some("openai-completions"),
         ProviderType::Azure => Some("openai-responses"),
         ProviderType::Mistral
         | ProviderType::Groq
@@ -426,7 +462,6 @@ pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Opt
         | ProviderType::OpenRouter
         | ProviderType::OpenAICompatible => Some("openai-completions"),
         ProviderType::GithubCopilot => Some("openai-responses"),
-        ProviderType::Bedrock => Some("anthropic-messages"),
         ProviderType::Mock => Some("openai-completions"),
     }
 }
@@ -1328,10 +1363,7 @@ fn check_oauth_available(state: &AppState) -> Result<(), (StatusCode, Json<OAuth
 fn provider_requires_pkce(provider: OAuthProvider) -> bool {
     matches!(
         provider,
-        OAuthProvider::Anthropic
-            | OAuthProvider::OpenAICodex
-            | OAuthProvider::GoogleGeminiCli
-            | OAuthProvider::GoogleAntigravity
+        OAuthProvider::Anthropic | OAuthProvider::OpenAICodex
     )
 }
 
@@ -1467,36 +1499,6 @@ pub async fn oauth_login_handler(
                 code_verifier: None,
             }
         }
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
-            let redirect_uri = resolve_redirect_uri(payload.redirect_uri)?;
-            let config = google::config_from_env(provider, redirect_uri.clone())
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            let (code_verifier, _) = pkce::generate_pkce_pair();
-            let auth_url = google::build_authorize_url(&config, &state_id, &code_verifier)
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            state.oauth_states.insert(
-                state_id.clone(),
-                OAuthPendingAuth {
-                    user_id: payload.user_id.clone(),
-                    provider,
-                    code_verifier: Some(code_verifier),
-                    redirect_uri: Some(redirect_uri),
-                    extra_data: payload.extra_data.clone(),
-                    created_at: now,
-                },
-            );
-            OAuthLoginResponse {
-                auth_url: Some(auth_url),
-                instructions: "Complete the login in your browser and return the code.".to_string(),
-                verification_uri: None,
-                user_code: None,
-                device_code: None,
-                interval: None,
-                expires_in: None,
-                state: Some(state_id),
-                code_verifier: None,
-            }
-        }
     };
 
     Ok(Json(response))
@@ -1562,23 +1564,6 @@ pub async fn oauth_callback_handler(
             let config = openai_codex::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
             openai_codex::exchange_code(
-                &client,
-                &config,
-                &pending.user_id,
-                &payload.code,
-                &code_verifier,
-            )
-            .await
-            .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
-        }
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
-            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
-            let code_verifier = pending
-                .code_verifier
-                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
-            let config = google::config_from_env(pending.provider, redirect_uri)
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            google::exchange_code(
                 &client,
                 &config,
                 &pending.user_id,
@@ -1673,16 +1658,6 @@ pub async fn oauth_code_handler(
             let config = openai_codex::config_from_env(redirect_uri)
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
             openai_codex::exchange_code(&client, &config, &user_id, &code, &verifier)
-                .await
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
-        }
-        OAuthProvider::GoogleGeminiCli | OAuthProvider::GoogleAntigravity => {
-            let redirect_uri = resolve_redirect_uri(redirect_uri)?;
-            let verifier = code_verifier
-                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Missing PKCE verifier"))?;
-            let config = google::config_from_env(provider, redirect_uri)
-                .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
-            google::exchange_code(&client, &config, &user_id, &code, &verifier)
                 .await
                 .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
         }
@@ -1883,6 +1858,7 @@ pub async fn catalog_lookup_handler(
                         input: model.cost.input,
                         output: model.cost.output,
                         cache_read: model.cost.cache_read,
+                        cache_write: model.cost.cache_write,
                     },
                 });
             }

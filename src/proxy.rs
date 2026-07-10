@@ -1,8 +1,8 @@
 use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::oauth::{
-    anthropic as oauth_anthropic, google as oauth_google, openai_codex as oauth_openai,
-    OAuthCredentials, OAuthProvider as OAuthProviderKind,
+    anthropic as oauth_anthropic, openai_codex as oauth_openai, OAuthCredentials,
+    OAuthProvider as OAuthProviderKind,
 };
 use crate::provider::{
     detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType,
@@ -75,6 +75,17 @@ impl ProxyError {
 pub async fn provider_proxy_handler(
     State(state): State<AppState>,
     Path((provider, _path)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Response, Response> {
+    proxy_handler_inner(state, req, Some(provider)).await
+}
+
+/// Handler for POST /:provider/v1/codex/responses (Codex SSE transport).
+/// The GET method on the same path is the WebSocket upgrade; pi falls back
+/// to SSE POSTs when the WebSocket transport is unavailable or rate-limited.
+pub async fn provider_codex_sse_handler(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     proxy_handler_inner(state, req, Some(provider)).await
@@ -189,6 +200,32 @@ async fn proxy_handler_inner(
                     .into_response()
             }
         })?;
+
+    // pi's Codex SSE transport sends zstd-compressed request bodies
+    // (content-encoding: zstd); decompress before parsing/forwarding.
+    let bytes = if parts
+        .headers
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().eq_ignore_ascii_case("zstd"))
+        .unwrap_or(false)
+    {
+        match zstd::stream::decode_all(bytes.as_ref()) {
+            Ok(decoded) => Bytes::from(decoded),
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ProxyError::new(
+                        format!("Failed to decompress zstd request body: {}", e),
+                        "invalid_request",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        bytes
+    };
 
     let mut json_body: Value = if !bytes.is_empty() {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
@@ -532,21 +569,44 @@ async fn proxy_handler_inner(
         return Ok(response);
     }
 
+    // Native-format client requests: the client already speaks the upstream's
+    // wire format (e.g. pi configured with api=anthropic-messages or
+    // api=google-generative-ai), so relay instead of translating from OpenAI
+    // chat-completions format. The advertised base URL is {eavs}/{provider}/v1
+    // and vendor SDKs append their own path, so Anthropic Messages arrives as
+    // /v1/v1/messages and Google as /v1/models/{model}:streamGenerateContent.
+    let is_anthropic_native_request = provider_type == ProviderType::Anthropic
+        && matches!(api_path, "/messages" | "/v1/messages" | "/v1/v1/messages");
+    let is_google_native_request =
+        matches!(
+            provider_type,
+            ProviderType::Google | ProviderType::GoogleVertex
+        ) && [":generateContent", ":streamGenerateContent", ":countTokens"]
+            .iter()
+            .any(|action| api_path.contains(action));
+    let is_native_format_request = is_anthropic_native_request || is_google_native_request;
+
     // Check if this is a pass-through endpoint that doesn't need transformation
     // (e.g., /v1/models, /v1/embeddings for providers that support them natively)
-    let is_passthrough_endpoint = api_path == "/v1/models"
-        || api_path.starts_with("/v1/models/")
-        || api_path == "/v1/embeddings";
+    let is_passthrough_endpoint = !is_native_format_request
+        && (api_path == "/v1/models"
+            || api_path.starts_with("/v1/models/")
+            || api_path == "/v1/embeddings");
 
     // Check if client is sending Responses API format directly
     // This allows clients to use the Responses API natively with EAVS just handling OAuth
-    let is_responses_api_request =
-        api_path == "/v1/responses" || api_path == "/responses" || api_path == "/codex/responses";
+    let is_responses_api_request = api_path == "/v1/responses"
+        || api_path == "/responses"
+        || api_path == "/codex/responses"
+        || api_path == "/v1/codex/responses";
 
     // Check if we need format translation
-    // Skip transformation for pass-through endpoints and native Responses API requests
-    let needs_transform =
-        provider_type.needs_transform() && !is_passthrough_endpoint && !is_responses_api_request;
+    // Skip transformation for pass-through endpoints, native Responses API
+    // requests, and native-format requests
+    let needs_transform = provider_type.needs_transform()
+        && !is_passthrough_endpoint
+        && !is_responses_api_request
+        && !is_native_format_request;
 
     // Resolve compat settings for OpenAI-compatible providers
     let resolved_compat = provider_config.resolved_compat();
@@ -609,7 +669,6 @@ async fn proxy_handler_inner(
             ProviderType::Anthropic
                 | ProviderType::Google
                 | ProviderType::GoogleVertex
-                | ProviderType::GoogleGeminiCli
                 | ProviderType::Bedrock
         ) {
             resolve_image_urls_in_context(state.upstream.as_ref(), &mut context)
@@ -681,7 +740,26 @@ async fn proxy_handler_inner(
                 })?;
         }
 
-        let model = json_body["model"].as_str().unwrap_or("unknown").to_string();
+        // Native Anthropic Messages requests with OAuth tokens need the same
+        // Claude Code identity/tool adjustments the transform path applies.
+        if is_anthropic_native_request && is_anthropic_oauth {
+            inject_claude_code_identity_into_anthropic_body(&mut json_body);
+            prefix_anthropic_oauth_tools(&mut json_body);
+            apply_anthropic_oauth_body_transforms(&mut json_body);
+        }
+
+        // Native Google requests carry the model in the URL, not the body.
+        let model = json_body["model"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                if is_google_native_request {
+                    google_model_from_path(api_path)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let body = serde_json::to_vec(&json_body).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -771,6 +849,19 @@ async fn proxy_handler_inner(
         let request_path = if let Some(ref provider) = path_provider {
             let prefix = format!("/{}", provider);
             request_path.strip_prefix(&prefix).unwrap_or(request_path)
+        } else {
+            request_path
+        };
+
+        // Canonicalize native-format paths: drop the /v1 routing artifact that
+        // comes from advertising {eavs}/{provider}/v1 as the client base URL.
+        let request_path = if is_anthropic_native_request {
+            "/v1/messages"
+        } else if is_google_native_request {
+            request_path.strip_prefix("/v1").unwrap_or(request_path)
+        } else if request_path == "/v1/codex/responses" {
+            // Codex SSE upstream is {base}/codex/responses on chatgpt.com/backend-api
+            "/codex/responses"
         } else {
             request_path
         };
@@ -877,6 +968,28 @@ async fn proxy_handler_inner(
             http::header::HeaderName::from_static("anthropic-beta"),
             betas,
         );
+    }
+
+    // Native Anthropic clients (e.g. pi) select beta features via the
+    // anthropic-beta header (fine-grained tool streaming, interleaved
+    // thinking, ...) that can't all be derived from the body — forward them.
+    if is_anthropic_native_request {
+        if let Some(client_betas) = parts
+            .headers
+            .get("anthropic-beta")
+            .and_then(|h| h.to_str().ok())
+        {
+            let tokens: Vec<String> = client_betas
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            upsert_csv_header(
+                &mut upstream_headers,
+                http::header::HeaderName::from_static("anthropic-beta"),
+                tokens,
+            );
+        }
     }
 
     if provider_type == ProviderType::Anthropic
@@ -1396,9 +1509,16 @@ async fn proxy_handler_inner(
             Ok(chunk) => {
                 let text = String::from_utf8_lossy(&chunk).to_string();
 
-                // Try to extract usage from OpenAI-format streaming responses
+                // Try to extract usage from streaming responses in the
+                // format this passthrough actually relays
                 if let Some(tracker) = &tracker_clone {
-                    extract_openai_usage(&text, tracker);
+                    if is_anthropic_native_request {
+                        extract_anthropic_usage(&text, tracker);
+                    } else if is_google_native_request {
+                        extract_google_usage(&text, tracker);
+                    } else {
+                        extract_openai_usage(&text, tracker);
+                    }
                 }
 
                 let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
@@ -1443,6 +1563,104 @@ struct UsageTracker {
 }
 
 // Mock provider handler is in src/mock_provider.rs
+
+/// Extract usage from native Anthropic Messages responses (SSE or plain JSON).
+/// Streaming: `message_start` carries input/cache tokens, `message_delta` the
+/// final output tokens. Non-streaming: top-level `usage` object.
+fn extract_anthropic_usage(chunk: &str, tracker: &UsageTracker) {
+    let store = |usage: &Value| {
+        if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+            tracker
+                .input_tokens
+                .store(input as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+            tracker
+                .output_tokens
+                .store(output as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(cached) = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            tracker
+                .cached_tokens
+                .store(cached as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+
+    let mut saw_sse = false;
+    for line in chunk.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            saw_sse = true;
+            if let Ok(json) = serde_json::from_str::<Value>(data) {
+                if let Some(usage) = json.pointer("/message/usage") {
+                    store(usage);
+                }
+                if let Some(usage) = json.get("usage") {
+                    store(usage);
+                }
+            }
+        }
+    }
+
+    if !saw_sse {
+        if let Ok(json) = serde_json::from_str::<Value>(chunk) {
+            if let Some(usage) = json.get("usage") {
+                store(usage);
+            }
+        }
+    }
+}
+
+/// Extract usage from native Google generateContent responses (SSE or JSON).
+fn extract_google_usage(chunk: &str, tracker: &UsageTracker) {
+    let store = |meta: &Value| {
+        if let Some(input) = meta.get("promptTokenCount").and_then(|v| v.as_u64()) {
+            tracker
+                .input_tokens
+                .store(input as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        let output = meta
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            + meta
+                .get("thoughtsTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        if output > 0 {
+            tracker
+                .output_tokens
+                .store(output as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(cached) = meta.get("cachedContentTokenCount").and_then(|v| v.as_u64()) {
+            tracker
+                .cached_tokens
+                .store(cached as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+
+    let mut saw_sse = false;
+    for line in chunk.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            saw_sse = true;
+            if let Ok(json) = serde_json::from_str::<Value>(data) {
+                if let Some(meta) = json.get("usageMetadata") {
+                    store(meta);
+                }
+            }
+        }
+    }
+
+    if !saw_sse {
+        if let Ok(json) = serde_json::from_str::<Value>(chunk) {
+            if let Some(meta) = json.get("usageMetadata") {
+                store(meta);
+            }
+        }
+    }
+}
 
 /// Extract usage from OpenAI-format streaming chunks.
 fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
@@ -2614,15 +2832,22 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
         Err(_) => return None,
     };
 
-    // Look for account ID in the standard OpenAI claim path
+    // Look for the account ID in the standard OpenAI claim path. The Codex
+    // backend keys on chatgpt_account_id (sent as the chatgpt-account-id
+    // header); org_id is the platform org and only a last resort.
     json.get("https://api.openai.com/auth")
-        .and_then(|auth| auth.get("org_id").or_else(|| auth.get("account_id")))
+        .and_then(|auth| {
+            auth.get("chatgpt_account_id")
+                .or_else(|| auth.get("account_id"))
+                .or_else(|| auth.get("org_id"))
+        })
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| {
-            // Fallback: try direct org_id or account_id
-            json.get("org_id")
+            // Fallback: try direct claims
+            json.get("chatgpt_account_id")
                 .or_else(|| json.get("account_id"))
+                .or_else(|| json.get("org_id"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
         })
@@ -2639,6 +2864,42 @@ fn inject_claude_code_identity_into_context(context: &mut crate::types::Context)
         None => CLAUDE_CODE_IDENTITY.to_string(),
     };
     context.system_prompt = Some(new_system);
+}
+
+/// Inject the Claude Code identity into a native Anthropic Messages body.
+/// The `system` field may be a plain string or an array of content blocks.
+fn inject_claude_code_identity_into_anthropic_body(body: &mut Value) {
+    match body.get_mut("system") {
+        Some(Value::String(existing)) => {
+            *existing = format!("{}\n\n{}", CLAUDE_CODE_IDENTITY, existing);
+        }
+        Some(Value::Array(blocks)) => {
+            blocks.insert(
+                0,
+                serde_json::json!({"type": "text", "text": CLAUDE_CODE_IDENTITY}),
+            );
+        }
+        _ => {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "system".to_string(),
+                    Value::String(CLAUDE_CODE_IDENTITY.to_string()),
+                );
+            }
+        }
+    }
+}
+
+/// Extract the model id from a native Google generateContent path,
+/// e.g. `/v1/models/gemini-2.5-pro:streamGenerateContent`.
+fn google_model_from_path(api_path: &str) -> Option<String> {
+    let after = api_path.split("/models/").nth(1)?;
+    let model = after.split(':').next()?;
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    }
 }
 
 fn prefix_anthropic_oauth_tools(body: &mut Value) {
@@ -2757,8 +3018,9 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
     }
 
     // Special handling for Anthropic OAuth tokens - they use Bearer auth + specific headers.
-    // Matches the opencode-anthropic-auth plugin: only Authorization, anthropic-beta, and
-    // user-agent are set. The underlying Anthropic SDK (not us) handles x-stainless-* headers.
+    // Matches pi's Claude Code identification: Authorization, anthropic-beta,
+    // user-agent, and x-app. The underlying Anthropic SDK (not us) handles
+    // x-stainless-* headers.
     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(api_key) {
         if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
             headers.insert_header(http::header::AUTHORIZATION, value);
@@ -2770,7 +3032,11 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
         );
         headers.insert_header(
             http::header::HeaderName::from_static("user-agent"),
-            http::HeaderValue::from_static("claude-cli/2.1.2 (external, cli)"),
+            http::HeaderValue::from_static("claude-cli/2.1.75 (external, cli)"),
+        );
+        headers.insert_header(
+            http::header::HeaderName::from_static("x-app"),
+            http::HeaderValue::from_static("cli"),
         );
         return;
     }
@@ -2918,7 +3184,7 @@ async fn resolve_oauth_access_token_with_account(
         .or_else(|| OAuthProviderKind::from_str(provider_name))
         .ok_or_else(|| {
             format!(
-                "OAuth provider not supported for '{}'. Supported: anthropic, openai-codex, github-copilot, google-gemini-cli, google-antigravity",
+                "OAuth provider not supported for '{}'. Supported: anthropic, openai-codex, github-copilot",
                 provider_name
             )
         })?;
@@ -2971,18 +3237,6 @@ async fn resolve_oauth_access_token_with_account(
                 let config =
                     oauth_openai::config_from_env(redirect_uri).map_err(|e| e.to_string())?;
                 oauth_openai::refresh_token(
-                    &client,
-                    &config,
-                    oauth_user,
-                    &credentials.refresh_token,
-                )
-                .await
-                .map_err(|e| e.to_string())?
-            }
-            OAuthProviderKind::GoogleGeminiCli | OAuthProviderKind::GoogleAntigravity => {
-                let config = oauth_google::config_from_env(provider, redirect_uri)
-                    .map_err(|e| e.to_string())?;
-                oauth_google::refresh_token(
                     &client,
                     &config,
                     oauth_user,
@@ -5140,5 +5394,324 @@ mod tests {
         // Verify no upstream requests were made
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_openai_account_id_prefers_chatgpt_account_id() {
+        use base64::Engine;
+        let b64 = |v: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        let header = b64(&json!({"alg": "RS256"}));
+
+        // ChatGPT subscription tokens carry chatgpt_account_id; org_id (the
+        // platform org) must not win over it.
+        let payload = b64(&json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-chatgpt",
+                "org_id": "org-platform"
+            }
+        }));
+        let token = format!("{}.{}.sig", header, payload);
+        assert_eq!(
+            extract_openai_account_id(&token).as_deref(),
+            Some("acct-chatgpt")
+        );
+
+        // org_id remains a fallback when nothing better exists
+        let payload = b64(&json!({
+            "https://api.openai.com/auth": {"org_id": "org-only"}
+        }));
+        let token = format!("{}.{}.sig", header, payload);
+        assert_eq!(
+            extract_openai_account_id(&token).as_deref(),
+            Some("org-only")
+        );
+    }
+
+    #[test]
+    fn test_google_model_from_path() {
+        assert_eq!(
+            google_model_from_path("/v1/models/gemini-2.5-pro:streamGenerateContent"),
+            Some("gemini-2.5-pro".to_string())
+        );
+        assert_eq!(
+            google_model_from_path("/models/gemini-2.5-flash:generateContent"),
+            Some("gemini-2.5-flash".to_string())
+        );
+        assert_eq!(google_model_from_path("/v1/chat/completions"), None);
+    }
+
+    #[test]
+    fn test_inject_claude_code_identity_into_anthropic_body() {
+        // String system prompt gets prefixed
+        let mut body = json!({"system": "You are helpful.", "messages": []});
+        inject_claude_code_identity_into_anthropic_body(&mut body);
+        let system = body["system"].as_str().unwrap();
+        assert!(system.starts_with(CLAUDE_CODE_IDENTITY));
+        assert!(system.contains("You are helpful."));
+
+        // Block-array system gets a new leading text block
+        let mut body = json!({
+            "system": [{"type": "text", "text": "existing", "cache_control": {"type": "ephemeral"}}],
+            "messages": []
+        });
+        inject_claude_code_identity_into_anthropic_body(&mut body);
+        let blocks = body["system"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["text"].as_str().unwrap(), CLAUDE_CODE_IDENTITY);
+        assert_eq!(blocks[1]["text"].as_str().unwrap(), "existing");
+
+        // Missing system gets created
+        let mut body = json!({"messages": []});
+        inject_claude_code_identity_into_anthropic_body(&mut body);
+        assert_eq!(body["system"].as_str().unwrap(), CLAUDE_CODE_IDENTITY);
+    }
+
+    fn make_tracker() -> UsageTracker {
+        UsageTracker {
+            key_hash: "h".to_string(),
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    #[test]
+    fn test_extract_anthropic_usage_from_sse() {
+        let tracker = make_tracker();
+        extract_anthropic_usage(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42,\"cache_read_input_tokens\":7}}}\n\n",
+            &tracker,
+        );
+        extract_anthropic_usage(
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":13}}\n\n",
+            &tracker,
+        );
+        assert_eq!(
+            tracker
+                .input_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            42
+        );
+        assert_eq!(
+            tracker
+                .output_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            13
+        );
+        assert_eq!(
+            tracker
+                .cached_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            7
+        );
+    }
+
+    #[test]
+    fn test_extract_google_usage_from_json() {
+        let tracker = make_tracker();
+        extract_google_usage(
+            "{\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":20,\"thoughtsTokenCount\":5,\"cachedContentTokenCount\":11}}",
+            &tracker,
+        );
+        assert_eq!(
+            tracker
+                .input_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            100
+        );
+        assert_eq!(
+            tracker
+                .output_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            25
+        );
+        assert_eq!(
+            tracker
+                .cached_tokens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            11
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_native_anthropic_messages_passthrough() {
+        // pi (api=anthropic-messages) posts a native Anthropic body to
+        // {eavs}/{provider}/v1 + the SDK's /v1/messages. It must be relayed
+        // untouched (system, tools, thinking intact) to {base}/v1/messages
+        // and the anthropic-format SSE response returned unmodified.
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers,
+            chunks: vec![Bytes::from(sse)],
+        }]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                type_: "anthropic".to_string(),
+                api_key: "sk-test".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+
+        let req_body = json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "stream": true,
+            "system": [{"type": "text", "text": "be brief"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [{"name": "get_weather", "description": "d", "input_schema": {"type": "object"}}]
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/anthropic/v1/v1/messages")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("anthropic-beta", "fine-grained-tool-streaming-2025-05-14")
+            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // Response relayed as-is in Anthropic format
+        assert_eq!(String::from_utf8_lossy(&body_bytes), sse);
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://api.anthropic.com/v1/messages");
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent, req_body);
+        // Auth + client beta features forwarded
+        assert_eq!(requests[0].headers.get("x-api-key").unwrap(), "sk-test");
+        let beta = requests[0].headers.get("anthropic-beta").unwrap();
+        assert!(beta
+            .to_str()
+            .unwrap()
+            .contains("fine-grained-tool-streaming-2025-05-14"));
+    }
+
+    #[tokio::test]
+    async fn e2e_native_google_generate_content_passthrough() {
+        // pi (api=google-generative-ai) posts native Google bodies to
+        // {eavs}/{provider}/v1/models/{model}:streamGenerateContent — the /v1
+        // routing artifact must be dropped so the upstream sees
+        // {base}/models/{model}:streamGenerateContent.
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                "{\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":1}}",
+            )],
+        }]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "google".to_string(),
+            ProviderConfig {
+                type_: "google".to_string(),
+                api_key: "g-test".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+
+        let req_body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/google/v1/models/gemini-2.5-pro:streamGenerateContent?alt=sse")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent, req_body);
+    }
+
+    #[tokio::test]
+    async fn e2e_codex_sse_post_with_zstd_body() {
+        // pi's Codex SSE fallback POSTs a zstd-compressed body to
+        // {eavs}/{provider}/v1/codex/responses; it must be routed (not 405),
+        // decompressed, and forwarded to {base}/codex/responses.
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from("data: {\"type\":\"response.completed\"}\n\n")],
+        }]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "codex".to_string(),
+            ProviderConfig {
+                type_: "openai-codex".to_string(),
+                api_key: "codex-test".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route(
+                "/:provider/v1/codex/responses",
+                post(provider_codex_sse_handler),
+            )
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+
+        let req_body = json!({
+            "model": "gpt-5.2-codex",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": true
+        });
+        let compressed =
+            zstd::stream::encode_all(serde_json::to_vec(&req_body).unwrap().as_slice(), 0).unwrap();
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/codex/v1/codex/responses")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::CONTENT_ENCODING, "zstd")
+            .body(Body::from(compressed))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url,
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent, req_body);
     }
 }

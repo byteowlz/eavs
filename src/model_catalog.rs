@@ -78,6 +78,8 @@ pub struct CatalogCost {
     pub output: f64,
     #[serde(default)]
     pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -128,6 +130,7 @@ impl CatalogModel {
                 input: self.cost.input,
                 output: self.cost.output,
                 cache_read: self.cost.cache_read,
+                cache_write: self.cost.cache_write,
             },
             compat: std::collections::HashMap::new(),
         }
@@ -260,7 +263,7 @@ pub fn eavs_to_catalog_id<'a>(eavs_name: &'a str, eavs_type: &str) -> &'a str {
     match eavs_type {
         "openai" | "openai-responses" | "openai-codex" => "openai",
         "anthropic" => "anthropic",
-        "google" | "google-vertex" | "google-gemini-cli" | "google-antigravity" => "google",
+        "google" | "google-vertex" => "google",
         "mistral" => "mistral",
         "groq" => "groq",
         "xai" => "xai",

@@ -25,8 +25,6 @@ pub enum ProviderType {
     GithubCopilot,
     /// Google Vertex AI - Google Generative AI via Vertex AI platform (ADC auth)
     GoogleVertex,
-    /// Google Gemini CLI / Cloud Code Assist (OAuth-based, free tier)
-    GoogleGeminiCli,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -59,8 +57,17 @@ pub enum AuthStyle {
 
 impl ProviderType {
     /// Parse provider type from string (case-insensitive).
+    ///
+    /// Unknown strings fall back to OpenAI for backward compatibility; use
+    /// [`ProviderType::try_from_str`] when the caller wants to detect typos.
     pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+        Self::try_from_str(s).unwrap_or(Self::OpenAI)
+    }
+
+    /// Parse provider type from string (case-insensitive), returning `None`
+    /// for unrecognized type strings.
+    pub fn try_from_str(s: &str) -> Option<Self> {
+        let t = match s.to_lowercase().as_str() {
             "openai" => Self::OpenAI,
             "anthropic" | "claude" => Self::Anthropic,
             "google" | "gemini" => Self::Google,
@@ -71,18 +78,16 @@ impl ProviderType {
             "xai" | "grok" => Self::XAI,
             "openrouter" => Self::OpenRouter,
             "bedrock" | "aws-bedrock" => Self::Bedrock,
-            "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible" => {
-                Self::OpenAICompatible
-            }
+            "ollama" | "vllm" | "lmstudio" | "openai-compatible" | "compatible"
+            | "openai-completions" | "chat-completions" => Self::OpenAICompatible,
             "openai-codex" | "codex" | "chatgpt" => Self::OpenAICodex,
             "openai-responses" | "responses" => Self::OpenAIResponses,
             "github-copilot" | "copilot" => Self::GithubCopilot,
             "google-vertex" | "vertex" => Self::GoogleVertex,
-            "google-gemini-cli" | "gemini-cli" | "google-antigravity" | "antigravity"
-            | "cloudcode" => Self::GoogleGeminiCli,
             "mock" | "echo" | "benchmark" => Self::Mock,
-            _ => Self::OpenAI, // Default fallback
-        }
+            _ => return None,
+        };
+        Some(t)
     }
 
     /// Get provider metadata including defaults.
@@ -178,12 +183,6 @@ impl ProviderType {
                 env_key_name: Some("GEMINI_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
-            Self::GoogleGeminiCli => ProviderInfo {
-                provider_type: *self,
-                default_base_url: Some("https://cloudcode-pa.googleapis.com"),
-                env_key_name: None, // Uses OAuth
-                auth_style: AuthStyle::BearerToken,
-            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -223,7 +222,6 @@ impl ProviderType {
             Self::Anthropic
                 | Self::Google
                 | Self::GoogleVertex
-                | Self::GoogleGeminiCli
                 | Self::Bedrock
                 | Self::OpenAICodex
                 | Self::OpenAIResponses
@@ -296,7 +294,6 @@ impl ProviderType {
             Self::GoogleVertex => {
                 vec!["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"]
             }
-            Self::GoogleGeminiCli => vec!["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
             Self::Mock => {
                 let mut models = vec!["mock-model"];
                 models.extend(crate::mock_provider::MockScenario::all_model_ids());
@@ -326,11 +323,6 @@ pub fn detect_provider_from_host(host: &str) -> Option<&'static str> {
     // Anthropic (API and desktop app)
     if host_lower.contains("anthropic.com") || host_lower.contains("claude.ai") {
         return Some("anthropic");
-    }
-
-    // Google Cloud Code Assist / Gemini CLI
-    if host_lower.contains("cloudcode-pa.googleapis.com") {
-        return Some("google-gemini-cli");
     }
 
     // Google Vertex AI
@@ -635,6 +627,18 @@ mod tests {
     fn test_provider_type_from_str() {
         assert_eq!(ProviderType::from_str("openai"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_str("OpenAI"), ProviderType::OpenAI);
+        // Chat-completions-only endpoints must NOT be misclassified as native
+        // OpenAI (which would advertise pi_api=openai-responses)
+        assert_eq!(
+            ProviderType::from_str("openai-completions"),
+            ProviderType::OpenAICompatible
+        );
+        assert_eq!(
+            ProviderType::from_str("chat-completions"),
+            ProviderType::OpenAICompatible
+        );
+        assert_eq!(ProviderType::try_from_str("no-such-type"), None);
+        assert_eq!(ProviderType::from_str("no-such-type"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_str("anthropic"), ProviderType::Anthropic);
         assert_eq!(ProviderType::from_str("claude"), ProviderType::Anthropic);
         assert_eq!(ProviderType::from_str("google"), ProviderType::Google);
@@ -682,22 +686,10 @@ mod tests {
             ProviderType::GoogleVertex
         );
         assert_eq!(ProviderType::from_str("vertex"), ProviderType::GoogleVertex);
-        assert_eq!(
-            ProviderType::from_str("google-gemini-cli"),
-            ProviderType::GoogleGeminiCli
-        );
-        assert_eq!(
-            ProviderType::from_str("gemini-cli"),
-            ProviderType::GoogleGeminiCli
-        );
-        assert_eq!(
-            ProviderType::from_str("google-antigravity"),
-            ProviderType::GoogleGeminiCli
-        );
-        assert_eq!(
-            ProviderType::from_str("cloudcode"),
-            ProviderType::GoogleGeminiCli
-        );
+        // Gemini CLI / Antigravity support was removed; the aliases now fall
+        // back to OpenAI like any unknown type
+        assert_eq!(ProviderType::try_from_str("google-gemini-cli"), None);
+        assert_eq!(ProviderType::try_from_str("antigravity"), None);
         assert_eq!(ProviderType::from_str("unknown"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_str("mock"), ProviderType::Mock);
         assert_eq!(ProviderType::from_str("echo"), ProviderType::Mock);

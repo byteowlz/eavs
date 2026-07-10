@@ -94,13 +94,6 @@ api_key = "env:GEMINI_API_KEY"
 # gcp_location = "env:GOOGLE_CLOUD_LOCATION" # required (e.g., "us-central1")
 # base_url defaults to https://{gcp_location}-aiplatform.googleapis.com
 
-# Google Gemini CLI / Cloud Code Assist (free tier, uses OAuth)
-# [providers.gemini-cli]
-# type = "google-gemini-cli"
-# OAuth tokens are stored in the key database (requires keys.enabled = true).
-# base_url defaults to https://cloudcode-pa.googleapis.com
-# Also supports "google-antigravity" type alias.
-
 # GitHub Copilot (device code flow OAuth)
 # [providers.copilot]
 # type = "github-copilot"

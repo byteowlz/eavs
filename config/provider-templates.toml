@@ -191,15 +191,6 @@ description = "Google Cloud region (e.g., us-central1)"
 env_hint = "env:GOOGLE_CLOUD_LOCATION"
 required = true
 
-[google-gemini-cli]
-name = "Google Gemini CLI (free tier)"
-type = "google-gemini-cli"
-base_url = "https://cloudcode-pa.googleapis.com"
-auth = "oauth"
-doc_url = "https://cloud.google.com/products/gemini/code-assist"
-notes = "Free tier via OAuth. Use `eavs login google-gemini-cli` to authenticate."
-manual_only = true
-
 [github-copilot]
 name = "GitHub Copilot"
 type = "github-copilot"

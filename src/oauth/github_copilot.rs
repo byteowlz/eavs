@@ -5,6 +5,8 @@ use serde::Deserialize;
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// Standard VS Code Copilot OAuth app client id (same default pi ships).
+const DEFAULT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
 pub struct GitHubCopilotConfig {
     pub client_id: String,
@@ -13,7 +15,9 @@ pub struct GitHubCopilotConfig {
 
 pub fn config_from_env() -> Result<GitHubCopilotConfig, String> {
     let client_id = std::env::var("EAVS_OAUTH_GITHUB_COPILOT_CLIENT_ID")
-        .map_err(|_| "Missing EAVS_OAUTH_GITHUB_COPILOT_CLIENT_ID".to_string())?;
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
     let scope = std::env::var("EAVS_OAUTH_GITHUB_COPILOT_SCOPE")
         .unwrap_or_else(|_| "read:user".to_string());
 
