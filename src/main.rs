@@ -18,6 +18,7 @@ mod paths;
 mod plugins;
 mod policy;
 mod provider;
+mod provider_probe;
 mod provider_store;
 mod provider_templates;
 mod proxy;
@@ -806,6 +807,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             "/admin/providers/from-template",
             post(api::provider_from_template_handler),
         )
+        .route("/admin/providers/probe", post(api::probe_provider_handler))
         .route("/admin/providers/:name", get(api::get_provider_handler))
         .route(
             "/admin/providers/:name",
