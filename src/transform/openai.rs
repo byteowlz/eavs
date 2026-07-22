@@ -35,7 +35,7 @@ impl OpenAITransformer {
 
     /// Configure from resolved CompatSettings.
     pub fn with_compat_settings(mut self, compat: &crate::provider::CompatSettings) -> Self {
-        self.use_developer_role = !compat.supports_developer_role();
+        self.use_developer_role = compat.supports_developer_role();
         self.use_max_tokens = compat.max_tokens_field() == "max_tokens";
         self.supports_store = compat.supports_store();
         self.supports_stream_options = compat.supports_stream_options();
@@ -49,7 +49,7 @@ impl OpenAITransformer {
         use_max_tokens: bool,
         supports_store: bool,
     ) -> Self {
-        self.use_developer_role = !supports_developer_role;
+        self.use_developer_role = supports_developer_role;
         self.use_max_tokens = use_max_tokens;
         self.supports_store = supports_store;
         self
