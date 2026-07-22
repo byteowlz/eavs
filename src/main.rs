@@ -47,7 +47,7 @@ use crate::logging::{start_logging_task, Logger};
 use crate::plugins::start_analysis_plugins;
 use crate::state::{start_cleanup_task, AppState};
 use axum::{
-    routing::{any, delete, get, patch, post},
+    routing::{any, delete, get, patch, post, put},
     Router,
 };
 use clap::Parser;
@@ -72,6 +72,12 @@ async fn main() {
         }
         Commands::Key { action } => {
             if let Err(e) = run_key_command(action).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Cost { action } => {
+            if let Err(e) = run_cost_command(action).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -800,6 +806,11 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/admin/keys/:key_hash", get(api::get_key_handler))
         .route("/admin/keys/:key_hash", delete(api::delete_key_handler))
         .route("/admin/keys/:key_hash/usage", get(api::key_usage_handler))
+        .route("/admin/usage/by-owner", get(api::owner_usage_handler))
+        .route(
+            "/admin/keys/:key_hash/owner",
+            put(api::update_key_owner_handler),
+        )
         // Admin API - Providers
         .route("/admin/providers", post(api::upsert_provider_handler))
         .route("/admin/providers", get(api::list_providers_handler))
@@ -1043,6 +1054,39 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
                 ));
             }
             run_key_bind_direct(&store, &key, oauth_user, format).await
+        }
+    }
+}
+
+async fn run_cost_command(action: cli::CostCommands) -> Result<(), cli::CliError> {
+    use crate::cli::{run_cost_by_key_direct, run_cost_by_owner_direct, CostCommands};
+    use crate::keys::KeyStore;
+
+    let open_store = |config: Option<String>| async move {
+        let app_config = load_config(config.as_deref());
+        let db_path = app_config.keys.resolved_database_path();
+        KeyStore::new(&db_path)
+            .await
+            .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))
+    };
+
+    match action {
+        CostCommands::ByOwner {
+            owner,
+            days,
+            format,
+            config,
+        } => {
+            let store = open_store(config).await?;
+            run_cost_by_owner_direct(&store, owner.as_deref(), days, format).await
+        }
+        CostCommands::ByKey {
+            days,
+            format,
+            config,
+        } => {
+            let store = open_store(config).await?;
+            run_cost_by_key_direct(&store, days, format).await
         }
     }
 }

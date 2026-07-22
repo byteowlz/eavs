@@ -38,6 +38,12 @@ pub struct VirtualKey {
     #[serde(default)]
     pub metadata: serde_json::Value,
 
+    /// Optional organizational owner/tag for grouping keys under one
+    /// user for usage rollups. Independent of `oauth_user`, which binds a key
+    /// to a specific upstream OAuth account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+
     /// Optional OAuth user binding for token-based auth
     pub oauth_user: Option<String>,
     /// Optional OAuth account label for multi-account support (defaults to "default")
@@ -145,6 +151,10 @@ pub struct CreateKeyRequest {
     #[serde(default)]
     pub metadata: serde_json::Value,
 
+    /// Optional organizational owner/tag for grouping keys under one user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
     /// Optional OAuth account label for multi-account support
@@ -175,6 +185,10 @@ pub struct CreateKeyResponse {
 
     /// Permissions summary
     pub permissions: KeyPermissions,
+
+    /// Optional organizational owner/tag for grouping keys under one user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
@@ -210,6 +224,10 @@ pub struct KeyInfo {
     /// Usage stats
     pub usage: KeyUsage,
 
+    /// Optional organizational owner/tag for grouping keys under one user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
     /// Optional OAuth account label for multi-account support
@@ -232,6 +250,7 @@ impl VirtualKey {
             permissions,
             usage: KeyUsage::default(),
             metadata: serde_json::Value::Null,
+            owner: None,
             oauth_user: None,
             oauth_account: None,
         }
@@ -288,6 +307,7 @@ impl VirtualKey {
             disabled: self.disabled,
             permissions: self.permissions.clone(),
             usage: self.usage.clone(),
+            owner: self.owner.clone(),
             oauth_user: self.oauth_user.clone(),
             oauth_account: self.oauth_account.clone(),
         }

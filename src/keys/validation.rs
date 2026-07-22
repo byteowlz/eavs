@@ -117,6 +117,7 @@ impl KeyValidator {
         input_tokens: u32,
         output_tokens: u32,
         cached_tokens: u32,
+        cache_write_tokens: u32,
         cost_usd: f64,
         model: &str,
         provider: &str,
@@ -138,6 +139,7 @@ impl KeyValidator {
                 input_tokens,
                 output_tokens,
                 cached_tokens,
+                cache_write_tokens,
                 cost_usd,
                 model,
                 provider,
@@ -154,7 +156,7 @@ impl KeyValidator {
     pub async fn record_request(&self, key_hash: &str, model: &str, provider: &str) {
         if let Err(e) = self
             .store
-            .update_usage(key_hash, 0, 0, 0, 0.0, model, provider)
+            .update_usage(key_hash, 0, 0, 0, 0, 0.0, model, provider)
             .await
         {
             tracing::warn!("Failed to record request for key {}: {}", key_hash, e);

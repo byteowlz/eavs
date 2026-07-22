@@ -79,6 +79,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: KeyCommands,
     },
+    /// Cost and usage rollups across virtual keys
+    Cost {
+        #[command(subcommand)]
+        action: CostCommands,
+    },
     /// Switch provider shortcuts for the default endpoint
     Provider {
         #[command(subcommand)]
@@ -567,6 +572,43 @@ pub enum KeyCommands {
         /// Clear the OAuth user binding
         #[arg(long, conflicts_with = "oauth_user")]
         clear: bool,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+
+        /// Path to config file to use when resolving the key database
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CostCommands {
+    /// Cost rollup grouped by owner (tag/user)
+    ByOwner {
+        /// Restrict to a single owner label
+        #[arg(long)]
+        owner: Option<String>,
+
+        /// Only include usage from the last N days (default: all-time)
+        #[arg(long)]
+        days: Option<u32>,
+
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+
+        /// Path to config file to use when resolving the key database
+        #[arg(long, env = "EAVS_CONFIG")]
+        config: Option<String>,
+    },
+
+    /// Cost rollup grouped by virtual key
+    ByKey {
+        /// Only include usage from the last N days (default: all-time)
+        #[arg(long)]
+        days: Option<u32>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -1318,6 +1360,7 @@ pub async fn run_key_create_direct(
             budget_window: None,
         },
         metadata: serde_json::Value::Null,
+        owner: None,
         oauth_user: None,
         oauth_account: None,
     };
@@ -1595,6 +1638,122 @@ pub async fn run_key_bind_direct(
     }
 
     Ok(())
+}
+
+/// Cost rollup grouped by owner (tag/user), read directly from the key store.
+pub async fn run_cost_by_owner_direct(
+    store: &KeyStore,
+    owner: Option<&str>,
+    days: Option<u32>,
+    format: OutputFormat,
+) -> Result<(), CliError> {
+    let rows = store
+        .get_usage_by_owner(owner, days)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to get owner usage: {}", e)))?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("No usage records found.");
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12}",
+                "OWNER", "REQS", "INPUT", "OUTPUT", "CACHE_RD", "CACHE_WR", "COST"
+            );
+            println!("{}", "-".repeat(92));
+            let mut total_cost = 0.0;
+            for r in &rows {
+                let owner = if r.owner.is_empty() {
+                    "(unassigned)"
+                } else {
+                    &r.owner
+                };
+                println!(
+                    "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12} ${:>11.4}",
+                    truncate(owner, 20),
+                    r.requests,
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.cached_tokens,
+                    r.cache_write_tokens,
+                    r.cost_usd
+                );
+                total_cost += r.cost_usd;
+            }
+            println!("{}", "-".repeat(92));
+            println!("{:<20} {:>68} ${:>11.4}", "TOTAL", "", total_cost);
+        }
+    }
+    Ok(())
+}
+
+/// Cost rollup grouped by virtual key, read directly from the key store.
+pub async fn run_cost_by_key_direct(
+    store: &KeyStore,
+    days: Option<u32>,
+    format: OutputFormat,
+) -> Result<(), CliError> {
+    let rows = store
+        .get_usage_by_key(days)
+        .await
+        .map_err(|e| CliError::Other(format!("Failed to get key usage: {}", e)))?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("No usage records found.");
+                return Ok(());
+            }
+            println!(
+                "{:<16} {:<16} {:<14} {:>8} {:>12} {:>12} {:>12}",
+                "KEY", "NAME", "OWNER", "REQS", "INPUT", "OUTPUT", "COST"
+            );
+            println!("{}", "-".repeat(96));
+            let mut total_cost = 0.0;
+            for r in &rows {
+                let key_label = if r.key_id.is_empty() {
+                    truncate(&r.key_hash, 16)
+                } else {
+                    truncate(&r.key_id, 16)
+                };
+                let owner = if r.owner.is_empty() {
+                    "(unassigned)"
+                } else {
+                    &r.owner
+                };
+                println!(
+                    "{:<16} {:<16} {:<14} {:>8} {:>12} {:>12} ${:>11.4}",
+                    key_label,
+                    truncate(&r.name, 16),
+                    truncate(owner, 14),
+                    r.requests,
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.cost_usd
+                );
+                total_cost += r.cost_usd;
+            }
+            println!("{}", "-".repeat(96));
+            println!("{:<48} {:>32} ${:>11.4}", "TOTAL", "", total_cost);
+        }
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    } else {
+        s.to_string()
+    }
 }
 
 pub fn run_provider_current() -> Result<(), CliError> {
@@ -2258,6 +2417,7 @@ pub async fn run_test_oauth(
         expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         permissions: KeyPermissions::default(),
         metadata: serde_json::Value::Null,
+        owner: None,
         oauth_user: Some(user_id.to_string()),
         oauth_account: None,
     };

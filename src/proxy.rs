@@ -1228,6 +1228,7 @@ async fn proxy_handler_inner(
         input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     });
 
     if needs_transform {
@@ -1274,6 +1275,10 @@ async fn proxy_handler_inner(
                                         );
                                         tracker.cached_tokens.store(
                                             usage.cache_read_input_tokens.unwrap_or(0),
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        tracker.cache_write_tokens.store(
+                                            usage.cache_creation_input_tokens.unwrap_or(0),
                                             std::sync::atomic::Ordering::SeqCst,
                                         );
                                     }
@@ -1382,6 +1387,10 @@ async fn proxy_handler_inner(
                     );
                     tracker.cached_tokens.store(
                         done.usage.cache_read_input_tokens.unwrap_or(0),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracker.cache_write_tokens.store(
+                        done.usage.cache_creation_input_tokens.unwrap_or(0),
                         std::sync::atomic::Ordering::SeqCst,
                     );
                 }
@@ -1559,7 +1568,11 @@ struct UsageTracker {
     provider: String,
     input_tokens: Arc<std::sync::atomic::AtomicU32>,
     output_tokens: Arc<std::sync::atomic::AtomicU32>,
+    /// Cache-read (cache-hit) input tokens.
     cached_tokens: Arc<std::sync::atomic::AtomicU32>,
+    /// Cache-write (cache-creation) input tokens; only Anthropic bills these
+    /// separately (others leave it 0).
+    cache_write_tokens: Arc<std::sync::atomic::AtomicU32>,
 }
 
 // Mock provider handler is in src/mock_provider.rs
@@ -1586,6 +1599,14 @@ fn extract_anthropic_usage(chunk: &str, tracker: &UsageTracker) {
             tracker
                 .cached_tokens
                 .store(cached as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(write) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            tracker
+                .cache_write_tokens
+                .store(write as u32, std::sync::atomic::Ordering::SeqCst);
         }
     };
 
@@ -1706,6 +1727,9 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
     let cached = tracker
         .cached_tokens
         .load(std::sync::atomic::Ordering::SeqCst);
+    let cache_write = tracker
+        .cache_write_tokens
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     // Always record the request to update last_request_at
     // Some providers don't return usage data, but we still want to track request timestamps
@@ -1722,10 +1746,17 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
             return;
         }
 
-        // Calculate cost
+        // Calculate cost (distinguishing cache reads from cache writes)
         let cost = if let Some(calc) = state.get_cost_calculator() {
-            calc.calculate_actual_cost(&tracker.model, input, output, cached)
-                .await
+            calc.calculate_detailed_cost(
+                &tracker.model,
+                &tracker.provider,
+                input,
+                cached,
+                cache_write,
+                output,
+            )
+            .await
         } else {
             0.0
         };
@@ -1737,6 +1768,7 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
                 input,
                 output,
                 cached,
+                cache_write,
                 cost,
                 &tracker.model,
                 &tracker.provider,
@@ -1748,6 +1780,7 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
             input_tokens = input,
             output_tokens = output,
             cached_tokens = cached,
+            cache_write_tokens = cache_write,
             cost_usd = cost,
             "Recorded usage for virtual key"
         );
@@ -2653,11 +2686,13 @@ async fn codex_ws_handler_inner(
                                         as u32;
 
                                     let cost_usd = if let Some(ref cc) = cost_calc {
-                                        cc.calculate_actual_cost(
+                                        cc.calculate_detailed_cost(
                                             model,
+                                            &provider_name_for_usage,
                                             input_tokens,
-                                            output_tokens,
                                             cached_tokens,
+                                            0,
+                                            output_tokens,
                                         )
                                         .await
                                     } else {
@@ -2670,6 +2705,7 @@ async fn codex_ws_handler_inner(
                                             input_tokens,
                                             output_tokens,
                                             cached_tokens,
+                                            0,
                                             cost_usd,
                                             model,
                                             &provider_name_for_usage,
@@ -3160,11 +3196,15 @@ fn apply_ws_extra_headers(request: &mut http::Request<()>, provider_type: Provid
     apply_extra_headers(request, provider_type);
 }
 
-fn apply_http_auth_headers(headers: &mut HeaderMap, provider_type: ProviderType, api_key: &str) {
+pub(crate) fn apply_http_auth_headers(
+    headers: &mut HeaderMap,
+    provider_type: ProviderType,
+    api_key: &str,
+) {
     apply_auth_headers(headers, provider_type, api_key);
 }
 
-fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
+pub(crate) fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
     apply_extra_headers(headers, provider_type);
 }
 
@@ -5476,6 +5516,7 @@ mod tests {
             input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 

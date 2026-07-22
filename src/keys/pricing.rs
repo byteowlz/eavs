@@ -26,9 +26,15 @@ pub struct ModelPricing {
     /// Cost per output token in USD
     pub output_cost_per_token: f64,
 
-    /// Cost per cached input token (if supported)
+    /// Cost per cached (read) input token (if supported)
     #[serde(default)]
     pub cached_input_cost_per_token: Option<f64>,
+
+    /// Cost per cache-write (cache-creation) input token. Only some providers
+    /// (e.g. Anthropic) bill cache writes separately; `None`/absent means writes
+    /// are billed as ordinary input (e.g. OpenAI automatic caching).
+    #[serde(default)]
+    pub cache_write_cost_per_token: Option<f64>,
 
     /// Maximum input tokens supported
     #[serde(default)]
@@ -54,7 +60,7 @@ impl ModelPricing {
             + (output_tokens as f64 * self.output_cost_per_token)
     }
 
-    /// Calculate cost with cached tokens.
+    /// Calculate cost with cached (read) tokens.
     pub fn calculate_cost_with_cache(
         &self,
         input_tokens: u32,
@@ -68,6 +74,42 @@ impl ModelPricing {
 
         (regular_input as f64 * self.input_cost_per_token)
             + (cached_tokens as f64 * cached_cost)
+            + (output_tokens as f64 * self.output_cost_per_token)
+    }
+
+    /// Calculate cost distinguishing cache reads and cache writes.
+    ///
+    /// `input_includes_cache` reflects the provider's usage convention: OpenAI /
+    /// Google report a prompt-token count that *includes* cached tokens, so those
+    /// are subtracted out; Anthropic reports `input_tokens` already *excluding*
+    /// cache read/write, so nothing is subtracted.
+    ///
+    /// Cache reads fall back to `cached_input_cost_per_token` (else a 50%
+    /// discount); cache writes fall back to `cache_write_cost_per_token` (else
+    /// the plain input rate, i.e. no separate premium).
+    pub fn calculate_cost_detailed(
+        &self,
+        input_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
+        output_tokens: u32,
+        input_includes_cache: bool,
+    ) -> f64 {
+        let regular_input = if input_includes_cache {
+            input_tokens.saturating_sub(cache_read_tokens.saturating_add(cache_write_tokens))
+        } else {
+            input_tokens
+        };
+        let read_rate = self
+            .cached_input_cost_per_token
+            .unwrap_or(self.input_cost_per_token * 0.5);
+        let write_rate = self
+            .cache_write_cost_per_token
+            .unwrap_or(self.input_cost_per_token);
+
+        (regular_input as f64 * self.input_cost_per_token)
+            + (cache_read_tokens as f64 * read_rate)
+            + (cache_write_tokens as f64 * write_rate)
             + (output_tokens as f64 * self.output_cost_per_token)
     }
 }
@@ -113,6 +155,7 @@ impl PricingTable {
             input_cost_per_token: 0.0000025,
             output_cost_per_token: 0.00001,
             cached_input_cost_per_token: Some(0.00000125),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(128000),
             max_output_tokens: Some(16384),
             supports_vision: true,
@@ -124,6 +167,7 @@ impl PricingTable {
             input_cost_per_token: 0.00000015,
             output_cost_per_token: 0.0000006,
             cached_input_cost_per_token: Some(0.000000075),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(128000),
             max_output_tokens: Some(16384),
             supports_vision: true,
@@ -135,6 +179,7 @@ impl PricingTable {
             input_cost_per_token: 0.00001,
             output_cost_per_token: 0.00003,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(128000),
             max_output_tokens: Some(4096),
             supports_vision: true,
@@ -146,6 +191,7 @@ impl PricingTable {
             input_cost_per_token: 0.00003,
             output_cost_per_token: 0.00006,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(8192),
             max_output_tokens: Some(4096),
             supports_vision: false,
@@ -157,6 +203,7 @@ impl PricingTable {
             input_cost_per_token: 0.0000005,
             output_cost_per_token: 0.0000015,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(16385),
             max_output_tokens: Some(4096),
             supports_vision: false,
@@ -168,6 +215,7 @@ impl PricingTable {
             input_cost_per_token: 0.000015,
             output_cost_per_token: 0.00006,
             cached_input_cost_per_token: Some(0.0000075),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(100000),
             supports_vision: true,
@@ -179,6 +227,7 @@ impl PricingTable {
             input_cost_per_token: 0.000003,
             output_cost_per_token: 0.000012,
             cached_input_cost_per_token: Some(0.0000015),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(128000),
             max_output_tokens: Some(65536),
             supports_vision: true,
@@ -192,6 +241,7 @@ impl PricingTable {
             input_cost_per_token: 0.000015,
             output_cost_per_token: 0.000075,
             cached_input_cost_per_token: Some(0.00001875),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(4096),
             supports_vision: true,
@@ -203,6 +253,7 @@ impl PricingTable {
             input_cost_per_token: 0.000003,
             output_cost_per_token: 0.000015,
             cached_input_cost_per_token: Some(0.0000003),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(8192),
             supports_vision: true,
@@ -214,6 +265,7 @@ impl PricingTable {
             input_cost_per_token: 0.0000008,
             output_cost_per_token: 0.000004,
             cached_input_cost_per_token: Some(0.00000008),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(8192),
             supports_vision: true,
@@ -225,6 +277,7 @@ impl PricingTable {
             input_cost_per_token: 0.000003,
             output_cost_per_token: 0.000015,
             cached_input_cost_per_token: Some(0.0000003),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(64000),
             supports_vision: true,
@@ -236,6 +289,7 @@ impl PricingTable {
             input_cost_per_token: 0.000001,
             output_cost_per_token: 0.000005,
             cached_input_cost_per_token: Some(0.0000001),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(200000),
             max_output_tokens: Some(64000),
             supports_vision: true,
@@ -249,6 +303,7 @@ impl PricingTable {
             input_cost_per_token: 0.00000125,
             output_cost_per_token: 0.000005,
             cached_input_cost_per_token: Some(0.0000003125),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(2097152),
             max_output_tokens: Some(8192),
             supports_vision: true,
@@ -260,6 +315,7 @@ impl PricingTable {
             input_cost_per_token: 0.000000075,
             output_cost_per_token: 0.0000003,
             cached_input_cost_per_token: Some(0.00000001875),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(1048576),
             max_output_tokens: Some(8192),
             supports_vision: true,
@@ -271,6 +327,7 @@ impl PricingTable {
             input_cost_per_token: 0.0000001,
             output_cost_per_token: 0.0000004,
             cached_input_cost_per_token: Some(0.000000025),
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(1048576),
             max_output_tokens: Some(8192),
             supports_vision: true,
@@ -284,6 +341,7 @@ impl PricingTable {
             input_cost_per_token: 0.000002,
             output_cost_per_token: 0.000006,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(128000),
             max_output_tokens: Some(8192),
             supports_vision: false,
@@ -295,6 +353,7 @@ impl PricingTable {
             input_cost_per_token: 0.0000002,
             output_cost_per_token: 0.0000006,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(32000),
             max_output_tokens: Some(8192),
             supports_vision: false,
@@ -308,6 +367,7 @@ impl PricingTable {
             input_cost_per_token: 0.00000059,
             output_cost_per_token: 0.00000079,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(131072),
             max_output_tokens: Some(8192),
             supports_vision: false,
@@ -319,6 +379,7 @@ impl PricingTable {
             input_cost_per_token: 0.00000005,
             output_cost_per_token: 0.00000008,
             cached_input_cost_per_token: None,
+            cache_write_cost_per_token: None,
             max_input_tokens: Some(131072),
             max_output_tokens: Some(8192),
             supports_vision: false,
@@ -379,6 +440,7 @@ impl PricingTable {
                 input_cost_per_token: input,
                 output_cost_per_token: output,
                 cached_input_cost_per_token: Some(input * 0.5),
+                cache_write_cost_per_token: None,
                 max_input_tokens: Some(128000),
                 max_output_tokens: Some(8192),
                 supports_vision: false,
@@ -433,6 +495,7 @@ impl PricingTable {
                 input_cost_per_token: input_cost,
                 output_cost_per_token: output_cost,
                 cached_input_cost_per_token: model_data.cache_read_input_token_cost,
+                cache_write_cost_per_token: None,
                 max_input_tokens: model_data.max_input_tokens,
                 max_output_tokens: model_data.max_output_tokens,
                 supports_vision: model_data.supports_vision.unwrap_or(false),
@@ -530,6 +593,18 @@ impl SharedPricingTable {
         self.inner.write().await.update_from_litellm().await
     }
 
+    /// Overlay authoritative rates from the models.dev catalog, keyed by model id.
+    /// Catalog entries take precedence over the embedded defaults. Returns the
+    /// number of models loaded.
+    pub async fn load_pricing_entries(&self, entries: Vec<ModelPricing>) -> usize {
+        let mut table = self.inner.write().await;
+        let count = entries.len();
+        for entry in entries {
+            table.add_model(entry);
+        }
+        count
+    }
+
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
@@ -550,6 +625,55 @@ mod tests {
     }
 
     #[test]
+    fn test_detailed_cost_anthropic_convention() {
+        // Anthropic-style rates (per token): input 5/1M, cache_read 0.5/1M,
+        // cache_write 6.25/1M, output 25/1M.
+        let pricing = ModelPricing {
+            model: "claude".into(),
+            provider: "anthropic".into(),
+            input_cost_per_token: 5.0 / 1e6,
+            output_cost_per_token: 25.0 / 1e6,
+            cached_input_cost_per_token: Some(0.5 / 1e6),
+            cache_write_cost_per_token: Some(6.25 / 1e6),
+            max_input_tokens: None,
+            max_output_tokens: None,
+            supports_vision: false,
+            supports_function_calling: false,
+        };
+
+        // input_tokens excludes cache (Anthropic), so no subtraction:
+        // 1000*5 + 200*0.5 + 300*6.25 + 100*25 = 5000 + 100 + 1875 + 2500 = 9475 /1M
+        let cost = pricing.calculate_cost_detailed(1000, 200, 300, 100, false);
+        assert!((cost - 9475.0 / 1e6).abs() < 1e-12, "got {cost}");
+
+        // Cache writes cost 1.25x input, so dropping them lowers cost.
+        let no_write = pricing.calculate_cost_detailed(1000, 200, 0, 100, false);
+        assert!(no_write < cost);
+    }
+
+    #[test]
+    fn test_detailed_cost_openai_inclusive_convention() {
+        // OpenAI: prompt_tokens includes cached; no separate cache-write charge.
+        let pricing = ModelPricing {
+            model: "gpt".into(),
+            provider: "openai".into(),
+            input_cost_per_token: 1.25 / 1e6,
+            output_cost_per_token: 10.0 / 1e6,
+            cached_input_cost_per_token: Some(0.125 / 1e6),
+            cache_write_cost_per_token: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            supports_vision: false,
+            supports_function_calling: false,
+        };
+
+        // input includes 800 cached: regular = 1000-800 = 200.
+        // 200*1.25 + 800*0.125 + 100*10 = 250 + 100 + 1000 = 1350 /1M
+        let cost = pricing.calculate_cost_detailed(1000, 800, 0, 100, true);
+        assert!((cost - 1350.0 / 1e6).abs() < 1e-12, "got {cost}");
+    }
+
+    #[test]
     fn test_pricing_calculation() {
         let pricing = ModelPricing {
             model: "test".into(),
@@ -557,6 +681,7 @@ mod tests {
             input_cost_per_token: 0.00001,
             output_cost_per_token: 0.00003,
             cached_input_cost_per_token: Some(0.000005),
+            cache_write_cost_per_token: None,
             max_input_tokens: None,
             max_output_tokens: None,
             supports_vision: false,
@@ -576,6 +701,7 @@ mod tests {
             input_cost_per_token: 0.00001,
             output_cost_per_token: 0.00003,
             cached_input_cost_per_token: Some(0.000002), // 80% discount
+            cache_write_cost_per_token: None,
             max_input_tokens: None,
             max_output_tokens: None,
             supports_vision: false,

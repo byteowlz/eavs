@@ -5,7 +5,7 @@
 
 mod cost;
 mod generation;
-mod pricing;
+pub mod pricing;
 mod rate_limit;
 mod store;
 mod types;
@@ -17,6 +17,6 @@ pub use cost::CostCalculator;
 pub use generation::is_virtual_key;
 pub use pricing::SharedPricingTable;
 pub use rate_limit::RateLimiter;
-pub use store::{KeyStore, UsageRecord};
+pub use store::{KeyStore, OwnerUsage, UsageRecord};
 pub use types::*;
 pub use validation::{KeyValidator, ValidatedKey};

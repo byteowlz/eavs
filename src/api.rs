@@ -685,6 +685,7 @@ pub async fn create_key_handler(
         expires_at: payload.expires_at,
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
+        owner: payload.owner,
         oauth_user: payload.oauth_user,
         oauth_account: payload.oauth_account,
     };
@@ -709,6 +710,8 @@ pub struct CreateKeyApiRequest {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub permissions: Option<KeyPermissions>,
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub oauth_user: Option<String>,
     pub oauth_account: Option<String>,
 }
@@ -883,6 +886,117 @@ pub async fn key_usage_handler(
     Ok(Json(history))
 }
 
+/// Body for setting/clearing a key's owner.
+#[derive(Deserialize)]
+pub struct UpdateOwnerPayload {
+    /// New owner label. `null` clears it.
+    pub owner: Option<String>,
+}
+
+/// Set or clear the organizational owner/tag for a key.
+///
+/// PUT /admin/keys/:key_id_or_hash/owner
+/// Authorization: Bearer <master_key>
+pub async fn update_key_owner_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(key_id_or_hash): Path<String>,
+    Json(payload): Json<UpdateOwnerPayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<KeyApiError>)> {
+    check_keys_enabled(&state)?;
+    check_master_key(&headers, &state)?;
+
+    let store = state.get_key_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
+        )
+    })?;
+
+    let key_hash = if let Some(key) = store.get_by_human_id(&key_id_or_hash) {
+        key.key_hash
+    } else {
+        key_id_or_hash.clone()
+    };
+
+    let updated = store
+        .update_owner(&key_hash, payload.owner.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(KeyApiError::new(
+                    format!("Failed to update owner: {}", e),
+                    "update_failed",
+                )),
+            )
+        })?;
+
+    if !updated {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(KeyApiError::new("Key not found", "not_found")),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "key_hash": key_hash,
+        "owner": payload.owner,
+    })))
+}
+
+/// Query params for owner usage rollups.
+#[derive(Deserialize)]
+pub struct OwnerUsageQuery {
+    /// Restrict to a single owner. Omit to return every owner bucket.
+    pub owner: Option<String>,
+    /// Restrict to the last N days. Omit for all-time.
+    pub days: Option<u32>,
+}
+
+/// Aggregate usage/cost grouped by owner across all keys.
+///
+/// GET /admin/usage/by-owner[?owner=<name>]
+/// Authorization: Bearer <master_key>
+///
+/// Rows with no owner are grouped under the empty-string bucket.
+pub async fn owner_usage_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<OwnerUsageQuery>,
+) -> Result<Json<Vec<crate::keys::OwnerUsage>>, (StatusCode, Json<KeyApiError>)> {
+    check_keys_enabled(&state)?;
+    check_master_key(&headers, &state)?;
+
+    let store = state.get_key_store().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(KeyApiError::new(
+                "Key store not initialized",
+                "internal_error",
+            )),
+        )
+    })?;
+
+    let rollup = store
+        .get_usage_by_owner(query.owner.as_deref(), query.days)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(KeyApiError::new(
+                    format!("Failed to get owner usage: {}", e),
+                    "usage_failed",
+                )),
+            )
+        })?;
+
+    Ok(Json(rollup))
+}
+
 /// Self-provisioning endpoint (if enabled).
 ///
 /// POST /keys/provision
@@ -925,6 +1039,7 @@ pub async fn provision_key_handler(
         expires_at: None,
         permissions,
         metadata: payload.metadata.unwrap_or(serde_json::Value::Null),
+        owner: payload.owner,
         oauth_user: payload.oauth_user,
         oauth_account: None,
     };
@@ -947,6 +1062,8 @@ pub async fn provision_key_handler(
 pub struct ProvisionKeyRequest {
     pub name: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub oauth_user: Option<String>,
 }
 
