@@ -1109,6 +1109,41 @@ pub async fn upsert_provider_handler(
     Ok(Json(entry))
 }
 
+/// Probe an unsaved provider config with a bounded, side-effect-free request.
+///
+/// POST /admin/providers/probe
+/// Authorization: Bearer <master_key>
+///
+/// Exercises the real routing/transformation path against the supplied draft
+/// config without persisting anything. Fail-closed input validation returns
+/// `400`; everything else returns `200` with structured, sanitized diagnostics.
+pub async fn probe_provider_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut payload): Json<crate::provider_probe::ProbeRequest>,
+) -> Result<Json<crate::provider_probe::ProbeResponse>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+
+    // Edit probes may intentionally omit the secret. Resolve it inside EAVS
+    // from the already-active provider so credentials never need to travel
+    // back through Oqto or be read from deployment-specific env files.
+    if payload.config.api_key.trim().is_empty() {
+        if let Some(name) = payload.provider_name.as_deref() {
+            if let Some(saved) = state.config.providers.get(name) {
+                payload.config.api_key = saved.resolved_api_key();
+            }
+        }
+    }
+
+    match crate::provider_probe::run_probe(&state.upstream, payload).await {
+        Ok(resp) => Ok(Json(resp)),
+        Err(rejection) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProviderApiError::new(rejection.error, rejection.code)),
+        )),
+    }
+}
+
 /// Get a provider by name.
 ///
 /// GET /admin/providers/:name
