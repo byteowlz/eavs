@@ -250,6 +250,40 @@ impl ModelCatalog {
         self.providers.values().map(|p| p.models.len()).sum()
     }
 
+    /// Build per-token pricing entries from the catalog's cost data.
+    ///
+    /// models.dev quotes cost in USD per 1M tokens, so every rate is divided by
+    /// 1e6. A zero `cache_read`/`cache_write` maps to `None` (unpriced), which is
+    /// the correct signal for providers without a separate cache-write charge.
+    pub fn pricing_entries(&self) -> Vec<crate::keys::pricing::ModelPricing> {
+        const PER_MILLION: f64 = 1_000_000.0;
+        let per_token = |v: f64| v / PER_MILLION;
+        let opt = |v: f64| (v > 0.0).then(|| per_token(v));
+
+        let mut entries = Vec::new();
+        for provider in self.providers.values() {
+            for model in provider.models.values() {
+                if model.cost.input <= 0.0 && model.cost.output <= 0.0 {
+                    continue;
+                }
+                entries.push(crate::keys::pricing::ModelPricing {
+                    model: model.id.clone(),
+                    provider: provider.id.clone(),
+                    input_cost_per_token: per_token(model.cost.input),
+                    output_cost_per_token: per_token(model.cost.output),
+                    cached_input_cost_per_token: opt(model.cost.cache_read),
+                    cache_write_cost_per_token: opt(model.cost.cache_write),
+                    max_input_tokens: (model.limit.input > 0).then_some(model.limit.input as u32),
+                    max_output_tokens: (model.limit.output > 0)
+                        .then_some(model.limit.output as u32),
+                    supports_vision: model.modalities.input.iter().any(|m| m == "image"),
+                    supports_function_calling: model.tool_call,
+                });
+            }
+        }
+        entries
+    }
+
     /// Is the catalog empty (e.g., fetch failed)?
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()

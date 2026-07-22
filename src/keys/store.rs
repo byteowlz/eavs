@@ -200,7 +200,8 @@ impl KeyStore {
                 permissions TEXT NOT NULL,
                 usage TEXT NOT NULL,
                 metadata TEXT,
-                oauth_user TEXT
+                oauth_user TEXT,
+                owner TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_keys_created ON virtual_keys(created_at);
@@ -249,6 +250,21 @@ impl KeyStore {
                 .map_err(|e| KeyStoreError::Database(e.to_string()))?;
         }
 
+        // Ensure the organizational owner/tag column exists.
+        let has_owner: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('virtual_keys') WHERE name = 'owner'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?
+            > 0;
+        if !has_owner {
+            sqlx::query("ALTER TABLE virtual_keys ADD COLUMN owner TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        }
+
         // Usage history table for analytics
         sqlx::query(
             r#"
@@ -261,17 +277,52 @@ impl KeyStore {
                 input_tokens INTEGER NOT NULL,
                 output_tokens INTEGER NOT NULL,
                 cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
                 cost_usd REAL NOT NULL,
+                owner TEXT,
                 FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_key ON usage_history(key_hash);
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_history(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_usage_owner ON usage_history(owner);
             "#,
         )
         .execute(pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        // Ensure the owner column exists on pre-existing usage_history tables.
+        let has_usage_owner: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_history') WHERE name = 'owner'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?
+            > 0;
+        if !has_usage_owner {
+            sqlx::query("ALTER TABLE usage_history ADD COLUMN owner TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        }
+
+        // Ensure the cache_write_tokens column exists on pre-existing tables.
+        let has_cache_write: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_history') WHERE name = 'cache_write_tokens'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?
+            > 0;
+        if !has_cache_write {
+            sqlx::query(
+                "ALTER TABLE usage_history ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        }
 
         // OAuth credentials table
         sqlx::query(
@@ -297,7 +348,7 @@ impl KeyStore {
     /// Refresh the in-memory cache from the database.
     pub async fn refresh_cache(&self) -> Result<(), KeyStoreError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account FROM virtual_keys WHERE disabled = 0",
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, owner, oauth_user, oauth_account FROM virtual_keys WHERE disabled = 0",
         )
         .fetch_all(&self.pool)
         .await
@@ -341,6 +392,7 @@ impl KeyStore {
             permissions: request.permissions.clone(),
             usage: KeyUsage::default(),
             metadata: request.metadata.clone(),
+            owner: request.owner.clone(),
             oauth_user: request.oauth_user.clone(),
             oauth_account: request.oauth_account.clone(),
         };
@@ -355,8 +407,8 @@ impl KeyStore {
 
         sqlx::query(
             r#"
-            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, oauth_user, oauth_account)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, owner, oauth_user, oauth_account)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&key_hash)
@@ -369,6 +421,7 @@ impl KeyStore {
         .bind(&permissions_json)
         .bind(&usage_json)
         .bind(&metadata_json)
+        .bind(&virtual_key.owner)
         .bind(&virtual_key.oauth_user)
         .bind(&virtual_key.oauth_account)
         .execute(&self.pool)
@@ -387,6 +440,7 @@ impl KeyStore {
             created_at: virtual_key.created_at,
             expires_at: request.expires_at,
             permissions: request.permissions,
+            owner: request.owner,
             oauth_user: request.oauth_user,
             oauth_account: request.oauth_account,
         })
@@ -508,6 +562,113 @@ impl KeyStore {
         }
     }
 
+    /// Update the organizational owner/tag for a key.
+    pub async fn update_owner(
+        &self,
+        key_hash: &str,
+        owner: Option<String>,
+    ) -> Result<bool, KeyStoreError> {
+        let result = sqlx::query("UPDATE virtual_keys SET owner = ? WHERE key_hash = ?")
+            .bind(&owner)
+            .bind(key_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        if result.rows_affected() > 0 {
+            if let Some(mut key) = self.cache.get_mut(key_hash) {
+                key.owner = owner;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Aggregate usage/cost grouped by owner across all keys.
+    ///
+    /// When `owner` is `Some`, only that owner's totals are returned. Rows with a
+    /// NULL owner are grouped under the `""` (unassigned) bucket.
+    pub async fn get_usage_by_owner(
+        &self,
+        owner: Option<&str>,
+        days: Option<u32>,
+    ) -> Result<Vec<OwnerUsage>, KeyStoreError> {
+        let cutoff = cutoff_timestamp(days);
+        let rows: Vec<OwnerUsageRow> = if let Some(owner) = owner {
+            sqlx::query_as(
+                r#"
+                SELECT COALESCE(owner, '') AS owner,
+                       COUNT(*) AS requests,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM usage_history
+                WHERE COALESCE(owner, '') = ? AND timestamp >= ?
+                GROUP BY COALESCE(owner, '')
+                "#,
+            )
+            .bind(owner)
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT COALESCE(owner, '') AS owner,
+                       COUNT(*) AS requests,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM usage_history
+                WHERE timestamp >= ?
+                GROUP BY COALESCE(owner, '')
+                ORDER BY cost_usd DESC
+                "#,
+            )
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// Aggregate usage grouped by virtual key, newest cost first.
+    pub async fn get_usage_by_key(&self, days: Option<u32>) -> Result<Vec<KeyCost>, KeyStoreError> {
+        let cutoff = cutoff_timestamp(days);
+        let rows: Vec<KeyCostRow> = sqlx::query_as(
+            r#"
+            SELECT h.key_hash AS key_hash,
+                   COALESCE(k.key_id, '') AS key_id,
+                   COALESCE(k.name, '') AS name,
+                   COALESCE(h.owner, '') AS owner,
+                   COUNT(*) AS requests,
+                   COALESCE(SUM(h.input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(h.output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(h.cached_tokens), 0) AS cached_tokens,
+                   COALESCE(SUM(h.cache_write_tokens), 0) AS cache_write_tokens,
+                   COALESCE(SUM(h.cost_usd), 0.0) AS cost_usd
+            FROM usage_history h
+            LEFT JOIN virtual_keys k ON k.key_hash = h.key_hash
+            WHERE h.timestamp >= ?
+            GROUP BY h.key_hash
+            ORDER BY cost_usd DESC
+            "#,
+        )
+        .bind(&cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
     /// Gracefully shutdown the key store, flushing any pending writes.
     #[allow(dead_code)]
     pub fn shutdown(&self) {
@@ -549,6 +710,7 @@ impl KeyStore {
         input_tokens: u32,
         output_tokens: u32,
         cached_tokens: u32,
+        cache_write_tokens: u32,
         cost_usd: f64,
         model: &str,
         provider: &str,
@@ -602,12 +764,14 @@ impl KeyStore {
             }
         }
 
-        // Record in usage history (async, non-blocking for main path)
+        // Record in usage history (async, non-blocking for main path).
+        // Denormalize the owner so rollups need no join and survive key deletion.
+        let owner = self.cache.get(key_hash).and_then(|k| k.owner.clone());
         let timestamp = Utc::now().to_rfc3339();
         sqlx::query(
             r#"
-            INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd, owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(key_hash)
@@ -617,7 +781,9 @@ impl KeyStore {
         .bind(input_tokens as i64)
         .bind(output_tokens as i64)
         .bind(cached_tokens as i64)
+        .bind(cache_write_tokens as i64)
         .bind(cost_usd)
+        .bind(&owner)
         .execute(&self.pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
@@ -654,7 +820,7 @@ impl KeyStore {
         let limit = limit.unwrap_or(100);
 
         let rows: Vec<UsageRow> = sqlx::query_as(
-            "SELECT timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd FROM usage_history WHERE key_hash = ? ORDER BY timestamp DESC LIMIT ?",
+            "SELECT timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd FROM usage_history WHERE key_hash = ? ORDER BY timestamp DESC LIMIT ?",
         )
         .bind(key_hash)
         .bind(limit as i64)
@@ -684,6 +850,8 @@ struct KeyRow {
     permissions: String,
     usage: String,
     metadata: Option<String>,
+    #[sqlx(default)]
+    owner: Option<String>,
     oauth_user: Option<String>,
     #[sqlx(default)]
     oauth_account: Option<String>,
@@ -736,6 +904,7 @@ impl KeyRow {
             permissions,
             usage,
             metadata,
+            owner: self.owner.clone(),
             oauth_user: self.oauth_user.clone(),
             oauth_account: self.oauth_account.clone(),
         })
@@ -751,6 +920,8 @@ struct UsageRow {
     input_tokens: i64,
     output_tokens: i64,
     cached_tokens: i64,
+    #[sqlx(default)]
+    cache_write_tokens: i64,
     cost_usd: f64,
 }
 
@@ -763,6 +934,8 @@ pub struct UsageRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
     pub cost_usd: f64,
 }
 
@@ -777,8 +950,104 @@ impl From<UsageRow> for UsageRecord {
             input_tokens: row.input_tokens as u32,
             output_tokens: row.output_tokens as u32,
             cached_tokens: row.cached_tokens as u32,
+            cache_write_tokens: row.cache_write_tokens as u32,
             cost_usd: row.cost_usd,
         }
+    }
+}
+
+/// Database row for per-owner usage aggregation.
+#[derive(sqlx::FromRow)]
+struct OwnerUsageRow {
+    owner: String,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    cache_write_tokens: i64,
+    cost_usd: f64,
+}
+
+/// Aggregated usage/cost for a single owner across all their keys.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnerUsage {
+    /// Owner label (empty string = unassigned).
+    pub owner: String,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl From<OwnerUsageRow> for OwnerUsage {
+    fn from(row: OwnerUsageRow) -> Self {
+        Self {
+            owner: row.owner,
+            requests: row.requests as u64,
+            input_tokens: row.input_tokens as u64,
+            output_tokens: row.output_tokens as u64,
+            cached_tokens: row.cached_tokens as u64,
+            cache_write_tokens: row.cache_write_tokens as u64,
+            cost_usd: row.cost_usd,
+        }
+    }
+}
+
+/// Database row for per-key usage aggregation.
+#[derive(sqlx::FromRow)]
+struct KeyCostRow {
+    key_hash: String,
+    key_id: String,
+    name: String,
+    owner: String,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    cache_write_tokens: i64,
+    cost_usd: f64,
+}
+
+/// Aggregated usage/cost for a single virtual key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KeyCost {
+    pub key_hash: String,
+    pub key_id: String,
+    pub name: String,
+    /// Owner label (empty string = unassigned).
+    pub owner: String,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl From<KeyCostRow> for KeyCost {
+    fn from(row: KeyCostRow) -> Self {
+        Self {
+            key_hash: row.key_hash,
+            key_id: row.key_id,
+            name: row.name,
+            owner: row.owner,
+            requests: row.requests as u64,
+            input_tokens: row.input_tokens as u64,
+            output_tokens: row.output_tokens as u64,
+            cached_tokens: row.cached_tokens as u64,
+            cache_write_tokens: row.cache_write_tokens as u64,
+            cost_usd: row.cost_usd,
+        }
+    }
+}
+
+/// RFC3339 lower bound for a `--days` window (epoch when `None`).
+fn cutoff_timestamp(days: Option<u32>) -> String {
+    match days {
+        Some(d) => (Utc::now() - chrono::Duration::days(d as i64)).to_rfc3339(),
+        None => "1970-01-01T00:00:00+00:00".to_string(),
     }
 }
 
@@ -895,7 +1164,7 @@ mod tests {
 
         // Record some usage
         store
-            .update_usage(&key_hash, 100, 50, 0, 0.001, "gpt-4", "openai")
+            .update_usage(&key_hash, 100, 50, 0, 0, 0.001, "gpt-4", "openai")
             .await
             .unwrap();
 
@@ -959,5 +1228,73 @@ mod tests {
                 "Duplicate key_id generated"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_owner_usage_rollup() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        // Two keys owned by "alice", one by "bob", one unassigned.
+        let mut hashes = std::collections::HashMap::new();
+        for (name, owner) in [
+            ("a1", Some("alice")),
+            ("a2", Some("alice")),
+            ("b1", Some("bob")),
+            ("u1", None),
+        ] {
+            let request = CreateKeyRequest {
+                name: Some(name.to_string()),
+                owner: owner.map(str::to_string),
+                ..Default::default()
+            };
+            let resp = store.create_key(request).await.unwrap();
+            hashes.insert(name, resp.key_hash);
+        }
+
+        // Record usage: alice across both keys, bob once, unassigned once.
+        store
+            .update_usage(&hashes["a1"], 100, 50, 0, 0, 0.10, "gpt-4", "openai")
+            .await
+            .unwrap();
+        store
+            .update_usage(&hashes["a2"], 200, 80, 0, 0, 0.20, "gpt-4", "openai")
+            .await
+            .unwrap();
+        store
+            .update_usage(&hashes["b1"], 10, 5, 0, 0, 0.01, "gpt-4", "openai")
+            .await
+            .unwrap();
+        store
+            .update_usage(&hashes["u1"], 1, 1, 0, 0, 0.001, "gpt-4", "openai")
+            .await
+            .unwrap();
+
+        // Filtered to alice: rolled up across both her keys.
+        let alice = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].owner, "alice");
+        assert_eq!(alice[0].requests, 2);
+        assert_eq!(alice[0].input_tokens, 300);
+        assert_eq!(alice[0].output_tokens, 130);
+        assert!((alice[0].cost_usd - 0.30).abs() < 1e-9);
+
+        // All owners, including the empty-string (unassigned) bucket.
+        let all = store.get_usage_by_owner(None, None).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|o| o.owner == "alice" && o.requests == 2));
+        assert!(all.iter().any(|o| o.owner == "bob" && o.requests == 1));
+        assert!(all.iter().any(|o| o.owner.is_empty() && o.requests == 1));
+
+        // Per-key rollup: one bucket per key, carrying owner + cost.
+        let by_key = store.get_usage_by_key(None).await.unwrap();
+        assert_eq!(by_key.len(), 4);
+        let a1 = by_key
+            .iter()
+            .find(|k| k.key_hash == hashes["a1"])
+            .expect("a1 present");
+        assert_eq!(a1.owner, "alice");
+        assert_eq!(a1.requests, 1);
+        assert_eq!(a1.input_tokens, 100);
+        assert!((a1.cost_usd - 0.10).abs() < 1e-9);
     }
 }

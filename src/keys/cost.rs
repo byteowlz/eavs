@@ -176,6 +176,7 @@ impl CostCalculator {
     }
 
     /// Calculate cost from token counts.
+    #[allow(dead_code)]
     pub async fn calculate_actual_cost(
         &self,
         model: &str,
@@ -189,6 +190,30 @@ impl CostCalculator {
         } else {
             pricing.calculate_cost(input_tokens, output_tokens)
         }
+    }
+
+    /// Calculate cost distinguishing cache reads from cache writes.
+    ///
+    /// Resolves the provider's usage convention: Anthropic reports `input_tokens`
+    /// already excluding cached tokens, whereas OpenAI/Google include them.
+    pub async fn calculate_detailed_cost(
+        &self,
+        model: &str,
+        provider: &str,
+        input_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
+        output_tokens: u32,
+    ) -> f64 {
+        let pricing = self.pricing.get_or_default(model, provider).await;
+        let input_includes_cache = !is_cache_exclusive_input(model, provider);
+        pricing.calculate_cost_detailed(
+            input_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            output_tokens,
+            input_includes_cache,
+        )
     }
 
     /// Calculate actual cost from API response usage data and return full stats.
@@ -267,6 +292,16 @@ impl Clone for CostCalculator {
             tokenizer_o200k: self.tokenizer_o200k.clone(),
         }
     }
+}
+
+/// Whether a provider reports `input_tokens` *excluding* cache read/write tokens.
+///
+/// Anthropic's Messages API reports uncached input only (cache reads/writes are
+/// separate fields), so cached tokens must not be subtracted again. OpenAI and
+/// Google report a prompt-token count that includes cached tokens.
+fn is_cache_exclusive_input(model: &str, provider: &str) -> bool {
+    let hay = format!("{} {}", model.to_lowercase(), provider.to_lowercase());
+    hay.contains("anthropic") || hay.contains("claude")
 }
 
 #[cfg(test)]

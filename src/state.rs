@@ -435,8 +435,16 @@ impl AppState {
         match ModelCatalog::load().await {
             Ok(catalog) => {
                 let total = catalog.total_models();
+                let priced = self
+                    .pricing
+                    .load_pricing_entries(catalog.pricing_entries())
+                    .await;
                 let _ = self.model_catalog.set(catalog);
-                tracing::info!("Model catalog loaded ({} models)", total);
+                tracing::info!(
+                    "Model catalog loaded ({} models, {} priced from models.dev)",
+                    total,
+                    priced
+                );
             }
             Err(e) => {
                 tracing::warn!("Failed to load model catalog: {}", e);
