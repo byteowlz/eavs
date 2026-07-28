@@ -156,10 +156,25 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub deny_domains: Vec<String>,
 
-    /// Block requests to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x).
-    /// Default: true (prevents SSRF attacks).
+    /// Exact private destinations trusted by the operator.
+    /// All three fields must match; these entries never override `deny_domains`.
+    #[serde(default)]
+    pub trusted_private_endpoints: Vec<TrustedPrivateEndpoint>,
+
+    /// Block requests to private/internal IP ranges (including loopback, link-local,
+    /// unique-local IPv6, and shared CGNAT space). Default: true.
     #[serde(default = "default_true")]
     pub block_private_ips: bool,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct TrustedPrivateEndpoint {
+    /// Host identity presented in TLS SNI or HTTP Host.
+    pub host: String,
+    /// Exact destination address expected after trusted DNS resolution.
+    pub address: std::net::IpAddr,
+    /// Exact destination TCP port.
+    pub port: u16,
 }
 
 fn default_true() -> bool {
