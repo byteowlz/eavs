@@ -940,10 +940,116 @@ fn process_openai_chunk(
     Ok(events)
 }
 
+/// Conform a pass-through OpenAI chat-completions body to the upstream's quirks.
+///
+/// Requests to OpenAI-compatible providers skip the canonical transform, so the
+/// `CompatSettings` wired into [`OpenAITransformer`] never sees them. Only settings that
+/// were explicitly configured or URL-detected are applied; unset fields are left alone so
+/// pass-through stays byte-faithful where the upstream's behaviour is unknown.
+pub fn apply_compat_to_passthrough_body(
+    body: &mut Value,
+    compat: &crate::provider::CompatSettings,
+) {
+    if compat.supports_developer_role == Some(false) {
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages.iter_mut() {
+                if message.get("role").and_then(Value::as_str) == Some("developer") {
+                    message["role"] = json!("system");
+                }
+            }
+        }
+    }
+
+    if compat.supports_store == Some(false) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("store");
+        }
+    }
+
+    if compat.supports_stream_options == Some(false) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("stream_options");
+        }
+    }
+
+    if let Some(field) = compat.max_tokens_field.as_deref() {
+        let stale = match field {
+            "max_tokens" => "max_completion_tokens",
+            "max_completion_tokens" => "max_tokens",
+            _ => return,
+        };
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(value) = obj.remove(stale) {
+                obj.entry(field).or_insert(value);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::CompatSettings;
     use crate::types::ThinkingContent;
+
+    fn passthrough_body() -> Value {
+        json!({
+            "model": "Kimi-K2.6",
+            "messages": [
+                {"role": "developer", "content": "be terse"},
+                {"role": "user", "content": "hi"}
+            ],
+            "store": true,
+            "stream_options": {"include_usage": true},
+            "max_completion_tokens": 20
+        })
+    }
+
+    #[test]
+    fn passthrough_compat_downgrades_developer_role() {
+        let mut body = passthrough_body();
+        let compat = CompatSettings {
+            supports_developer_role: Some(false),
+            ..Default::default()
+        };
+
+        apply_compat_to_passthrough_body(&mut body, &compat);
+
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        // Untouched settings stay byte-faithful.
+        assert_eq!(body["store"], true);
+        assert!(body.get("stream_options").is_some());
+        assert_eq!(body["max_completion_tokens"], 20);
+    }
+
+    #[test]
+    fn passthrough_compat_strips_unsupported_fields_and_renames_max_tokens() {
+        let mut body = passthrough_body();
+        let compat = CompatSettings {
+            supports_store: Some(false),
+            supports_stream_options: Some(false),
+            max_tokens_field: Some("max_tokens".to_string()),
+            ..Default::default()
+        };
+
+        apply_compat_to_passthrough_body(&mut body, &compat);
+
+        assert!(body.get("store").is_none());
+        assert!(body.get("stream_options").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["max_tokens"], 20);
+    }
+
+    #[test]
+    fn passthrough_compat_leaves_body_alone_when_unset() {
+        let mut body = passthrough_body();
+        let original = body.clone();
+
+        apply_compat_to_passthrough_body(&mut body, &CompatSettings::default());
+
+        assert_eq!(body, original);
+    }
 
     #[test]
     fn test_parse_openai_request_simple() {
