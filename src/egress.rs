@@ -26,7 +26,7 @@ use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::config::{EgressConfig, NetworkConfig};
-use crate::network_acl::check_host_allowed;
+use crate::network_acl::check_egress_allowed;
 
 /// Max DNS message size we relay (covers EDNS0; classic 512 + headroom).
 const DNS_BUF: usize = 4096;
@@ -160,7 +160,7 @@ async fn handle(
 
     // 3. Apply the domain ACL. Prefer the hostname; fall back to the dst IP.
     let acl_target = hostname.clone().unwrap_or_else(|| dst.ip().to_string());
-    let verdict = check_host_allowed(&network, &acl_target);
+    let verdict = check_egress_allowed(&network, &acl_target, dst);
 
     match (&verdict, enforce) {
         (Err(reason), true) => {

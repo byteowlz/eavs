@@ -706,10 +706,24 @@
         "items": { "type": "string" },
         "description": "Denied upstream domains (glob patterns). Checked before allow list. Examples: ['*.internal.corp', 'evil.com']"
       },
+      "trusted_private_endpoints": {
+        "type": "array",
+        "description": "Operator-controlled private destinations. Host, address, and port must all match; deny rules still take precedence.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "host": { "type": "string", "description": "Exact TLS SNI or HTTP Host identity" },
+            "address": { "type": "string", "format": "ip-address", "description": "Exact destination IP address" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Exact destination TCP port" }
+          },
+          "required": ["host", "address", "port"],
+          "additionalProperties": false
+        }
+      },
       "block_private_ips": {
         "type": "boolean",
         "default": true,
-        "description": "Block requests to private/internal IP ranges (127.x, 10.x, 172.16-31.x, 192.168.x, localhost). Default: true"
+        "description": "Block private/internal, loopback, link-local, CGNAT, and unique-local IP ranges. Default: true"
       }
     },
     "additionalProperties": false

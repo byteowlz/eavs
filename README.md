@@ -315,9 +315,16 @@ deny_domains = ["*.internal.corp", "evil.com"]
 
 # Block private IPs to prevent SSRF (default: true)
 block_private_ips = true
+
+# Optional operator-controlled exceptions. Host, address, and port must all match.
+# Deny rules still take precedence.
+[[network.trusted_private_endpoints]]
+host = "model-gateway"
+address = "100.64.0.18"
+port = 8080
 ```
 
-Precedence: deny list > private IP check > allow list. Empty lists impose no restriction.
+Precedence: deny list > exact trusted endpoint > private IP check > allow list. Empty lists impose no restriction.
 
 ### Egress Firewall
 

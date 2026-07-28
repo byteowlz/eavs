@@ -4,7 +4,9 @@
 //! the proxy makes upstream requests.
 
 use crate::config::NetworkConfig;
-use std::net::IpAddr;
+#[cfg(test)]
+use crate::config::TrustedPrivateEndpoint;
+use std::net::{IpAddr, SocketAddr};
 
 /// Check if a URL is allowed by the network access control policy.
 ///
@@ -17,6 +19,32 @@ pub fn check_url_allowed(config: &NetworkConfig, url: &str) -> Result<(), String
         .ok_or_else(|| "URL has no host".to_string())?;
 
     check_host_allowed(config, host)
+}
+
+/// Check a transparent-egress request against both its presented host identity
+/// and the actual destination recovered from PROXY protocol.
+pub fn check_egress_allowed(
+    config: &NetworkConfig,
+    host: &str,
+    destination: SocketAddr,
+) -> Result<(), String> {
+    check_host_allowed(config, host)?;
+
+    if config.block_private_ips && is_private_ip(&destination.ip()) {
+        let trusted = config.trusted_private_endpoints.iter().any(|endpoint| {
+            endpoint.host.eq_ignore_ascii_case(host)
+                && endpoint.address == destination.ip()
+                && endpoint.port == destination.port()
+        });
+        if !trusted {
+            return Err(format!(
+                "Destination '{}' is a private IP address (blocked by network policy)",
+                destination
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Check if a host (domain or IP) is allowed by the network access control policy.
@@ -114,10 +142,14 @@ fn is_private_ip(ip: &IpAddr) -> bool {
                 || v4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 || v4.is_link_local()  // 169.254.0.0/16
                 || v4.is_unspecified() // 0.0.0.0
+                || v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])
+            // CGNAT
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()       // ::1
                 || v6.is_unspecified() // ::
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
         }
     }
 }
@@ -130,6 +162,7 @@ mod tests {
         NetworkConfig {
             allow_domains: domains.iter().map(|s| s.to_string()).collect(),
             deny_domains: vec![],
+            trusted_private_endpoints: vec![],
             block_private_ips: true,
         }
     }
@@ -138,6 +171,7 @@ mod tests {
         NetworkConfig {
             allow_domains: vec![],
             deny_domains: domains.iter().map(|s| s.to_string()).collect(),
+            trusted_private_endpoints: vec![],
             block_private_ips: false,
         }
     }
@@ -146,6 +180,7 @@ mod tests {
         NetworkConfig {
             allow_domains: allow.iter().map(|s| s.to_string()).collect(),
             deny_domains: deny.iter().map(|s| s.to_string()).collect(),
+            trusted_private_endpoints: vec![],
             block_private_ips: true,
         }
     }
@@ -220,5 +255,50 @@ mod tests {
         let config = config_allow(&["api.openai.com"]);
         assert!(check_host_allowed(&config, "api.openai.com").is_ok());
         assert!(check_host_allowed(&config, "evil.com").is_err());
+    }
+
+    fn trusted_zgx() -> NetworkConfig {
+        NetworkConfig {
+            allow_domains: vec!["zgx".into()],
+            trusted_private_endpoints: vec![TrustedPrivateEndpoint {
+                host: "zgx".into(),
+                address: "100.64.0.18".parse().unwrap(),
+                port: 8080,
+            }],
+            block_private_ips: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exact_trusted_private_endpoint_is_allowed() {
+        let config = trusted_zgx();
+        let destination = "100.64.0.18:8080".parse().unwrap();
+        assert!(check_egress_allowed(&config, "zgx", destination).is_ok());
+    }
+
+    #[test]
+    fn trusted_endpoint_does_not_authorise_adjacent_targets() {
+        let config = trusted_zgx();
+        assert!(check_egress_allowed(&config, "zgx", "100.64.0.18:8081".parse().unwrap()).is_err());
+        assert!(check_egress_allowed(&config, "zgx", "100.64.0.19:8080".parse().unwrap()).is_err());
+        assert!(
+            check_egress_allowed(&config, "other", "100.64.0.18:8080".parse().unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_public_host_cannot_conceal_private_destination() {
+        let config = config_allow(&["api.openai.com"]);
+        let destination = "127.0.0.1:8080".parse().unwrap();
+        assert!(check_egress_allowed(&config, "api.openai.com", destination).is_err());
+    }
+
+    #[test]
+    fn deny_rule_overrides_trusted_private_endpoint() {
+        let mut config = trusted_zgx();
+        config.deny_domains = vec!["zgx".into()];
+        let destination = "100.64.0.18:8080".parse().unwrap();
+        assert!(check_egress_allowed(&config, "zgx", destination).is_err());
     }
 }
