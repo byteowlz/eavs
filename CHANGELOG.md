@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-28
+
+### Fixed
+- `compat` settings are now applied to pass-through `/v1/chat/completions`
+  requests. Previously `supports_developer_role`, `supports_store`,
+  `supports_stream_options`, and `max_tokens_field` were only honoured on the
+  canonical transform path (Anthropic/Google/Bedrock/Responses), so they were
+  silently ignored for every `openai-compatible` provider — the exact providers
+  the settings exist for. A client sending the `developer` role to an upstream
+  that only accepts `system` got a 422 despite
+  `supports_developer_role = false`. Only explicitly configured or URL-detected
+  settings are applied; unset fields leave the body untouched.
+
 ## [0.7.0] - 2026-06-10
 
 ### Added

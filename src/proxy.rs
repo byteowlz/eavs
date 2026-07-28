@@ -725,6 +725,16 @@ async fn proxy_handler_inner(
         (body, model)
     } else {
         // Pass through for OpenAI-compatible providers
+        if !is_native_format_request
+            && !is_responses_api_request
+            && api_path == "/v1/chat/completions"
+        {
+            crate::transform::openai::apply_compat_to_passthrough_body(
+                &mut json_body,
+                &resolved_compat,
+            );
+        }
+
         if provider_type == ProviderType::Mistral && api_path == "/v1/chat/completions" {
             crate::transform::mistral::transform_openai_request_for_mistral(&mut json_body)
                 .map_err(|e| {
@@ -4291,6 +4301,64 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn e2e_passthrough_applies_compat_to_openai_compatible_body() {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"{}")],
+        }]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://up1/v1".to_string(),
+                compat: crate::provider::CompatSettings {
+                    supports_developer_role: Some(false),
+                    supports_store: Some(false),
+                    supports_stream_options: Some(false),
+                    max_tokens_field: Some("max_tokens".to_string()),
+                },
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "Kimi-K2.6",
+                    "messages": [
+                        {"role": "developer", "content": "be terse"},
+                        {"role": "user", "content": "hi"}
+                    ],
+                    "store": true,
+                    "stream_options": {"include_usage": true},
+                    "max_completion_tokens": 20
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let _ = app.oneshot(req).await.unwrap();
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        let forwarded: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(forwarded["messages"][0]["role"], "system");
+        assert!(forwarded.get("store").is_none());
+        assert!(forwarded.get("stream_options").is_none());
+        assert_eq!(forwarded["max_tokens"], 20);
     }
 
     #[tokio::test]
