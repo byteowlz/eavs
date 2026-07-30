@@ -265,7 +265,16 @@ impl KeyStore {
                 .map_err(|e| KeyStoreError::Database(e.to_string()))?;
         }
 
-        // Usage history table for analytics
+        // Usage history table for analytics.
+        //
+        // IMPORTANT: only create the table here. Indexes that reference the
+        // optional columns (`owner`, `cache_write_tokens`) are created *after*
+        // the ALTER TABLE blocks below. CREATE TABLE IF NOT EXISTS is a no-op
+        // on a pre-existing table, so on databases created by older EAVS
+        // versions the optional columns are absent until the ALTERs run.
+        // Creating an index that references a not-yet-existing column aborts
+        // initialization ("no such column: owner"), leaving the key store
+        // non-functional. See eavs-64qn.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS usage_history (
@@ -282,10 +291,6 @@ impl KeyStore {
                 owner TEXT,
                 FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
             );
-
-            CREATE INDEX IF NOT EXISTS idx_usage_key ON usage_history(key_hash);
-            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_history(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_usage_owner ON usage_history(owner);
             "#,
         )
         .execute(pool)
@@ -323,6 +328,21 @@ impl KeyStore {
             .await
             .map_err(|e| KeyStoreError::Database(e.to_string()))?;
         }
+
+        // Now that the optional columns are guaranteed to exist on both fresh
+        // and pre-existing tables, create the indexes. Order matters: any
+        // index/constraint referencing a column must run after the ADD COLUMN
+        // that guarantees it (eavs-64qn).
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_usage_key ON usage_history(key_hash);
+            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_history(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_usage_owner ON usage_history(owner);
+            "#,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         // OAuth credentials table
         sqlx::query(
@@ -1296,5 +1316,156 @@ mod tests {
         assert_eq!(a1.requests, 1);
         assert_eq!(a1.input_tokens, 100);
         assert!((a1.cost_usd - 0.10).abs() < 1e-9);
+    }
+
+    /// Regression test for eavs-64qn.
+    ///
+    /// Simulates upgrading a keys.db created by an older EAVS version whose
+    /// `usage_history` table predates the `owner` and `cache_write_tokens`
+    /// columns. Previously the migration created `idx_usage_owner` (which
+    /// references `owner`) *before* the ALTER TABLE that adds `owner` to a
+    /// pre-existing table, so init aborted with "no such column: owner" and
+    /// the key store was left uninitialized. This test fails on 0.8.1 and
+    /// passes once the column-additions run before the index creation.
+    #[tokio::test]
+    async fn test_migration_handles_legacy_usage_history() {
+        // A unique temp file for this test.
+        let tmp_dir = std::env::temp_dir();
+        let db_path = tmp_dir.join(format!(
+            "eavs-64qn-test-{}-{}.db",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+
+        // Hand-craft a legacy database: the schema that 0.8.0-era EAVS would
+        // have written, i.e. WITHOUT the `owner` and `cache_write_tokens`
+        // columns on usage_history.
+        {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite:{}?mode=rwc", db_path.display()))
+                .await
+                .unwrap();
+            sqlx::query(
+                r#"
+                CREATE TABLE virtual_keys (
+                    key_hash TEXT PRIMARY KEY,
+                    key_id TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    valid_after TEXT,
+                    disabled INTEGER NOT NULL DEFAULT 0,
+                    permissions TEXT NOT NULL,
+                    usage TEXT NOT NULL,
+                    metadata TEXT
+                );
+                CREATE TABLE usage_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key_hash TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL NOT NULL,
+                    FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
+                );
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            // Insert one legacy row so we exercise a populated table.
+            sqlx::query(
+                "INSERT INTO virtual_keys (key_hash, key_id, name, created_at, permissions, usage) \
+                 VALUES ('legacy-hash', 'legacy-id', 'Legacy', '2026-01-01T00:00:00Z', '{}', '{}')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd) \
+                 VALUES ('legacy-hash', '2026-01-01T00:00:00Z', 'gpt-4', 'openai', 10, 5, 0, 0.01)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Now run the real migration on the legacy database.
+        let store = KeyStore::new(&db_path)
+            .await
+            .expect("migration must succeed on a legacy usage_history table (eavs-64qn)");
+
+        // Both optional columns must now exist on usage_history.
+        let has_owner: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_history') WHERE name = 'owner'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(has_owner, 1, "owner column should have been added");
+
+        let has_cache_write: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_history') WHERE name = 'cache_write_tokens'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(has_cache_write, 1, "cache_write_tokens column should have been added");
+
+        // The owner-referencing index must exist.
+        let idx_count: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_owner'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(idx_count, 1, "idx_usage_owner should have been created");
+
+        // The legacy row must still be present (migration is non-destructive).
+        let row_count: i32 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_history WHERE key_hash = 'legacy-hash'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(row_count, 1, "legacy usage_history row must survive migration");
+
+        // Functional sanity: the store should be usable end-to-end (create +
+        // record usage with the new owner column populated).
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("Post-Upgrade Key".to_string()),
+                owner: Some("post-upgrade".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create_key must work after migration");
+        store
+            .update_usage(&resp.key_hash, 7, 3, 0, 4, 0.02, "gpt-4", "openai")
+            .await
+            .expect("update_usage must work after migration");
+        let rollup = store.get_usage_by_owner(None, None).await.unwrap();
+        assert!(
+            rollup.iter().any(|o| o.owner == "post-upgrade"),
+            "post-upgrade owner bucket should be present in usage rollup"
+        );
+
+        // Cleanup.
+        drop(store);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Monotonic unique suffix for temp file names (avoids pulling in an
+    /// extra uuid dependency just for tests).
+    fn unique_suffix() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering as AOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AOrdering::SeqCst);
+        format!("{}", n)
     }
 }
