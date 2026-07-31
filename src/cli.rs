@@ -2453,6 +2453,32 @@ pub async fn run_test_oauth(
             .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
     };
 
+    // Fail fast: OAuth testing requires virtual keys to be enabled on the
+    // server. The virtual key is what carries the `oauth_user` binding that
+    // tells the proxy *which* stored OAuth credential to resolve (see
+    // proxy.rs). With keys disabled there is no key validator, so the request
+    // would 503 with "Virtual API keys are not available" — or worse, silently
+    // fall back to the provider's static API key and report a misleading
+    // success that tested nothing. Bail out with an actionable message
+    // instead of creating a doomed temp key.
+    //
+    // NOTE: this checks the config the *CLI* loads. If the running server
+    // uses a different config file, enable keys there too and restart it.
+    if !config.keys.enabled {
+        return Err(CliError::Other(
+            "OAuth testing requires virtual keys to be enabled, because the \
+             `oauth_user` binding is carried by a virtual key (it tells EAVS \
+             which stored OAuth credential to use).\n\
+             \n\
+             Enable keys in your config and RESTART the server:\n\
+             \n  [keys]\n  enabled = true\n  master_key = \"env:EAVS_MASTER_KEY\"\n\
+             \n\
+             Then re-run `eavs test oauth`.\n\
+             (If the server loads a different config file, enable keys there.)"
+                .to_string(),
+        ));
+    }
+
     let db_path = config.keys.resolved_database_path();
     let backend = resolve_oauth_backend(&config);
 
