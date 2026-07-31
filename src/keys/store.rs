@@ -659,6 +659,84 @@ impl KeyStore {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
+    /// Aggregate usage/cost grouped by owner, optionally sub-aggregated by
+    /// model and/or provider within each owner.
+    ///
+    /// `owner` filters to a single owner; `by_model`/`by_provider` add those
+    /// dimensions to the `GROUP BY` and populate the corresponding fields on
+    /// the returned rows. Rows are ordered by descending cost.
+    ///
+    /// This powers the optional model/provider breakdown for
+    /// `GET /admin/usage/by-owner`.
+    pub async fn get_usage_by_owner_breakdown(
+        &self,
+        owner: Option<&str>,
+        by_model: bool,
+        by_provider: bool,
+        days: Option<u32>,
+    ) -> Result<Vec<OwnerUsage>, KeyStoreError> {
+        let cutoff = cutoff_timestamp(days);
+
+        // Build the dimension projections dynamically. The dimensions are
+        // static booleans (never user input), so string-building the SQL is
+        // safe; the only bound user value is the optional `owner` filter.
+        let mut select_dims = String::from("COALESCE(owner, '') AS owner");
+        let mut group_dims = String::from("COALESCE(owner, '')");
+        if by_model {
+            select_dims.push_str(", COALESCE(model, '') AS model");
+            group_dims.push_str(", COALESCE(model, '')");
+        }
+        if by_provider {
+            select_dims.push_str(", COALESCE(provider, '') AS provider");
+            group_dims.push_str(", COALESCE(provider, '')");
+        }
+
+        let owner_filter = if owner.is_some() {
+            " AND COALESCE(owner, '') = ?"
+        } else {
+            ""
+        };
+
+        let sql = format!(
+            r#"
+            SELECT {select_dims},
+                   COUNT(*) AS requests,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                   COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                   COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+            FROM usage_history
+            WHERE timestamp >= ?{owner_filter}
+            GROUP BY {group_dims}
+            ORDER BY cost_usd DESC
+            "#,
+            select_dims = select_dims,
+            group_dims = group_dims,
+            owner_filter = owner_filter,
+        );
+
+        let mut q = sqlx::query_as::<_, OwnerUsageRow>(&sql).bind(&cutoff);
+        if let Some(o) = owner {
+            q = q.bind(o);
+        }
+
+        let rows: Vec<OwnerUsageRow> = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+
+        // Coerce empty-string buckets to `None` so callers can distinguish
+        // "dimension requested but value empty" from "dimension not requested".
+        let mut out = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            row.model = normalize_dim(by_model, row.model.take());
+            row.provider = normalize_dim(by_provider, row.provider.take());
+            out.push(OwnerUsage::from(row));
+        }
+        Ok(out)
+    }
+
     /// Aggregate usage grouped by virtual key, newest cost first.
     pub async fn get_usage_by_key(&self, days: Option<u32>) -> Result<Vec<KeyCost>, KeyStoreError> {
         let cutoff = cutoff_timestamp(days);
@@ -977,9 +1055,16 @@ impl From<UsageRow> for UsageRecord {
 }
 
 /// Database row for per-owner usage aggregation.
+///
+/// `model`/`provider` are only selected by [`KeyStore::get_usage_by_owner_breakdown`];
+/// the plain owner rollup omits them, so they default to `None`.
 #[derive(sqlx::FromRow)]
 struct OwnerUsageRow {
     owner: String,
+    #[sqlx(default)]
+    model: Option<String>,
+    #[sqlx(default)]
+    provider: Option<String>,
     requests: i64,
     input_tokens: i64,
     output_tokens: i64,
@@ -989,10 +1074,19 @@ struct OwnerUsageRow {
 }
 
 /// Aggregated usage/cost for a single owner across all their keys.
+///
+/// `model`/`provider` are only populated when a breakdown was requested;
+/// otherwise they are `None` (and omitted from JSON).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnerUsage {
     /// Owner label (empty string = unassigned).
     pub owner: String,
+    /// Model dimension (only present when a model breakdown was requested).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider dimension (only present when a provider breakdown was requested).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1005,6 +1099,8 @@ impl From<OwnerUsageRow> for OwnerUsage {
     fn from(row: OwnerUsageRow) -> Self {
         Self {
             owner: row.owner,
+            model: row.model,
+            provider: row.provider,
             requests: row.requests as u64,
             input_tokens: row.input_tokens as u64,
             output_tokens: row.output_tokens as u64,
@@ -1093,6 +1189,19 @@ impl std::fmt::Display for KeyStoreError {
 }
 
 impl std::error::Error for KeyStoreError {}
+
+/// Normalize an owner-breakdown dimension.
+///
+/// Returns `None` when the dimension was not requested (`requested = false`)
+/// or when it was requested but the value is empty. Used by
+/// [`KeyStore::get_usage_by_owner_breakdown`].
+fn normalize_dim(requested: bool, value: Option<String>) -> Option<String> {
+    if requested {
+        value.filter(|v| !v.is_empty())
+    } else {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1316,6 +1425,104 @@ mod tests {
         assert_eq!(a1.requests, 1);
         assert_eq!(a1.input_tokens, 100);
         assert!((a1.cost_usd - 0.10).abs() < 1e-9);
+    }
+
+    /// Optional model/provider breakdown for the owner rollup (eavs-5gf3).
+    ///
+    /// Records mixed-model/mixed-provider usage under one owner and asserts
+    /// that `get_usage_by_owner_breakdown` sub-aggregates by the requested
+    /// dimensions while the plain `get_usage_by_owner` still returns a single
+    /// owner-level bucket.
+    #[tokio::test]
+    async fn test_owner_usage_breakdown() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("breakdown-key".to_string()),
+                owner: Some("alice".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let h = resp.key_hash;
+
+        // Alice uses two models across two providers.
+        store
+            .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
+            .await
+            .unwrap();
+        store
+            .update_usage(&h, 200, 20, 0, 0, 0.20, "gpt-4", "openai")
+            .await
+            .unwrap();
+        store
+            .update_usage(&h, 50, 5, 0, 0, 0.05, "claude-3", "anthropic")
+            .await
+            .unwrap();
+
+        // Plain rollup: one bucket for alice.
+        let plain = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].requests, 3);
+        assert_eq!(plain[0].input_tokens, 350);
+        assert!((plain[0].cost_usd - 0.35).abs() < 1e-9);
+        assert!(plain[0].model.is_none() && plain[0].provider.is_none());
+
+        // Breakdown by model only: two buckets (gpt-4, claude-3).
+        let by_model = store
+            .get_usage_by_owner_breakdown(Some("alice"), true, false, None)
+            .await
+            .unwrap();
+        assert_eq!(by_model.len(), 2);
+        let gpt = by_model.iter().find(|r| r.model.as_deref() == Some("gpt-4"));
+        let claude = by_model
+            .iter()
+            .find(|r| r.model.as_deref() == Some("claude-3"));
+        let gpt = gpt.expect("gpt-4 bucket");
+        let claude = claude.expect("claude-3 bucket");
+        assert_eq!(gpt.requests, 2);
+        assert_eq!(gpt.input_tokens, 300);
+        assert!((gpt.cost_usd - 0.30).abs() < 1e-9);
+        assert_eq!(claude.requests, 1);
+        assert!((claude.cost_usd - 0.05).abs() < 1e-9);
+        // provider not requested -> None for all rows
+        assert!(by_model.iter().all(|r| r.provider.is_none()));
+
+        // Breakdown by both model and provider: same two buckets here since
+        // each model maps to exactly one provider.
+        let by_both = store
+            .get_usage_by_owner_breakdown(Some("alice"), true, true, None)
+            .await
+            .unwrap();
+        assert_eq!(by_both.len(), 2);
+        let gpt = by_both
+            .iter()
+            .find(|r| r.model.as_deref() == Some("gpt-4"))
+            .expect("gpt-4 bucket");
+        assert_eq!(gpt.provider.as_deref(), Some("openai"));
+
+        // Breakdown by provider only: two buckets (openai, anthropic).
+        let by_provider = store
+            .get_usage_by_owner_breakdown(Some("alice"), false, true, None)
+            .await
+            .unwrap();
+        assert_eq!(by_provider.len(), 2);
+        assert!(by_provider
+            .iter()
+            .any(|r| r.provider.as_deref() == Some("openai") && r.requests == 2));
+        assert!(by_provider
+            .iter()
+            .any(|r| r.provider.as_deref() == Some("anthropic") && r.requests == 1));
+        assert!(by_provider.iter().all(|r| r.model.is_none()));
+
+        // JSON shape: omitted fields must not appear when not requested.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("model"), "model must be omitted in plain rollup");
+        assert!(
+            !json.contains("provider"),
+            "provider must be omitted in plain rollup"
+        );
     }
 
     /// Regression test for eavs-64qn.

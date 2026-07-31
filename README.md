@@ -259,6 +259,47 @@ eavs key bind <key-id> --oauth-user "<user-id>"
 eavs key bind <key-id> --clear
 ```
 
+#### Owner labels & cost rollups
+
+Each key can carry an optional, **organizational** `owner` label (a tag or
+user) so usage and cost can be rolled up across multiple keys that belong to
+the same person/team. `owner` is independent of `oauth_user` (which binds a
+key to a specific upstream OAuth account/seat).
+
+```bash
+# Create a key already tagged with an owner
+# (an existing key can be (re)tagged via the admin API below)
+eavs key create --name "alice-laptop" --owner "alice"
+eavs key create --name "alice-ci"      --owner "alice"
+eavs key create --name "bob-prod"     --owner "bob"
+
+# Cost rollup grouped by owner
+eavs cost by-owner
+
+# Restrict to one owner, last 7 days
+eavs cost by-owner --owner alice --days 7
+
+# Sub-aggregate within each owner by model and/or provider
+eavs cost by-owner --breakdown model
+eavs cost by-owner --breakdown model,provider --format json
+```
+
+Equivalent admin API:
+
+```bash
+# Set / clear an owner on an existing key
+#   PUT /admin/keys/<key-id-or-hash>/owner   {"owner": "alice"}
+#   PUT /admin/keys/<key-id-or-hash>/owner   {"owner": null}
+
+# Owner usage rollup
+#   GET  /admin/usage/by-owner
+#   GET  /admin/usage/by-owner?owner=alice&days=7
+#   GET  /admin/usage/by-owner?breakdown=model,provider
+```
+
+Owner is denormalized onto each usage row, so rollups need no join and
+survive key deletion/recreation.
+
 ### OAuth Authentication
 
 Authenticate with providers that use OAuth instead of static API keys:

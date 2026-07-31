@@ -955,6 +955,31 @@ pub struct OwnerUsageQuery {
     pub owner: Option<String>,
     /// Restrict to the last N days. Omit for all-time.
     pub days: Option<u32>,
+    /// Optional sub-aggregation within each owner. Accepts `model` and/or
+    /// `provider` (comma-separated, e.g. `?breakdown=model,provider`). When
+    /// set, each returned row also carries the dimension(s) it was grouped by.
+    #[serde(default)]
+    pub breakdown: Option<String>,
+}
+
+/// Parse the `?breakdown=` query value into `(by_model, by_provider)` flags.
+///
+/// Tokens are matched case-insensitively and trimmed. Unknown tokens are
+/// ignored so the endpoint stays forward-compatible.
+fn parse_owner_breakdown(value: Option<&str>) -> (bool, bool) {
+    let Some(value) = value else {
+        return (false, false);
+    };
+    let mut by_model = false;
+    let mut by_provider = false;
+    for tok in value.split(',') {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "model" => by_model = true,
+            "provider" => by_provider = true,
+            _ => {}
+        }
+    }
+    (by_model, by_provider)
 }
 
 /// Aggregate usage/cost grouped by owner across all keys.
@@ -981,18 +1006,29 @@ pub async fn owner_usage_handler(
         )
     })?;
 
-    let rollup = store
-        .get_usage_by_owner(query.owner.as_deref(), query.days)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(KeyApiError::new(
-                    format!("Failed to get owner usage: {}", e),
-                    "usage_failed",
-                )),
+    let (by_model, by_provider) = parse_owner_breakdown(query.breakdown.as_deref());
+    let rollup = if by_model || by_provider {
+        store
+            .get_usage_by_owner_breakdown(
+                query.owner.as_deref(),
+                by_model,
+                by_provider,
+                query.days,
             )
-        })?;
+            .await
+    } else {
+        store.get_usage_by_owner(query.owner.as_deref(), query.days).await
+    };
+
+    let rollup = rollup.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(KeyApiError::new(
+                format!("Failed to get owner usage: {}", e),
+                "usage_failed",
+            )),
+        )
+    })?;
 
     Ok(Json(rollup))
 }
@@ -2287,5 +2323,36 @@ mod tests {
 
         assert!(constant_time_eq(&a, &b));
         assert!(!constant_time_eq(&a, &c));
+    }
+
+    // ============================================================================
+    // Owner Breakdown Parsing (eavs-5gf3)
+    // ============================================================================
+
+    #[test]
+    fn test_parse_owner_breakdown_none() {
+        assert_eq!(parse_owner_breakdown(None), (false, false));
+        assert_eq!(parse_owner_breakdown(Some("")), (false, false));
+    }
+
+    #[test]
+    fn test_parse_owner_breakdown_single() {
+        assert_eq!(parse_owner_breakdown(Some("model")), (true, false));
+        assert_eq!(parse_owner_breakdown(Some("provider")), (false, true));
+        // case-insensitive + surrounding whitespace
+        assert_eq!(parse_owner_breakdown(Some("  MODEL ")), (true, false));
+    }
+
+    #[test]
+    fn test_parse_owner_breakdown_both() {
+        assert_eq!(parse_owner_breakdown(Some("model,provider")), (true, true));
+        assert_eq!(parse_owner_breakdown(Some("provider, model")), (true, true));
+    }
+
+    #[test]
+    fn test_parse_owner_breakdown_ignores_unknown() {
+        // Unknown tokens are silently ignored (forward-compatible).
+        assert_eq!(parse_owner_breakdown(Some("model,foo")), (true, false));
+        assert_eq!(parse_owner_breakdown(Some("bogus")), (false, false));
     }
 }
