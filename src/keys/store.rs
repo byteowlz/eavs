@@ -1525,6 +1525,171 @@ mod tests {
         );
     }
 
+    /// Rollups survive key revocation (eavs-5gf3).
+    ///
+    /// The issue scope requires that owner is denormalized onto each
+    /// usage_history row so rollups "need no join and survive key deletion".
+    /// This guards the **production** path — `disable_key` (soft delete), used
+    /// by `DELETE /admin/keys/:id` — against a refactor that re-introduces a
+    /// join on `virtual_keys` (which would drop a revoked key's historical
+    /// usage from the owner rollup).
+    ///
+    /// Note: the hard-delete path (`delete_key`, currently dead code) does NOT
+    /// preserve history — its `ON DELETE CASCADE` foreign key fires because
+    /// sqlx enables `PRAGMA foreign_keys = ON`. That is tracked separately as
+    /// eavs-yxp7; it is orthogonal to owner labels (affects all usage_history)
+    /// and out of scope for the owner feature.
+    #[tokio::test]
+    async fn test_owner_rollup_survives_key_deletion() {
+        let store = KeyStore::in_memory().await.unwrap();
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("soft-doomed".to_string()),
+                owner: Some("alice".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let h = resp.key_hash;
+
+        store
+            .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
+            .await
+            .unwrap();
+
+        // Sanity before revocation.
+        assert_eq!(
+            store
+                .get_usage_by_owner(Some("alice"), None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Soft-delete (revoke): removes the key from the in-memory cache but
+        // must NOT remove its historical usage from the owner rollup.
+        assert!(store.disable_key(&h).await.unwrap());
+        assert!(store.get_by_hash(&h).is_none(), "key removed from cache");
+
+        // Owner rollup reads usage_history directly -> survives.
+        let after = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        assert_eq!(after.len(), 1, "alice bucket must survive revocation");
+        assert_eq!(after[0].requests, 1);
+        assert_eq!(after[0].input_tokens, 100);
+        assert!((after[0].cost_usd - 0.10).abs() < 1e-9);
+
+        // Per-key rollup: row still present (disabled=1), so key_id resolves.
+        let by_key = store.get_usage_by_key(None).await.unwrap();
+        assert_eq!(by_key.len(), 1);
+        assert_eq!(by_key[0].owner, "alice");
+        assert_eq!(
+            by_key[0].key_id, resp.key_id,
+            "key_id preserved on soft delete (row retained, disabled)"
+        );
+    }
+
+    /// `update_owner` mutates cache + DB and the denormalized owner on
+    /// *subsequent* usage rows picks up the new label (eavs-5gf3).
+    ///
+    /// Guards the setter itself (no prior coverage) plus the property that
+    /// historical rows keep their original owner while new rows carry the new
+    /// one. A broken setter (e.g. cache not updated) would attribute new usage
+    /// to the stale owner.
+    #[tokio::test]
+    async fn test_update_owner_and_denormalization() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("reassigned".to_string()),
+                owner: Some("alice".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let h = resp.key_hash;
+
+        // Usage while owned by alice.
+        store
+            .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
+            .await
+            .unwrap();
+
+        // Reassign to bob.
+        assert!(
+            store.update_owner(&h, Some("bob".to_string())).await.unwrap(),
+            "update_owner returns true for existing key"
+        );
+        // Cache must reflect the new owner immediately.
+        assert_eq!(
+            store.get_by_hash(&h).unwrap().owner.as_deref(),
+            Some("bob"),
+            "cache must reflect updated owner"
+        );
+        // Usage recorded after the change must be attributed to bob.
+        store
+            .update_usage(&h, 200, 20, 0, 0, 0.20, "gpt-4", "openai")
+            .await
+            .unwrap();
+
+        // Both buckets present, each with its own slice of history.
+        let all = store.get_usage_by_owner(None, None).await.unwrap();
+        let alice = all.iter().find(|r| r.owner == "alice").expect("alice bucket");
+        let bob = all.iter().find(|r| r.owner == "bob").expect("bob bucket");
+        assert_eq!(alice.requests, 1);
+        assert!((alice.cost_usd - 0.10).abs() < 1e-9);
+        assert_eq!(bob.requests, 1);
+        assert!((bob.cost_usd - 0.20).abs() < 1e-9);
+
+        // Clearing the owner is also supported.
+        assert!(store.update_owner(&h, None).await.unwrap());
+        assert!(store.get_by_hash(&h).unwrap().owner.is_none());
+
+        // Nonexistent key: setter returns false, not an error.
+        assert!(!store
+            .update_owner("nonexistent-hash", Some("x".to_string()))
+            .await
+            .unwrap());
+    }
+
+    /// Owner round-trips through `refresh_cache` (DB -> cache) (eavs-5gf3).
+    ///
+    /// `refresh_cache` hardcodes the SELECT column list and `KeyRow` fields.
+    /// If either ever drops `owner`, the cache loses it on restart and every
+    /// subsequent usage row gets a NULL owner, silently breaking rollups.
+    #[tokio::test]
+    async fn test_owner_survives_refresh_cache() {
+        let store = KeyStore::in_memory().await.unwrap();
+
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("persisted".to_string()),
+                owner: Some("alice".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let h = resp.key_hash;
+
+        // Owner present in cache before refresh.
+        assert_eq!(
+            store.get_by_hash(&h).unwrap().owner.as_deref(),
+            Some("alice")
+        );
+
+        // Reload cache straight from the DB.
+        store.refresh_cache().await.unwrap();
+
+        // Owner must survive the DB round-trip.
+        let reloaded = store.get_by_hash(&h).expect("key reloaded");
+        assert_eq!(
+            reloaded.owner.as_deref(),
+            Some("alice"),
+            "owner must survive refresh_cache (DB -> cache)"
+        );
+    }
+
     /// Regression test for eavs-64qn.
     ///
     /// Simulates upgrading a keys.db created by an older EAVS version whose
