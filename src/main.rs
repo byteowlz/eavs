@@ -950,6 +950,8 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
     match action {
         KeyCommands::Create {
             name,
+            owner,
+            oauth_user,
             models,
             blocked_models,
             providers,
@@ -970,6 +972,8 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             run_key_create_direct(
                 &store,
                 name,
+                owner,
+                oauth_user,
                 models,
                 blocked_models,
                 providers,
@@ -1074,11 +1078,19 @@ async fn run_cost_command(action: cli::CostCommands) -> Result<(), cli::CliError
         CostCommands::ByOwner {
             owner,
             days,
+            breakdown,
             format,
             config,
         } => {
             let store = open_store(config).await?;
-            run_cost_by_owner_direct(&store, owner.as_deref(), days, format).await
+            run_cost_by_owner_direct(
+                &store,
+                owner.as_deref(),
+                breakdown.as_deref(),
+                days,
+                format,
+            )
+            .await
         }
         CostCommands::ByKey {
             days,

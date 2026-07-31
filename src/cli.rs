@@ -438,6 +438,14 @@ pub enum KeyCommands {
         #[arg(short, long)]
         name: Option<String>,
 
+        /// Organizational owner/tag for grouping keys under one user (rollups)
+        #[arg(long)]
+        owner: Option<String>,
+
+        /// Bind this key to an upstream OAuth user/seat
+        #[arg(long = "oauth-user")]
+        oauth_user: Option<String>,
+
         /// Allowed model patterns (glob), can be specified multiple times
         #[arg(short = 'm', long = "model")]
         models: Vec<String>,
@@ -594,6 +602,11 @@ pub enum CostCommands {
         /// Only include usage from the last N days (default: all-time)
         #[arg(long)]
         days: Option<u32>,
+
+        /// Sub-aggregate within each owner: `model`, `provider`, or
+        /// `model,provider`
+        #[arg(long)]
+        breakdown: Option<String>,
 
         /// Output format
         #[arg(long, default_value = "text")]
@@ -1324,6 +1337,8 @@ fn parse_expiration(s: &str) -> Option<String> {
 pub async fn run_key_create_direct(
     store: &KeyStore,
     name: Option<String>,
+    owner: Option<String>,
+    oauth_user: Option<String>,
     models: Vec<String>,
     blocked_models: Vec<String>,
     providers: Vec<String>,
@@ -1360,8 +1375,8 @@ pub async fn run_key_create_direct(
             budget_window: None,
         },
         metadata: serde_json::Value::Null,
-        owner: None,
-        oauth_user: None,
+        owner,
+        oauth_user,
         oauth_account: None,
     };
 
@@ -1382,6 +1397,12 @@ pub async fn run_key_create_direct(
             println!("  Hash:    {}", response.key_hash);
             if let Some(expires) = response.expires_at {
                 println!("  Expires: {}", expires);
+            }
+            if let Some(owner) = response.owner.as_deref() {
+                println!("  Owner:   {}", owner);
+            }
+            if let Some(ou) = response.oauth_user.as_deref() {
+                println!("  OAuth:   {}", ou);
             }
             println!();
             println!("Save this key securely - it cannot be retrieved later.");
@@ -1641,16 +1662,25 @@ pub async fn run_key_bind_direct(
 }
 
 /// Cost rollup grouped by owner (tag/user), read directly from the key store.
+///
+/// When `breakdown` requests model and/or provider sub-aggregation, the rows
+/// are further grouped by those dimensions within each owner.
 pub async fn run_cost_by_owner_direct(
     store: &KeyStore,
     owner: Option<&str>,
+    breakdown: Option<&str>,
     days: Option<u32>,
     format: OutputFormat,
 ) -> Result<(), CliError> {
-    let rows = store
-        .get_usage_by_owner(owner, days)
-        .await
-        .map_err(|e| CliError::Other(format!("Failed to get owner usage: {}", e)))?;
+    let (by_model, by_provider) = parse_breakdown(breakdown);
+    let rows = if by_model || by_provider {
+        store
+            .get_usage_by_owner_breakdown(owner, by_model, by_provider, days)
+            .await
+    } else {
+        store.get_usage_by_owner(owner, days).await
+    }
+    .map_err(|e| CliError::Other(format!("Failed to get owner usage: {}", e)))?;
 
     match format {
         OutputFormat::Json => {
@@ -1661,11 +1691,9 @@ pub async fn run_cost_by_owner_direct(
                 println!("No usage records found.");
                 return Ok(());
             }
-            println!(
-                "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12}",
-                "OWNER", "REQS", "INPUT", "OUTPUT", "CACHE_RD", "CACHE_WR", "COST"
-            );
-            println!("{}", "-".repeat(92));
+            let (header, width) = owner_table_header(by_model, by_provider);
+            println!("{}", header);
+            println!("{}", "-".repeat(width));
             let mut total_cost = 0.0;
             for r in &rows {
                 let owner = if r.owner.is_empty() {
@@ -1674,22 +1702,98 @@ pub async fn run_cost_by_owner_direct(
                     &r.owner
                 };
                 println!(
-                    "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12} ${:>11.4}",
-                    truncate(owner, 20),
-                    r.requests,
-                    r.input_tokens,
-                    r.output_tokens,
-                    r.cached_tokens,
-                    r.cache_write_tokens,
-                    r.cost_usd
+                    "{}",
+                    owner_table_row(
+                        by_model,
+                        by_provider,
+                        owner,
+                        r.model.as_deref().unwrap_or(""),
+                        r.provider.as_deref().unwrap_or(""),
+                        r.requests,
+                        r.input_tokens,
+                        r.output_tokens,
+                        r.cached_tokens,
+                        r.cache_write_tokens,
+                        r.cost_usd,
+                    )
                 );
                 total_cost += r.cost_usd;
             }
-            println!("{}", "-".repeat(92));
-            println!("{:<20} {:>68} ${:>11.4}", "TOTAL", "", total_cost);
+            println!("{}", "-".repeat(width));
+            // Right-align the cost under the COST column.
+            let pad = width.saturating_sub(16);
+            println!("{:<width$}${:>10.4}", "TOTAL", total_cost, width = pad);
         }
     }
     Ok(())
+}
+
+/// Parse the `--breakdown` value into `(by_model, by_provider)` flags.
+fn parse_breakdown(value: Option<&str>) -> (bool, bool) {
+    let Some(value) = value else {
+        return (false, false);
+    };
+    let mut by_model = false;
+    let mut by_provider = false;
+    for tok in value.split(',') {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "model" => by_model = true,
+            "provider" => by_provider = true,
+            _ => {}
+        }
+    }
+    (by_model, by_provider)
+}
+
+/// Text-table header for the owner rollup. Returns `(line, total_width)`.
+fn owner_table_header(by_model: bool, by_provider: bool) -> (String, usize) {
+    let mut s = format!("{:<20}", "OWNER");
+    if by_model {
+        s.push_str(&format!(" {:<22}", "MODEL"));
+    }
+    if by_provider {
+        s.push_str(&format!(" {:<14}", "PROVIDER"));
+    }
+    s.push_str(&format!(
+        " {:>8} {:>12} {:>12} {:>12} {:>12} {:>11}",
+        "REQS", "INPUT", "OUTPUT", "CACHE_RD", "CACHE_WR", "COST"
+    ));
+    let width = s.chars().count();
+    (s, width)
+}
+
+/// One text-table row for the owner rollup, matching [`owner_table_header`].
+#[allow(clippy::too_many_arguments)]
+fn owner_table_row(
+    by_model: bool,
+    by_provider: bool,
+    owner: &str,
+    model: &str,
+    provider: &str,
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    cache_write_tokens: u64,
+    cost_usd: f64,
+) -> String {
+    let mut s = format!("{:<20}", truncate(owner, 20));
+    if by_model {
+        s.push_str(&format!(" {:<22}", truncate(model, 22)));
+    }
+    if by_provider {
+        s.push_str(&format!(" {:<14}", truncate(provider, 14)));
+    }
+    s.push_str(&format!(
+        " {:>8} {:>12} {:>12} {:>12} {:>12} ${:>10.4}",
+        requests,
+        input_tokens,
+        output_tokens,
+        cached_tokens,
+        cache_write_tokens,
+        cost_usd,
+    ));
+    s
 }
 
 /// Cost rollup grouped by virtual key, read directly from the key store.
