@@ -21,6 +21,12 @@
           "default": 3033,
           "minimum": 1,
           "maximum": 65535
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "Required capability token for every HTTP listener endpoint. Supports env:, keychain:, and literal secret references. EAVS_AUTH_TOKEN takes precedence.",
+          "minLength": 1,
+          "examples": ["env:EAVS_AUTH_TOKEN", "keychain:eavs-listener"]
         }
       },
       "additionalProperties": false

@@ -226,6 +226,9 @@ impl Default for EgressConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Capability token required by the HTTP listener. Supports `env:`,
+    /// `keychain:`, and literal secret references. `EAVS_AUTH_TOKEN` overrides it.
+    pub auth_token: Option<String>,
     /// Maximum request body size in bytes. Default: 10 MB.
     /// Set to 0 for unlimited (not recommended).
     pub max_body_size: usize,
@@ -238,6 +241,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3033,
+            auth_token: None,
             max_body_size: 10 * 1024 * 1024, // 10 MB default
             log_redact: true,
         }
@@ -1080,7 +1084,10 @@ impl KeysConfig {
 
     /// Get the master key (from env if specified).
     pub fn resolved_master_key(&self) -> Option<String> {
-        self.master_key.as_ref().and_then(|k| get_api_key(k))
+        self.master_key
+            .as_ref()
+            .and_then(|key| get_api_key(key))
+            .filter(|key| !key.trim().is_empty())
     }
 
     /// Get the resolved word lists path.
@@ -1113,6 +1120,37 @@ impl KeysConfig {
 }
 
 impl AppConfig {
+    /// Resolve the capability token protecting every HTTP listener endpoint.
+    ///
+    /// Precedence: `EAVS_AUTH_TOKEN` > `server.auth_token` > the legacy admin
+    /// master key. The master-key fallback keeps existing secured deployments
+    /// usable while ensuring loopback is never treated as an authorization boundary.
+    pub fn resolved_listener_auth_token(&self) -> Option<String> {
+        if let Some(token) = env_var_nonempty("EAVS_AUTH_TOKEN") {
+            return Some(token);
+        }
+        if let Some(token) = self
+            .server
+            .auth_token
+            .as_deref()
+            .and_then(get_api_key)
+            .filter(|token| !token.trim().is_empty())
+        {
+            return Some(token);
+        }
+
+        let master_key = self
+            .keys
+            .resolved_master_key()
+            .filter(|token| !token.trim().is_empty());
+        if master_key.is_some() {
+            tracing::warn!(
+                "server.auth_token is not configured; using keys.master_key as the listener capability"
+            );
+        }
+        master_key
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_with_override_path(None)
     }
@@ -1241,15 +1279,38 @@ impl AppConfig {
         }
 
         if !config_path.exists() {
-            std::fs::write(config_path, include_str!("../config/config.example.toml")).map_err(
-                |e| {
-                    ConfigError::Message(format!(
-                        "Failed to write default config file {}: {}",
-                        config_path.display(),
-                        e
-                    ))
-                },
-            )?;
+            use rand::RngCore;
+            use std::io::Write;
+
+            let mut token_bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+            let generated_token = format!("eavs_{}", hex::encode(token_bytes));
+            let contents = include_str!("../config/config.example.toml").replace(
+                "auth_token = \"env:EAVS_AUTH_TOKEN\"",
+                &format!("auth_token = \"{}\"", generated_token),
+            );
+
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(config_path).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to create default config file {}: {}",
+                    config_path.display(),
+                    e
+                ))
+            })?;
+            file.write_all(contents.as_bytes()).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to write default config file {}: {}",
+                    config_path.display(),
+                    e
+                ))
+            })?;
         }
 
         Ok(())
@@ -1435,6 +1496,27 @@ mod tests {
     fn test_get_api_key_raw() {
         let key = "sk-12345";
         assert_eq!(get_api_key(key), Some("sk-12345".to_string()));
+    }
+
+    #[test]
+    fn first_run_config_generates_listener_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("eavs").join("config.toml");
+
+        AppConfig::init_default_global_config(&path).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("auth_token = \"eavs_"));
+        assert!(!contents.contains("auth_token = \"env:EAVS_AUTH_TOKEN\""));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

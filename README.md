@@ -26,8 +26,9 @@ A local, Rust-based LLM proxy with zero-latency bidirectional streaming, full lo
 ## Quick Start
 
 ```bash
-# Set your API key
+# Set your upstream API key and a capability for the local listener
 export OPENAI_API_KEY=your_key_here
+export EAVS_AUTH_TOKEN="$(openssl rand -hex 32)"
 
 # Run the server (foreground)
 eavs serve
@@ -38,6 +39,7 @@ eavs service start
 # Test with curl
 curl http://localhost:3033/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "X-Eavs-Token: $EAVS_AUTH_TOKEN" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
@@ -588,6 +590,12 @@ eavs setup test-all                  # Test all providers
 
 ## API Reference
 
+Every listener endpoint, including `/health`, requires the capability configured
+by `EAVS_AUTH_TOKEN` or `server.auth_token`. Send it as
+`X-Eavs-Token: $EAVS_AUTH_TOKEN`. Bearer authentication is also accepted for
+control-plane calls; use `X-Eavs-Token` when `Authorization` carries a virtual
+API key.
+
 ### Proxy Endpoints
 
 All `/v1/*` requests are forwarded to the configured upstream provider.
@@ -633,7 +641,8 @@ Use aliases in OpenAI-compatible requests:
 #### List Providers
 
 ```bash
-curl http://localhost:3033/providers
+curl http://localhost:3033/providers \
+  -H "X-Eavs-Token: $EAVS_AUTH_TOKEN"
 ```
 
 #### Inject Context

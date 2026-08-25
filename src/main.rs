@@ -47,6 +47,7 @@ use crate::logging::{start_logging_task, Logger};
 use crate::plugins::start_analysis_plugins;
 use crate::state::{start_cleanup_task, AppState};
 use axum::{
+    middleware,
     routing::{any, delete, get, patch, post, put},
     Router,
 };
@@ -717,10 +718,16 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         config.server.port = p;
     }
 
-    tracing::info!("Configuration loaded");
+    let listener_token = config.resolved_listener_auth_token().unwrap_or_else(|| {
+        panic!(
+            "HTTP listener authentication is required: set EAVS_AUTH_TOKEN, \
+             server.auth_token, or keys.master_key"
+        )
+    });
+
     tracing::info!(
-        "Available providers: {:?}",
-        config.providers.keys().collect::<Vec<_>>()
+        provider_count = config.providers.len(),
+        "Configuration loaded"
     );
 
     // Get server address from config
@@ -876,7 +883,14 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
         // Default proxy route with X-Provider header or auto-detection
         .route("/v1/*path", any(proxy::proxy_handler))
-        .with_state(state);
+        .with_state(state)
+        // Loopback reachability is not authorization. Protect every HTTP and
+        // WebSocket route at the listener boundary before handlers can reveal
+        // configuration or process requests.
+        .layer(middleware::from_fn_with_state(
+            api::ListenerAuth::new(listener_token),
+            api::require_listener_auth,
+        ));
 
     // Start mitmproxy capture if enabled
     let _capture_handle = if capture_config.enabled {
