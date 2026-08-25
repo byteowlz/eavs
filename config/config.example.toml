@@ -13,6 +13,9 @@
 [server]
 host = "127.0.0.1"
 port = 3033
+# Required capability for every listener endpoint. Prefer an environment or
+# keychain reference rather than a literal secret.
+auth_token = "env:EAVS_AUTH_TOKEN"
 
 # =============================================================================
 # Providers

@@ -925,6 +925,8 @@ pub enum OutputFormat {
 pub struct CliConfig {
     pub server_url: String,
     pub timeout: Duration,
+    /// Capability used for listener-level authentication.
+    pub listener_token: Option<String>,
 }
 
 impl Default for CliConfig {
@@ -957,9 +959,19 @@ impl CliConfig {
             format!("http://127.0.0.1:{}", port)
         };
 
+        let listener_token = config
+            .as_ref()
+            .and_then(crate::config::AppConfig::resolved_listener_auth_token)
+            .or_else(|| {
+                std::env::var("EAVS_AUTH_TOKEN")
+                    .ok()
+                    .filter(|token| !token.trim().is_empty())
+            });
+
         Self {
             server_url,
             timeout: Duration::from_secs(30),
+            listener_token,
         }
     }
 }
@@ -987,6 +999,14 @@ impl EavsClient {
         })
     }
 
+    fn authenticate_listener(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(token) = self.config.listener_token.as_deref() {
+            request.header("X-Eavs-Token", token)
+        } else {
+            request
+        }
+    }
+
     async fn post_chat_completions(
         &self,
         body: &serde_json::Value,
@@ -1005,6 +1025,7 @@ impl EavsClient {
         if let Some(key) = api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
+        req = self.authenticate_listener(req);
 
         let resp = req.send().await.map_err(CliError::Request)?;
 
@@ -1201,8 +1222,7 @@ impl EavsClient {
         let url = format!("{}/health", self.config.server_url);
 
         let resp = self
-            .client
-            .get(&url)
+            .authenticate_listener(self.client.get(&url))
             .send()
             .await
             .map_err(CliError::Request)?;
@@ -1235,8 +1255,7 @@ impl EavsClient {
         let url = format!("{}/providers", self.config.server_url);
 
         let resp = self
-            .client
-            .get(&url)
+            .authenticate_listener(self.client.get(&url))
             .send()
             .await
             .map_err(CliError::Request)?;
@@ -3251,15 +3270,31 @@ pub fn is_port_available(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-/// Check if an EAVS server is running at the given URL
+/// Check if an EAVS server is running at the given URL.
 pub async fn is_eavs_server_running(url: &str) -> bool {
+    let token = crate::config::AppConfig::load_or_init()
+        .ok()
+        .and_then(|config| config.resolved_listener_auth_token())
+        .or_else(|| {
+            std::env::var("EAVS_AUTH_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+        });
+    is_eavs_server_running_with_token(url, token.as_deref()).await
+}
+
+async fn is_eavs_server_running_with_token(url: &str, token: Option<&str>) -> bool {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap();
 
     let health_url = format!("{}/health", url);
-    match client.get(&health_url).send().await {
+    let mut request = client.get(&health_url);
+    if let Some(token) = token {
+        request = request.header("X-Eavs-Token", token);
+    }
+    match request.send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 // Check that we don't get HTML (which would indicate a non-EAVS server)
@@ -3338,9 +3373,24 @@ pub async fn ensure_server_running(
     let host = url.host_str().unwrap_or("127.0.0.1");
     let preferred_port = url.port().unwrap_or(effective_port);
 
+    let listener_token = if let Some(path) = config_path {
+        crate::config::AppConfig::load_from(path)
+            .ok()
+            .and_then(|config| config.resolved_listener_auth_token())
+    } else {
+        crate::config::AppConfig::load_or_init()
+            .ok()
+            .and_then(|config| config.resolved_listener_auth_token())
+    }
+    .or_else(|| {
+        std::env::var("EAVS_AUTH_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+    });
+
     // First, check if EAVS is already running at the preferred URL
     let check_url = format!("{}://{}:{}", url.scheme(), host, preferred_port);
-    if is_eavs_server_running(&check_url).await {
+    if is_eavs_server_running_with_token(&check_url, listener_token.as_deref()).await {
         return Ok(ServerStatus {
             url: check_url,
             port: preferred_port,
@@ -3378,7 +3428,7 @@ pub async fn ensure_server_running(
     let timeout = Duration::from_secs(10);
 
     while start.elapsed() < timeout {
-        if is_eavs_server_running(&new_url).await {
+        if is_eavs_server_running_with_token(&new_url, listener_token.as_deref()).await {
             eprintln!("EAVS server started successfully");
             return Ok(ServerStatus {
                 url: new_url,

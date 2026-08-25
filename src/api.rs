@@ -5,9 +5,14 @@ use crate::oauth::{
 };
 use crate::state::{AppState, ConversationMetadata, InjectionPayload};
 use axum::{
+    body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    response::sse::{Event, Sse},
+    http::{HeaderMap, Request, StatusCode},
+    middleware::Next,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use futures::stream::Stream;
@@ -25,6 +30,59 @@ const MAX_INJECTION_MESSAGES: usize = 100;
 
 /// Valid roles for injected messages
 const VALID_INJECTION_ROLES: &[&str] = &["system", "user", "assistant"];
+
+/// Authentication state shared by the listener middleware.
+#[derive(Clone)]
+pub struct ListenerAuth {
+    token: std::sync::Arc<str>,
+}
+
+impl ListenerAuth {
+    pub fn new(token: String) -> Self {
+        Self {
+            token: token.into(),
+        }
+    }
+}
+
+fn listener_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-eavs-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        })
+}
+
+fn listener_request_is_authorized(headers: &HeaderMap, expected: &str) -> bool {
+    listener_token_from_headers(headers)
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+}
+
+/// Require the listener capability on every route, including health and metadata.
+/// `X-Eavs-Token` avoids colliding with virtual keys carried in `Authorization`;
+/// Bearer auth is also accepted for control-plane clients.
+pub async fn require_listener_auth(
+    State(auth): State<ListenerAuth>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if listener_request_is_authorized(request.headers(), &auth.token) {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": "Listener authentication required",
+            "code": "listener_unauthorized"
+        })),
+    )
+        .into_response()
+}
 
 /// Validate injection payload to prevent abuse.
 fn validate_injection_payload(
@@ -2074,6 +2132,7 @@ mod tests {
         StateConfig,
     };
     use crate::state::Injection;
+    use axum::{middleware, routing::get, Router};
     use std::collections::HashMap;
 
     fn mock_state() -> AppState {
@@ -2172,6 +2231,48 @@ mod tests {
         assert_eq!(providers.len(), 2);
         assert!(providers.contains(&"default".to_string()));
         assert!(providers.contains(&"anthropic".to_string()));
+    }
+
+    #[tokio::test]
+    async fn listener_auth_denies_provider_and_defaults_disclosure() {
+        let state = mock_state_with_providers();
+        let app = Router::new()
+            .route("/providers", get(providers_handler))
+            .route("/defaults", get(defaults_handler))
+            .with_state(state)
+            .layer(middleware::from_fn_with_state(
+                ListenerAuth::new("test-listener-capability".to_string()),
+                require_listener_auth,
+            ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        for path in ["/providers", "/defaults"] {
+            let response = client
+                .get(format!("http://{addr}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = response.text().await.unwrap();
+            assert!(!body.contains("anthropic"));
+            assert!(!body.contains("default"));
+        }
+
+        let response = client
+            .get(format!("http://{addr}/providers"))
+            .header("X-Eavs-Token", "test-listener-capability")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let providers: Vec<String> = response.json().await.unwrap();
+        assert!(providers.contains(&"anthropic".to_string()));
+
+        server.abort();
     }
 
     #[tokio::test]

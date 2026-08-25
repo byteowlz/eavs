@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-25
+
+### Security
+- Require a capability token on every HTTP/WebSocket listener route, including
+  health and provider metadata. Unauthenticated requests now receive `401`
+  without disclosing configured providers. Fresh installations generate a
+  256-bit listener token in the user-only configuration file.
+
 ## [0.8.1] - 2026-07-28
 
 ### Fixed
