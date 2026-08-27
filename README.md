@@ -344,6 +344,28 @@ value = true  # Force store=true for Codex models (fixes Pi 404 errors)
 
 Policy rules support glob matching on provider and model names.
 
+### Delegated Fetch Protection
+
+Provider-side URL fetching and hosted tools travel through the allowed inference
+connection, bypassing EAVS's network ACL. EAVS therefore strips remote
+`input_file.file_url` items and provider-hosted tools by default on HTTP,
+Realtime WebSocket, and Codex WebSocket requests.
+
+```toml
+[delegated_fetch]
+# Permit remote file URLs only when this inference channel is trusted.
+enabled = false
+# Allow individual provider-hosted tool types explicitly.
+allowed_server_tools = [] # e.g. ["web_search", "web_fetch"]
+```
+
+Client-executed `function` and `custom` tools are unaffected. For authenticated
+virtual keys, `metadata.delegated_fetch.remote_content` overrides the global
+remote-content setting and defaults to `false` when absent, enabling tenant-level
+control without another admin endpoint. Each removal emits a structured
+`delegated_fetch_stripped` audit event with its JSON field path and target host
+when available.
+
 ### Network Access Control
 
 Restrict which upstream domains the proxy can connect to:

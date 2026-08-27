@@ -192,6 +192,7 @@ mod tests {
             logging: Default::default(),
             analysis: Default::default(),
             policy: Default::default(),
+            delegated_fetch: Default::default(),
             state: Default::default(),
             keys: Default::default(),
             capture: Default::default(),

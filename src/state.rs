@@ -382,6 +382,15 @@ pub enum AnalysisEvent {
         id: String,
         chunk: String,
     },
+    #[serde(rename = "delegated_fetch_stripped")]
+    DelegatedFetchStripped {
+        timestamp: i64,
+        id: String,
+        field_path: String,
+        capability: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_host: Option<String>,
+    },
     #[serde(rename = "response_complete")]
     #[allow(dead_code)]
     ResponseComplete {
@@ -607,6 +616,7 @@ mod tests {
                 plugins: Vec::new(),
             },
             policy: Default::default(),
+            delegated_fetch: Default::default(),
             keys: KeysConfig::default(),
             state: StateConfig::default(),
             capture: Default::default(),

@@ -49,6 +49,65 @@ struct ProxyErrorDetail {
     code: Option<String>,
 }
 
+fn emit_delegated_fetch_audit(
+    item: crate::delegated_fetch::StrippedItem,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+    correlation_id: &str,
+) {
+    tracing::warn!(
+        audit_event = "delegated_fetch_stripped",
+        correlation_id,
+        field_path = %item.field_path,
+        capability = %item.capability,
+        target_host = item.target_host.as_deref().unwrap_or(""),
+        "Stripped provider-delegated fetch capability"
+    );
+    let _ = analysis_tx.send(AnalysisEvent::DelegatedFetchStripped {
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        id: correlation_id.to_string(),
+        field_path: item.field_path,
+        capability: item.capability,
+        target_host: item.target_host,
+    });
+}
+
+fn sanitize_delegated_fetch_body(
+    body: &mut Value,
+    policy: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+    correlation_id: &str,
+) {
+    for item in crate::delegated_fetch::sanitize(body, policy) {
+        emit_delegated_fetch_audit(item, analysis_tx, correlation_id);
+    }
+}
+
+fn parse_and_sanitize_ws_json(
+    payload: &[u8],
+    policy: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+) -> Option<Value> {
+    let correlation_id = Uuid::new_v4().to_string();
+    match serde_json::from_slice::<Value>(payload) {
+        Ok(mut body) => {
+            sanitize_delegated_fetch_body(&mut body, policy, analysis_tx, &correlation_id);
+            Some(body)
+        }
+        Err(_) => {
+            emit_delegated_fetch_audit(
+                crate::delegated_fetch::StrippedItem {
+                    field_path: "/".to_string(),
+                    capability: "invalid_json_frame_rejected".to_string(),
+                    target_host: None,
+                },
+                analysis_tx,
+                &correlation_id,
+            );
+            None
+        }
+    }
+}
+
 impl ProxyError {
     fn new(message: impl Into<String>, error_type: impl Into<String>) -> Self {
         Self {
@@ -416,6 +475,20 @@ async fn proxy_handler_inner(
     } else {
         None
     };
+
+    // Provider-side URL fetching and hosted tools bypass EAVS's network ACL.
+    // Resolve tenant metadata after key validation, then sanitize before any
+    // routing transform or passthrough serialization.
+    let delegated_fetch_policy = state
+        .config
+        .delegated_fetch
+        .policy_for_key_metadata(validated_key.as_ref().map(|key| &key.metadata));
+    sanitize_delegated_fetch_body(
+        &mut json_body,
+        &delegated_fetch_policy,
+        &state.analysis_tx,
+        &correlation_id,
+    );
 
     // Register/update conversation in store if capture_all is enabled
     if state.config.state.capture_all {
@@ -2230,6 +2303,12 @@ async fn ws_proxy_handler_inner(
             .into_response();
     }
 
+    let delegated_fetch_policy = state
+        .config
+        .delegated_fetch
+        .policy_for_key_metadata(validated_key.as_ref().map(|key| &key.metadata));
+    let delegated_fetch_analysis_tx = state.analysis_tx.clone();
+
     ws.on_upgrade(move |mut client_socket| async move {
         let (session_token, mut injection_rx) = state.ws_sessions.register(&conversation_id);
         let _session_guard = WsSessionGuard {
@@ -2289,7 +2368,11 @@ async fn ws_proxy_handler_inner(
         let upstream_tx_client = upstream_tx.clone();
         let client_to_upstream = tokio::spawn(async move {
             while let Some(Ok(msg)) = client_receiver.next().await {
-                let Some(up_msg) = axum_to_tungstenite(msg) else {
+                let Some(up_msg) = sanitize_ws_client_message(
+                    msg,
+                    &delegated_fetch_policy,
+                    &delegated_fetch_analysis_tx,
+                ) else {
                     continue;
                 };
                 let is_close = matches!(up_msg, TungsteniteMessage::Close(_));
@@ -2538,6 +2621,11 @@ async fn codex_ws_handler_inner(
 
     // Clone what we need for the async upgrade closure
     let policy = state.config.policy.clone();
+    let delegated_fetch_policy = state
+        .config
+        .delegated_fetch
+        .policy_for_key_metadata(validated_key.as_ref().map(|key| &key.metadata));
+    let delegated_fetch_analysis_tx = state.analysis_tx.clone();
     let provider_name_for_policy = provider_name.clone();
     let provider_name_for_usage = provider_name.clone();
     let provider_headers = provider_config.headers.clone();
@@ -2607,36 +2695,46 @@ async fn codex_ws_handler_inner(
             while let Some(Ok(msg)) = client_receiver.next().await {
                 let processed = match &msg {
                     AxumWsMessage::Text(text) => {
-                        // Try to parse as JSON and apply policies to response.create messages
-                        match serde_json::from_str::<Value>(text.as_str()) {
-                            Ok(mut json) => {
-                                let msg_type = json
-                                    .get("type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default();
-
-                                if msg_type == "response.create" {
-                                    // The body fields are at the top level of the message
-                                    // (not nested under "body"), e.g. {"type":"response.create","model":"...","store":false,...}
-                                    if let Err(e) = policy.apply(
-                                        &provider_name_for_policy,
-                                        "/codex/responses",
-                                        &mut json,
-                                    ) {
-                                        tracing::warn!(
-                                            "Policy violation on Codex WS: {}",
-                                            e.message
-                                        );
-                                        // Skip sending this message
-                                        continue;
-                                    }
-                                    Some(TungsteniteMessage::Text(json.to_string()))
-                                } else {
-                                    axum_to_tungstenite(msg)
-                                }
+                        let Some(mut json) = parse_and_sanitize_ws_json(
+                            text.as_bytes(),
+                            &delegated_fetch_policy,
+                            &delegated_fetch_analysis_tx,
+                        ) else {
+                            continue;
+                        };
+                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
+                            if let Err(e) = policy.apply(
+                                &provider_name_for_policy,
+                                "/codex/responses",
+                                &mut json,
+                            ) {
+                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
+                                continue;
                             }
-                            Err(_) => axum_to_tungstenite(msg),
                         }
+                        Some(TungsteniteMessage::Text(json.to_string()))
+                    }
+                    AxumWsMessage::Binary(bytes) => {
+                        let Some(mut json) = parse_and_sanitize_ws_json(
+                            bytes,
+                            &delegated_fetch_policy,
+                            &delegated_fetch_analysis_tx,
+                        ) else {
+                            continue;
+                        };
+                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
+                            if let Err(e) = policy.apply(
+                                &provider_name_for_policy,
+                                "/codex/responses",
+                                &mut json,
+                            ) {
+                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
+                                continue;
+                            }
+                        }
+                        serde_json::to_vec(&json)
+                            .ok()
+                            .map(TungsteniteMessage::Binary)
                     }
                     _ => axum_to_tungstenite(msg),
                 };
@@ -2756,6 +2854,24 @@ struct WsSessionGuard {
 impl Drop for WsSessionGuard {
     fn drop(&mut self) {
         self.sessions.unregister(&self.conversation_id, self.token);
+    }
+}
+
+fn sanitize_ws_client_message(
+    msg: AxumWsMessage,
+    policy: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+) -> Option<TungsteniteMessage> {
+    match msg {
+        AxumWsMessage::Text(text) => {
+            let body = parse_and_sanitize_ws_json(text.as_bytes(), policy, analysis_tx)?;
+            Some(TungsteniteMessage::Text(body.to_string()))
+        }
+        AxumWsMessage::Binary(bytes) => {
+            let body = parse_and_sanitize_ws_json(&bytes, policy, analysis_tx)?;
+            Some(TungsteniteMessage::Binary(serde_json::to_vec(&body).ok()?))
+        }
+        other => axum_to_tungstenite(other),
     }
 }
 
@@ -3834,6 +3950,87 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[test]
+    fn websocket_text_messages_are_sanitized_and_audited() {
+        let (analysis_tx, mut audit_rx) = tokio::sync::broadcast::channel(8);
+        let message = AxumWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "input": [{
+                    "content": [{
+                        "type": "input_file",
+                        "file_url": "https://ws-target.example/private"
+                    }]
+                }],
+                "tools": [{"type": "web_search"}],
+                "tool_choice": {"type": "web_search"}
+            })
+            .to_string(),
+        );
+
+        let sanitized = sanitize_ws_client_message(
+            message,
+            &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+            &analysis_tx,
+        )
+        .unwrap();
+        let TungsteniteMessage::Text(text) = sanitized else {
+            panic!("expected text frame");
+        };
+        let body: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert!(!body.to_string().contains("file_url"));
+        assert!(body["tools"].as_array().unwrap().is_empty());
+        assert_eq!(body["tool_choice"], "auto");
+
+        let events: Vec<AnalysisEvent> = std::iter::from_fn(|| audit_rx.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AnalysisEvent::DelegatedFetchStripped {
+                target_host: Some(host),
+                ..
+            } if host == "ws-target.example"
+        )));
+    }
+
+    #[test]
+    fn websocket_binary_messages_are_sanitized_and_invalid_json_is_rejected() {
+        let (analysis_tx, mut audit_rx) = tokio::sync::broadcast::channel(8);
+        let binary = AxumWsMessage::Binary(
+            serde_json::to_vec(&json!({
+                "tools": [{"type": "web_fetch"}],
+                "tool_choice": "web_fetch"
+            }))
+            .unwrap(),
+        );
+
+        let sanitized = sanitize_ws_client_message(
+            binary,
+            &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+            &analysis_tx,
+        )
+        .unwrap();
+        let TungsteniteMessage::Binary(bytes) = sanitized else {
+            panic!("expected binary frame");
+        };
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["tools"].as_array().unwrap().is_empty());
+        assert_eq!(body["tool_choice"], "auto");
+
+        assert!(sanitize_ws_client_message(
+            AxumWsMessage::Text("not-json".to_string()),
+            &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+            &analysis_tx,
+        )
+        .is_none());
+
+        let events: Vec<AnalysisEvent> = std::iter::from_fn(|| audit_rx.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AnalysisEvent::DelegatedFetchStripped { capability, .. }
+                if capability == "invalid_json_frame_rejected"
+        )));
+    }
+
+    #[test]
     fn test_apply_injections() {
         let mut body = json!({
             "model": "gpt-3.5",
@@ -4293,6 +4490,7 @@ mod tests {
             logging: Default::default(),
             analysis: Default::default(),
             policy: Default::default(),
+            delegated_fetch: Default::default(),
             state: Default::default(),
             keys: Default::default(),
             capture: Default::default(),
@@ -4301,6 +4499,194 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn e2e_delegated_fetch_is_stripped_before_passthrough_and_audited() {
+        let mock = MockUpstream::new(vec![
+            ResponseSpec {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                chunks: vec![Bytes::from_static(b"{}")],
+            },
+            ResponseSpec {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                chunks: vec![Bytes::from_static(b"{}")],
+            },
+        ]);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://up/v1".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let mut audit_rx = state.analysis_tx.subscribe();
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        let unsafe_body = json!({
+            "model": "gpt-5",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "summarize"},
+                    {"type": "input_file", "file_url": "https://metadata.example/secrets"}
+                ]
+            }],
+            "tools": [
+                {"type": "function", "function": {"name": "local_tool"}},
+                {"type": "web_search"}
+            ],
+            "tool_choice": {"type": "web_search"}
+        });
+        let unsafe_request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&unsafe_body).unwrap()))
+            .unwrap();
+        let _ = app.clone().oneshot(unsafe_request).await.unwrap();
+
+        let control_body = json!({
+            "model": "gpt-5",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }],
+            "tools": [{"type": "function", "function": {"name": "local_tool"}}],
+            "tool_choice": "auto"
+        });
+        let control_bytes = serde_json::to_vec(&control_body).unwrap();
+        let control_request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(control_bytes.clone()))
+            .unwrap();
+        let _ = app.oneshot(control_request).await.unwrap();
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        let forwarded: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            forwarded["input"][0]["content"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(forwarded["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(forwarded["tool_choice"], "auto");
+        assert!(!String::from_utf8_lossy(&requests[0].body).contains("file_url"));
+        assert_eq!(requests[1].body, control_bytes);
+
+        let mut audit_items = Vec::new();
+        while let Ok(event) = audit_rx.try_recv() {
+            if let AnalysisEvent::DelegatedFetchStripped {
+                field_path,
+                capability,
+                target_host,
+                ..
+            } = event
+            {
+                audit_items.push((field_path, capability, target_host));
+            }
+        }
+        assert!(audit_items.iter().any(|(path, capability, host)| {
+            path == "/input/0/content/1/file_url"
+                && capability == "input_file.file_url"
+                && host.as_deref() == Some("metadata.example")
+        }));
+        assert!(audit_items
+            .iter()
+            .any(|(_, capability, _)| capability == "server_tool:web_search"));
+        assert!(audit_items
+            .iter()
+            .any(|(path, _, _)| path == "/tool_choice"));
+    }
+
+    #[tokio::test]
+    async fn e2e_virtual_key_metadata_controls_remote_content_per_tenant() {
+        let mock = MockUpstream::new(vec![
+            ResponseSpec {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                chunks: vec![Bytes::from_static(b"{}")],
+            },
+            ResponseSpec {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                chunks: vec![Bytes::from_static(b"{}")],
+            },
+        ]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://up/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = make_config(providers);
+        config.keys.enabled = true;
+        config.keys.require_key = true;
+        config.keys.database_path = temp.path().join("keys.db").display().to_string();
+        // Virtual-key metadata must still default deny even if the process-wide
+        // fallback permits remote content for non-key clients.
+        config.delegated_fetch.enabled = true;
+
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+        state.init_key_store().await.unwrap();
+        let store = state.get_key_store().unwrap();
+        let denied_key = store
+            .create_key(crate::keys::CreateKeyRequest::default())
+            .await
+            .unwrap();
+        let allowed_key = store
+            .create_key(crate::keys::CreateKeyRequest {
+                metadata: json!({
+                    "delegated_fetch": {"remote_content": true}
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let body = json!({
+            "model": "gpt-5",
+            "input": [{
+                "content": [{
+                    "type": "input_file",
+                    "file_url": "https://tenant.example/private"
+                }]
+            }]
+        });
+        for key in [&denied_key.key, &allowed_key.key] {
+            let request = http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(!String::from_utf8_lossy(&requests[0].body).contains("file_url"));
+        assert!(String::from_utf8_lossy(&requests[1].body).contains("file_url"));
     }
 
     #[tokio::test]
