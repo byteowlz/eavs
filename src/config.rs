@@ -92,6 +92,10 @@ pub struct AppConfig {
     pub analysis: AnalysisConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Controls request-body capabilities that delegate network access or
+    /// execution to the upstream provider.
+    #[serde(default)]
+    pub delegated_fetch: crate::delegated_fetch::DelegatedFetchConfig,
     #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
@@ -124,6 +128,7 @@ impl AppConfig {
             logging: LoggingConfig::default(),
             analysis: AnalysisConfig::default(),
             policy: PolicyConfig::default(),
+            delegated_fetch: Default::default(),
             state: StateConfig::default(),
             keys: KeysConfig::default(),
             capture: CaptureConfig::default(),
@@ -1491,6 +1496,25 @@ fn keychain_help_text() -> &'static str {
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn delegated_fetch_config_defaults_to_deny_and_parses_allowlist() {
+        let default = AppConfig::with_defaults();
+        assert!(!default.delegated_fetch.enabled);
+        assert!(default.delegated_fetch.allowed_server_tools.is_empty());
+
+        let parsed: AppConfig = toml::from_str(
+            r#"
+            [delegated_fetch]
+            enabled = true
+            allowed_server_tools = ["web_search"]
+            "#,
+        )
+        .unwrap();
+        let policy = parsed.delegated_fetch.policy();
+        assert!(policy.allow_remote_content);
+        assert_eq!(policy.allowed_server_tools, ["web_search"]);
+    }
 
     #[test]
     fn test_get_api_key_raw() {

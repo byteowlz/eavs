@@ -104,6 +104,7 @@ impl KeyValidator {
             key_id: key.key_id.clone(),
             name: key.name.clone(),
             permissions: key.permissions.clone(),
+            metadata: key.metadata.clone(),
             oauth_user: key.oauth_user.clone(),
             oauth_account: key.oauth_account.clone(),
         })
@@ -176,6 +177,8 @@ pub struct ValidatedKey {
     pub name: Option<String>,
     /// Key permissions
     pub permissions: crate::keys::types::KeyPermissions,
+    /// Arbitrary key metadata used for tenant-scoped policy overrides.
+    pub metadata: serde_json::Value,
 
     /// Optional OAuth user binding
     pub oauth_user: Option<String>,
@@ -282,7 +285,9 @@ mod tests {
                 name: Some("Test".to_string()),
                 expires_at: None,
                 permissions: KeyPermissions::default(),
-                metadata: serde_json::Value::Null,
+                metadata: serde_json::json!({
+                    "delegated_fetch": {"remote_content": true}
+                }),
                 oauth_user: None,
                 ..Default::default()
             })
@@ -293,7 +298,14 @@ mod tests {
             .validate(&response.key, "gpt-4", "openai", None)
             .await;
 
-        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(
+            validated
+                .metadata
+                .pointer("/delegated_fetch/remote_content")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     }
 
     #[tokio::test]

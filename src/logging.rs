@@ -65,6 +65,19 @@ impl LogSink for StdoutSink {
                     // For pretty mode, just print raw chunks (SSE data)
                     print!("{chunk}");
                 }
+                AnalysisEvent::DelegatedFetchStripped {
+                    timestamp,
+                    id,
+                    field_path,
+                    capability,
+                    target_host,
+                } => {
+                    let time = format_timestamp(*timestamp);
+                    let host = target_host.as_deref().unwrap_or("-");
+                    eprintln!(
+                        "[{time}] {id} SECURITY delegated-fetch stripped: capability={capability} path={field_path} host={host}"
+                    );
+                }
                 AnalysisEvent::ResponseComplete {
                     timestamp,
                     id,

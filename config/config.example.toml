@@ -17,6 +17,14 @@ port = 3033
 # keychain reference rather than a literal secret.
 auth_token = "env:EAVS_AUTH_TOKEN"
 
+# Provider-side URL fetching bypasses EAVS network controls, so remote file
+# inputs and hosted tools are denied by default. Set enabled=true only when the
+# deployment accepts remote input_file.file_url fetching. Allow hosted tools by
+# exact provider tool type.
+[delegated_fetch]
+enabled = false
+allowed_server_tools = [] # e.g. ["web_search"]
+
 # =============================================================================
 # Providers
 # =============================================================================

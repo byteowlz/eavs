@@ -117,6 +117,25 @@
       },
       "additionalProperties": false
     },
+    "delegated_fetch": {
+      "type": "object",
+      "description": "Controls provider-side URL fetching and hosted tools that bypass local network egress enforcement",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Allow remote input_file.file_url content. Default false strips remote file inputs.",
+          "default": false
+        },
+        "allowed_server_tools": {
+          "type": "array",
+          "description": "Explicitly allowed provider-hosted tool types, such as web_search or web_fetch",
+          "default": [],
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "state": {
       "type": "object",
       "description": "Conversation state storage configuration",

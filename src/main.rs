@@ -4,6 +4,7 @@ mod aws_sigv4;
 mod capture;
 mod cli;
 mod config;
+mod delegated_fetch;
 mod egress;
 mod export;
 mod keys;
