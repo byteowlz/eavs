@@ -125,14 +125,53 @@ impl RequestTransformer for OpenAIResponsesTransformer {
             body["tools"] = json!(tools_value);
         }
 
-        // Max tokens
+        // Max tokens. The Responses API rejects values below 16, so clamp.
         if let Some(max_tokens) = context.max_tokens {
-            body["max_output_tokens"] = json!(max_tokens);
+            body["max_output_tokens"] = json!(max_tokens.max(16));
         }
 
         // Temperature
         if let Some(temp) = context.temperature {
             body["temperature"] = json!(temp);
+        }
+
+        // Pass through modern Responses-API fields the client may have included so
+        // eavs stays current with the latest Responses/Codex request shape. Fields
+        // already derived from Context take precedence; any other top-level field
+        // present in the (already-sanitized) original request is preserved.
+        if let Some(original) = &context.original_request {
+            for key in [
+                "reasoning",
+                "include",
+                "service_tier",
+                "parallel_tool_calls",
+                "tool_choice",
+                "stop",
+                "metadata",
+                "user",
+                "stream_options",
+                "truncation",
+                "text",
+                "prompt_cache_key",
+                "prompt_cache_retention",
+                "prompt_cache_options",
+            ] {
+                if body.get(key).is_none() {
+                    if let Some(v) = original.get(key) {
+                        if !v.is_null() {
+                            body[key] = v.clone();
+                        }
+                    }
+                }
+            }
+            // Map an OpenAI-style reasoning_effort into the Responses `reasoning:
+            // { effort }` shape used by the current API (pi sends a nested
+            // `reasoning` object; a naive client may send reasoning_effort).
+            if body.get("reasoning").is_none() {
+                if let Some(effort) = original.get("reasoning_effort").and_then(Value::as_str) {
+                    body["reasoning"] = json!({ "effort": effort });
+                }
+            }
         }
 
         Ok(body)
@@ -628,6 +667,46 @@ mod tests {
         assert_eq!(request["model"], "gpt-5.1-codex");
         assert_eq!(request["instructions"], "Be helpful");
         assert!(request["input"].is_array());
+    }
+
+    #[test]
+    fn test_passthrough_modern_responses_fields() {
+        let transformer = OpenAIResponsesTransformer::new();
+        let mut ctx = Context::new("gpt-5.1-codex")
+            .with_messages(vec![Message::user("Hello")])
+            .with_system("Be helpful".to_string());
+        ctx.original_request = Some(json!({
+            "model": "gpt-5.1-codex",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "include": ["reasoning.encrypted_content"],
+            "service_tier": "default",
+            "parallel_tool_calls": false
+        }));
+
+        let request = transformer.transform_request(&ctx).unwrap();
+        // reasoning_effort mapped into the Responses reasoning: { effort } shape.
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["include"][0], "reasoning.encrypted_content");
+        assert_eq!(request["service_tier"], "default");
+        assert_eq!(request["parallel_tool_calls"], false);
+        // Derived fields still take precedence.
+        assert_eq!(request["instructions"], "Be helpful");
+    }
+
+    #[test]
+    fn test_reasoning_object_passed_through_and_max_tokens_clamped() {
+        let transformer = OpenAIResponsesTransformer::new();
+        let mut ctx = Context::new("gpt-5.1-codex")
+            .with_messages(vec![Message::user("Hi")])
+            .with_max_tokens(4);
+        ctx.original_request = Some(json!({"reasoning": {"effort": "low", "summary": "auto"}}));
+
+        let request = transformer.transform_request(&ctx).unwrap();
+        assert_eq!(request["reasoning"]["effort"], "low");
+        assert_eq!(request["reasoning"]["summary"], "auto");
+        // Clamped to the Responses API minimum of 16.
+        assert_eq!(request["max_output_tokens"], 16);
     }
 
     #[test]
