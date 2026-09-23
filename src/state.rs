@@ -549,6 +549,14 @@ impl AppState {
         self.oauth_store.get()
     }
 
+    /// The single user identity the authenticated operator (listener) principal
+    /// is bound to for OAuth credential operations. All per-user OAuth
+    /// credential reads, writes, and deletes are scoped to this identity;
+    /// caller-supplied `user_id`s that differ are rejected.
+    pub fn oauth_default_user(&self) -> &str {
+        &self.config.keys.oauth_default_user
+    }
+
     /// Get the key validator if initialized.
     pub fn get_key_validator(&self) -> Option<&Arc<KeyValidator>> {
         self.key_validator.get()

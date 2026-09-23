@@ -108,6 +108,36 @@ fn parse_and_sanitize_ws_json(
     }
 }
 
+/// Namespace conversation/injection state by the authenticated virtual key.
+///
+/// The client-controlled `X-Conversation-ID` header is never trusted as a
+/// tenant boundary. For an authenticated virtual key, state is isolated under
+/// `key:<key_hash>:<conversation_id>` so a different key (or the operator's
+/// default namespace) cannot steal, consume, or receive another tenant's
+/// injections or conversation state. When no virtual key is present
+/// (operator/plain use), the raw id is preserved for backward compatibility.
+pub fn conversation_namespace(conversation_id: &str, key_hash: Option<&str>) -> String {
+    match key_hash {
+        Some(kh) => format!("key:{kh}:{conversation_id}"),
+        None => conversation_id.to_string(),
+    }
+}
+
+/// Extract the model a Realtime WebSocket client actually requests.
+///
+/// The OpenAI Realtime protocol carries the model in the connection query
+/// string (`?model=...`). Validating against this actual model (rather than a
+/// fixed sentinel) is what makes virtual-key model scope apply to realtime.
+pub fn extract_realtime_model(uri: &http::Uri) -> String {
+    uri.query()
+        .and_then(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "model")
+                .map(|(_, v)| v.into_owned())
+        })
+        .unwrap_or_else(|| "websocket".to_string())
+}
+
 impl ProxyError {
     fn new(message: impl Into<String>, error_type: impl Into<String>) -> Self {
         Self {
@@ -490,12 +520,20 @@ async fn proxy_handler_inner(
         &correlation_id,
     );
 
+    // Namespace conversation/injection state by the authenticated key so a
+    // different key using the same client-controlled X-Conversation-ID cannot
+    // steal, consume, or receive another tenant's injections.
+    let ns_conversation = conversation_namespace(
+        &conversation_id,
+        validated_key.as_ref().map(|k| k.key_hash.as_str()),
+    );
+
     // Register/update conversation in store if capture_all is enabled
     if state.config.state.capture_all {
-        let _ = state.conversations.get_or_create(&conversation_id);
+        let _ = state.conversations.get_or_create(&ns_conversation);
         state
             .conversations
-            .update_metadata(&conversation_id, |meta| {
+            .update_metadata(&ns_conversation, |meta| {
                 meta.provider = Some(provider_name.clone());
                 meta.model = Some(model.clone());
                 meta.request_count += 1;
@@ -503,13 +541,13 @@ async fn proxy_handler_inner(
     }
 
     // Check for injections (new conversation store)
-    let injections = state.conversations.take_injections(&conversation_id);
+    let injections = state.conversations.take_injections(&ns_conversation);
     if !injections.is_empty() {
         apply_injections(&mut json_body, &injections);
     }
 
     // Legacy fallback: check old injections map
-    if let Some((_, legacy_injections)) = state.injections.remove(&conversation_id) {
+    if let Some((_, legacy_injections)) = state.injections.remove(&ns_conversation) {
         apply_injections(&mut json_body, &legacy_injections);
     }
 
@@ -1384,6 +1422,19 @@ async fn proxy_handler_inner(
                 Err(e) => Err(e),
             });
 
+            let stream_with_transform: futures::stream::BoxStream<
+                'static,
+                Result<Bytes, std::io::Error>,
+            > = if let Some(tracker) = usage_tracker.clone() {
+                Box::pin(with_terminal_usage_record(
+                    stream_with_transform,
+                    state.clone(),
+                    tracker,
+                ))
+            } else {
+                Box::pin(stream_with_transform)
+            };
+
             let mut response = Response::new(Body::from_stream(stream_with_transform));
             *response.status_mut() = status;
             response
@@ -1395,16 +1446,6 @@ async fn proxy_handler_inner(
             response
                 .headers_mut()
                 .insert("x-eavs-provider", resolved_provider.parse().unwrap());
-
-            // Record usage asynchronously when stream completes
-            // Use a lighter-weight approach than spawning a delayed task for every request
-            if let Some(tracker) = usage_tracker.clone() {
-                let state_clone = state.clone();
-                // Record immediately - the batched KeyStore will handle SQLite writes efficiently
-                tokio::spawn(async move {
-                    record_usage_from_tracker(&state_clone, &tracker).await;
-                });
-            }
 
             Ok(response)
         } else if request_stream && fake_streaming {
@@ -1623,6 +1664,19 @@ async fn proxy_handler_inner(
             Err(e) => Err(e),
         });
 
+        let stream_with_logging: futures::stream::BoxStream<
+            'static,
+            Result<Bytes, std::io::Error>,
+        > = if let Some(tracker) = usage_tracker.clone() {
+            Box::pin(with_terminal_usage_record(
+                stream_with_logging,
+                state.clone(),
+                tracker,
+            ))
+        } else {
+            Box::pin(stream_with_logging)
+        };
+
         let mut response = Response::new(Body::from_stream(stream_with_logging));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
@@ -1630,14 +1684,6 @@ async fn proxy_handler_inner(
         response
             .headers_mut()
             .insert("x-eavs-provider", resolved_provider.parse().unwrap());
-
-        // Record usage asynchronously - batched KeyStore handles SQLite writes efficiently
-        if let Some(tracker) = usage_tracker {
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                record_usage_from_tracker(&state_clone, &tracker).await;
-            });
-        }
 
         Ok(response)
     }
@@ -1868,6 +1914,38 @@ async fn record_usage_from_tracker(state: &AppState, tracker: &UsageTracker) {
             "Recorded usage for virtual key"
         );
     }
+}
+
+/// Wrap a byte stream so that virtual-key usage is debited only once the
+/// stream is fully consumed (its terminal), not at response-construction time.
+///
+/// Streaming usage is parsed into the tracker's atomics while the body is being
+/// polled, so recording at construction would read all zeros and never debit
+/// budget/TPM. Recording on the terminal ensures the debited tokens reflect the
+/// streamed traffic. If the stream is dropped early (client disconnect) no
+/// debit occurs, which is acceptable since the traffic was never delivered.
+fn with_terminal_usage_record(
+    stream: impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    state: AppState,
+    tracker: UsageTracker,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
+    use std::task::Poll;
+
+    let mut stream = Box::pin(stream);
+    futures::stream::poll_fn(
+        move |cx| match futures::Stream::poll_next(stream.as_mut(), cx) {
+            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
+            Poll::Ready(None) => {
+                let state = state.clone();
+                let tracker = tracker.clone();
+                tokio::spawn(async move {
+                    record_usage_from_tracker(&state, &tracker).await;
+                });
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        },
+    )
 }
 
 async fn collect_stream_bytes(
@@ -2146,6 +2224,11 @@ async fn ws_proxy_handler_inner(
         .or(header_provider)
         .unwrap_or_else(|| "default".to_string());
 
+    // Determine the actual model the client requested (Realtime carries it in
+    // the connection query, e.g. ?model=gpt-4o-realtime). Validating this real
+    // model is what makes virtual-key model scope apply to Realtime.
+    let ws_model = extract_realtime_model(&uri);
+
     // Validate virtual API key if present (or required)
     let require_key = state.config.keys.enabled && state.config.keys.require_key;
     let auth_header = headers
@@ -2162,7 +2245,7 @@ async fn ws_proxy_handler_inner(
                 // Use a small token estimate for WebSocket rate limiting
                 let estimated_tokens = 100; // Conservative estimate per WS connection
                 match validator
-                    .validate(key, "websocket", &provider_name, Some(estimated_tokens))
+                    .validate(key, &ws_model, &provider_name, Some(estimated_tokens))
                     .await
                 {
                     Ok(validated) => {
@@ -2220,14 +2303,36 @@ async fn ws_proxy_handler_inner(
             .into_response();
     }
 
+    // Namespace conversation/injection state by the authenticated key so a
+    // different key using the same client-controlled X-Conversation-ID cannot
+    // steal, consume, or receive another tenant's injections.
+    let ns_conversation = conversation_namespace(
+        &conversation_id,
+        validated_key.as_ref().map(|k| k.key_hash.as_str()),
+    );
+
+    // Usage accounting for the Realtime session. Token counts are filled from
+    // upstream response.done events as the session runs; the request is debited
+    // once the session ends so budget/TPM limits apply to Realtime traffic.
+    let ws_tracker: Option<UsageTracker> = validated_key.as_ref().map(|vk| UsageTracker {
+        key_hash: vk.key_hash.clone(),
+        model: ws_model.clone(),
+        provider: provider_name.clone(),
+        input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+    });
+    let ws_state = state.clone();
+
     // Register/update conversation in store if capture_all is enabled
     if state.config.state.capture_all {
-        let _ = state.conversations.get_or_create(&conversation_id);
+        let _ = state.conversations.get_or_create(&ns_conversation);
         state
             .conversations
-            .update_metadata(&conversation_id, |meta| {
+            .update_metadata(&ns_conversation, |meta| {
                 meta.provider = Some(provider_name.clone());
-                meta.model = Some("websocket".to_string());
+                meta.model = Some(ws_model.clone());
                 meta.request_count += 1;
             });
     }
@@ -2310,9 +2415,9 @@ async fn ws_proxy_handler_inner(
     let delegated_fetch_analysis_tx = state.analysis_tx.clone();
 
     ws.on_upgrade(move |mut client_socket| async move {
-        let (session_token, mut injection_rx) = state.ws_sessions.register(&conversation_id);
+        let (session_token, mut injection_rx) = state.ws_sessions.register(&ns_conversation);
         let _session_guard = WsSessionGuard {
-            conversation_id: conversation_id.clone(),
+            conversation_id: ns_conversation.clone(),
             token: session_token,
             sessions: state.ws_sessions.clone(),
         };
@@ -2384,8 +2489,41 @@ async fn ws_proxy_handler_inner(
         });
 
         // Forward upstream -> client.
+        let tracker_for_client = ws_tracker.clone();
         let upstream_to_client = tokio::spawn(async move {
             while let Some(Ok(msg)) = upstream_receiver.next().await {
+                // Fill session usage from Realtime response.done/completed events.
+                if let (Some(tracker), TungsteniteMessage::Text(text)) = (&tracker_for_client, &msg)
+                {
+                    if let Ok(json) = serde_json::from_str::<Value>(text.as_str()) {
+                        let event_type = json
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if event_type == "response.done" || event_type == "response.completed" {
+                            let usage = json
+                                .pointer("/response/usage")
+                                .or_else(|| json.get("usage"));
+                            if let Some(usage) = usage {
+                                if let Some(input) =
+                                    usage.get("input_tokens").and_then(|v| v.as_u64())
+                                {
+                                    tracker
+                                        .input_tokens
+                                        .store(input as u32, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                if let Some(output) =
+                                    usage.get("output_tokens").and_then(|v| v.as_u64())
+                                {
+                                    tracker
+                                        .output_tokens
+                                        .store(output as u32, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let Some(client_msg) = tungstenite_to_axum(msg) else {
                     continue;
                 };
@@ -2425,6 +2563,13 @@ async fn ws_proxy_handler_inner(
             upstream_to_client,
             inject_to_upstream
         );
+
+        // Record Realtime session usage now that the session has ended, so
+        // budget/token/rate limits are debited (not at construction when the
+        // atomics are still zero).
+        if let Some(tracker) = ws_tracker {
+            record_usage_from_tracker(&ws_state, &tracker).await;
+        }
     })
     .into_response()
 }
@@ -3936,7 +4081,10 @@ fn guess_mime_from_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::api;
-    use crate::config::{AppConfig, ProviderConfig};
+    use crate::config::{AppConfig, ProviderConfig, StateConfig};
+    use crate::keys::{
+        CostCalculator, CreateKeyRequest, KeyPermissions, KeyStore, KeyValidator, RateLimiter,
+    };
     use crate::upstream::UpstreamResponse;
     use axum::routing::{any, post};
     use axum::Router;
@@ -3945,7 +4093,9 @@ mod tests {
     use http::{HeaderMap, Method, StatusCode};
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Mutex;
     use tower::util::ServiceExt;
 
@@ -6208,5 +6358,273 @@ mod tests {
         );
         let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(sent, req_body);
+    }
+
+    /// Helper: build an AppState with an in-memory key store wired into a
+    /// validator and cost calculator, so usage recording debits real state.
+    async fn state_with_key_store() -> (AppState, Arc<KeyStore>) {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai".to_string(),
+                base_url: "http://upstream/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        let store = Arc::new(KeyStore::in_memory().await.unwrap());
+        let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
+        state.key_validator.set(Arc::new(validator)).ok().unwrap();
+        state
+            .cost_calculator
+            .set(CostCalculator::new(state.pricing.clone()))
+            .ok()
+            .unwrap();
+        (state, store)
+    }
+
+    #[tokio::test]
+    async fn ws_realtime_model_scope_is_enforced_on_actual_model() {
+        let store = Arc::new(KeyStore::in_memory().await.unwrap());
+        let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
+
+        let permissions = KeyPermissions {
+            allowed_models: Some(["gpt-3.5-*".to_string()].into()),
+            ..Default::default()
+        };
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("limited".to_string()),
+                permissions,
+                metadata: json!(null),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // The Realtime connection URI carries the actual requested model.
+        let uri: http::Uri = "/v1/realtime?model=gpt-4o-realtime-preview"
+            .parse()
+            .unwrap();
+        let model = extract_realtime_model(&uri);
+        assert_eq!(model, "gpt-4o-realtime-preview");
+
+        // Validating the *actual* model rejects a key that may not use it.
+        let err = validator
+            .validate(&resp.key, &model, "openai", Some(100))
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "model_not_allowed");
+
+        // An allowlisted model requested the same way passes.
+        let ok_uri: http::Uri = "/v1/realtime?model=gpt-3.5-turbo".parse().unwrap();
+        let ok_model = extract_realtime_model(&ok_uri);
+        assert!(validator
+            .validate(&resp.key, &ok_model, "openai", Some(100))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn ws_realtime_session_records_usage_and_debits_budget() {
+        let (state, store) = state_with_key_store().await;
+        let permissions = KeyPermissions {
+            max_budget_usd: Some(0.0001),
+            ..Default::default()
+        };
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("wskey".to_string()),
+                permissions,
+                metadata: json!(null),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let hash = resp.key_hash.clone();
+
+        // Simulate a Realtime session whose usage was parsed from response.done
+        // and then debited once the session ended.
+        let tracker = UsageTracker {
+            key_hash: hash.clone(),
+            model: "gpt-4o-realtime-preview".to_string(),
+            provider: "default".to_string(),
+            input_tokens: Arc::new(AtomicU32::new(100)),
+            output_tokens: Arc::new(AtomicU32::new(100)),
+            cached_tokens: Arc::new(AtomicU32::new(0)),
+            cache_write_tokens: Arc::new(AtomicU32::new(0)),
+        };
+
+        record_usage_from_tracker(&state, &tracker).await;
+        let key = store.get_by_hash(&hash).unwrap();
+        assert!(
+            key.usage.window_spend_usd > 0.0,
+            "Realtime session usage must debit the virtual key's budget"
+        );
+
+        // A small-budget key is eventually budget-limited by Realtime traffic.
+        for _ in 0..8 {
+            record_usage_from_tracker(&state, &tracker).await;
+        }
+        let key = store.get_by_hash(&hash).unwrap();
+        assert!(
+            key.is_over_budget(),
+            "Realtime usage must eventually trip a small-budget key"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_is_recorded_at_terminal_not_construction() {
+        let (state, store) = state_with_key_store().await;
+        let resp = store
+            .create_key(CreateKeyRequest {
+                name: Some("stream".to_string()),
+                permissions: KeyPermissions::default(),
+                metadata: json!(null),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let hash = resp.key_hash.clone();
+
+        let tracker = UsageTracker {
+            key_hash: hash.clone(),
+            model: "gpt-4o".to_string(),
+            provider: "default".to_string(),
+            input_tokens: Arc::new(AtomicU32::new(0)),
+            output_tokens: Arc::new(AtomicU32::new(0)),
+            cached_tokens: Arc::new(AtomicU32::new(0)),
+            cache_write_tokens: Arc::new(AtomicU32::new(0)),
+        };
+
+        // Args atomics are populated lazily as the stream is consumed (mimicking
+        // extract_openai_usage). At construction time they are still 0, so a
+        // construction-time debit would read 0 and never bill.
+        let parse_tracker = tracker.clone();
+        let stream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
+        ))])
+        .map(move |chunk: Result<Bytes, std::io::Error>| {
+            if let Ok(ref bytes) = &chunk {
+                let text = String::from_utf8_lossy(bytes).to_string();
+                if let Some(body) = text.strip_prefix("data: ") {
+                    if let Ok(json) = serde_json::from_str::<Value>(body) {
+                        if let Some(input) = json
+                            .pointer("/usage/prompt_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            parse_tracker
+                                .input_tokens
+                                .store(input as u32, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        if let Some(output) = json
+                            .pointer("/usage/completion_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            parse_tracker
+                                .output_tokens
+                                .store(output as u32, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+            chunk
+        });
+
+        let wrapped = with_terminal_usage_record(stream, state.clone(), tracker);
+        let collected: Vec<Result<Bytes, std::io::Error>> = wrapped.collect().await;
+        assert_eq!(collected.len(), 1);
+
+        // The debit is issued from the stream terminal; wait for the async task.
+        for _ in 0..50 {
+            let key = store.get_by_hash(&hash).unwrap();
+            if key.usage.window_spend_usd > 0.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let key = store.get_by_hash(&hash).unwrap();
+        assert!(
+            key.usage.window_spend_usd > 0.0,
+            "Streaming usage must be debited after the stream terminal, not 0"
+        );
+    }
+
+    #[test]
+    fn conversation_state_is_namespaced_by_key_and_operator_preserved() {
+        let store = crate::state::ConversationStore::new(StateConfig {
+            enabled: true,
+            capture_all: false,
+            ttl_secs: 0,
+            cleanup_interval_secs: 0,
+            max_conversations: 100,
+        });
+
+        let key_a = "hashA";
+        let key_b = "hashB";
+        let conv = "shared-conv";
+        let ns_a = conversation_namespace(conv, Some(key_a));
+        let ns_b = conversation_namespace(conv, Some(key_b));
+        assert_eq!(ns_a, "key:hashA:shared-conv");
+        assert_ne!(ns_a, ns_b);
+
+        // Operator injects into tenant A's conversation.
+        store.add_injections(
+            &ns_a,
+            vec![Injection {
+                role: "system".to_string(),
+                content: "tenant A secret".to_string(),
+            }],
+        );
+        // Tenant A consumes its own injection.
+        assert_eq!(store.take_injections(&ns_a).len(), 1);
+        // Tenant B, using the same client-controlled id, cannot steal it.
+        assert_eq!(store.take_injections(&ns_b).len(), 0);
+
+        // Reinject into A; B still cannot consume it.
+        store.add_injections(
+            &ns_a,
+            vec![Injection {
+                role: "system".to_string(),
+                content: "again".to_string(),
+            }],
+        );
+        assert_eq!(store.take_injections(&ns_b).len(), 0);
+        assert_eq!(store.take_injections(&ns_a).len(), 1);
+
+        // Operator's own (non-multi-tenant) default is preserved.
+        assert_eq!(conversation_namespace(conv, None), conv);
+    }
+
+    #[test]
+    fn ws_session_injections_are_isolated_per_key() {
+        let mgr = crate::state::WsSessionManager::new();
+        let conv = "shared";
+        // Tenant A opens a Realtime session on its namespaced conversation.
+        let (_tok_a, mut rx_a) = mgr.register(&conversation_namespace(conv, Some("hashA")));
+
+        // Injecting into tenant A's namespace is delivered to A's session.
+        assert!(mgr.deliver_injections(
+            &conversation_namespace(conv, Some("hashA")),
+            vec![Injection {
+                role: "system".to_string(),
+                content: "mid-stream secret".to_string(),
+            }]
+        ));
+        // Tenant B has no session on its own namespace, so nothing is received.
+        assert!(!mgr.deliver_injections(
+            &conversation_namespace(conv, Some("hashB")),
+            vec![Injection {
+                role: "system".to_string(),
+                content: "leak".to_string(),
+            }]
+        ));
+
+        let delivered = rx_a.try_recv().unwrap();
+        assert_eq!(delivered[0].content, "mid-stream secret");
     }
 }
