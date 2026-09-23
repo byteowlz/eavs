@@ -30,20 +30,60 @@ pub fn check_egress_allowed(
 ) -> Result<(), String> {
     check_host_allowed(config, host)?;
 
-    if config.block_private_ips && is_private_ip(&destination.ip()) {
-        let trusted = config.trusted_private_endpoints.iter().any(|endpoint| {
-            endpoint.host.eq_ignore_ascii_case(host)
-                && endpoint.address == destination.ip()
-                && endpoint.port == destination.port()
-        });
-        if !trusted {
-            return Err(format!(
-                "Destination '{}' is a private IP address (blocked by network policy)",
-                destination
-            ));
-        }
+    // An explicitly trusted private endpoint binds host/address/port exactly,
+    // so a matching destination needs no further host/destination reconciliation.
+    let trusted = config.trusted_private_endpoints.iter().any(|endpoint| {
+        endpoint.host.eq_ignore_ascii_case(host)
+            && endpoint.address == destination.ip()
+            && endpoint.port == destination.port()
+    });
+
+    // Bind the presented host identity to the actual destination so an allowed
+    // hostname cannot be used to reach a different (e.g. denied) host.
+    if !trusted {
+        check_host_matches_destination(host, destination)?;
     }
 
+    if config.block_private_ips && is_private_ip(&destination.ip()) && !trusted {
+        return Err(format!(
+            "Destination '{}' is a private IP address (blocked by network policy)",
+            destination
+        ));
+    }
+
+    Ok(())
+}
+
+/// Require the presented host identity to be consistent with the actual PROXY
+/// destination. An IP-literal host must equal the destination address; a
+/// hostname must resolve to it (fail closed if resolution is unavailable).
+fn check_host_matches_destination(host: &str, destination: SocketAddr) -> Result<(), String> {
+    let dest_ip = unmap_ip(&destination.ip());
+
+    // Host presented as an IP literal: must equal the destination address.
+    if let Ok(host_ip) = host.parse::<IpAddr>() {
+        if unmap_ip(&host_ip) != dest_ip {
+            return Err(format!(
+                "Host '{}' does not match destination '{}'",
+                host,
+                destination.ip()
+            ));
+        }
+        return Ok(());
+    }
+
+    // Hostname: resolve it and require the destination to be one of its
+    // addresses. Fail closed on resolution failure so an allowed name cannot
+    // conceal a different destination.
+    let mut resolved = std::net::ToSocketAddrs::to_socket_addrs(&(host, destination.port()))
+        .map_err(|e| format!("Host '{}' could not be resolved: {}", host, e))?;
+    if !resolved.any(|a| unmap_ip(&a.ip()) == dest_ip) {
+        return Err(format!(
+            "Host '{}' does not resolve to destination '{}'",
+            host,
+            destination.ip()
+        ));
+    }
     Ok(())
 }
 
@@ -134,9 +174,24 @@ fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
     pi == pattern.len()
 }
 
-/// Check if an IP address is in a private/reserved range.
-fn is_private_ip(ip: &IpAddr) -> bool {
+/// Map an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4 counterpart
+/// so that private-IP classification and host/destination comparisons treat it
+/// as the IPv4 address it really is. Non-mapped addresses are unchanged.
+fn unmap_ip(ip: &IpAddr) -> IpAddr {
     match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(*v6),
+        },
+        _ => *ip,
+    }
+}
+
+/// Check if an IP address is in a private/reserved range.
+/// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is classified as its IPv4
+/// counterpart so private-IP blocking holds for every representation.
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match unmap_ip(ip) {
         IpAddr::V4(v4) => {
             v4.is_loopback()           // 127.0.0.0/8
                 || v4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
@@ -300,5 +355,49 @@ mod tests {
         config.deny_domains = vec!["zgx".into()];
         let destination = "100.64.0.18:8080".parse().unwrap();
         assert!(check_egress_allowed(&config, "zgx", destination).is_err());
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_private_is_classified_private() {
+        // ::ffff:10.0.0.1 and ::ffff:192.168.1.1 encode private IPv4 addresses
+        // via the IPv4-mapped IPv6 representation; they must be classified as
+        // private so private-IP blocking holds.
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"::ffff:192.168.1.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"::ffff:127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        // A non-mapped global IPv6 address is not private.
+        assert!(!is_private_ip(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_private_destination_blocked() {
+        // An allowed public host cannot conceal an IPv4-mapped IPv6 private
+        // destination: check_egress_allowed must reject it.
+        let config = config_allow(&["api.openai.com"]);
+        let dest: SocketAddr = "[::ffff:10.0.0.1]:8080".parse().unwrap();
+        assert!(check_egress_allowed(&config, "api.openai.com", dest).is_err());
+    }
+
+    #[test]
+    fn allowed_hostname_to_mismatched_destination_is_rejected() {
+        // The presented host is allowed, but the real PROXY destination is a
+        // different (here: another public) host. The host->destination binding
+        // must reject it so an allowed name cannot reach an arbitrary host.
+        let config = config_allow(&["api.openai.com"]);
+        let dest: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        assert!(check_egress_allowed(&config, "api.openai.com", dest).is_err());
+    }
+
+    #[test]
+    fn allowed_ip_host_to_mismatched_destination_is_rejected() {
+        // Deterministic (no DNS): an allowed IP-literal host must equal the
+        // destination; a different destination is rejected.
+        let config = config_allow(&["1.2.3.4"]);
+        let dest: SocketAddr = "5.6.7.8:443".parse().unwrap();
+        assert!(check_egress_allowed(&config, "1.2.3.4", dest).is_err());
     }
 }

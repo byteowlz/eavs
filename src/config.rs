@@ -885,6 +885,18 @@ pub struct KeysConfig {
     /// "sqlite" stores tokens in the same database as virtual API keys.
     #[serde(default = "default_oauth_backend")]
     pub oauth_backend: String,
+    /// The single user identity the authenticated operator (listener) principal
+    /// is bound to for OAuth credential operations.
+    ///
+    /// EAVS is a single-user gateway. All per-user OAuth credential reads,
+    /// writes, and deletes are scoped to this identity instead of trusting a
+    /// caller-supplied `user_id`; requests for a different user are rejected.
+    #[serde(default = "default_oauth_user")]
+    pub oauth_default_user: String,
+}
+
+fn default_oauth_user() -> String {
+    "default".to_string()
 }
 
 fn default_oauth_backend() -> String {
@@ -908,6 +920,7 @@ impl Default for KeysConfig {
             update_pricing_on_startup: false,
             word_lists_path: None,
             oauth_backend: default_oauth_backend(),
+            oauth_default_user: default_oauth_user(),
         }
     }
 }

@@ -1067,15 +1067,12 @@ pub async fn owner_usage_handler(
     let (by_model, by_provider) = parse_owner_breakdown(query.breakdown.as_deref());
     let rollup = if by_model || by_provider {
         store
-            .get_usage_by_owner_breakdown(
-                query.owner.as_deref(),
-                by_model,
-                by_provider,
-                query.days,
-            )
+            .get_usage_by_owner_breakdown(query.owner.as_deref(), by_model, by_provider, query.days)
             .await
     } else {
-        store.get_usage_by_owner(query.owner.as_deref(), query.days).await
+        store
+            .get_usage_by_owner(query.owner.as_deref(), query.days)
+            .await
     };
 
     let rollup = rollup.map_err(|e| {
@@ -1346,7 +1343,7 @@ pub async fn probe_provider_handler(
         }
     }
 
-    match crate::provider_probe::run_probe(&state.upstream, payload).await {
+    match crate::provider_probe::run_probe(&state.upstream, &state.config.network, payload).await {
         Ok(resp) => Ok(Json(resp)),
         Err(rejection) => Err((
             StatusCode::BAD_REQUEST,
@@ -1573,7 +1570,7 @@ fn check_master_key_provider(
 // OAuth Endpoints
 // ============================================================================
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct OAuthApiError {
     pub error: String,
 }
@@ -1633,6 +1630,28 @@ fn resolve_anthropic_redirect_uri(request_uri: Option<String>) -> String {
         .unwrap_or_else(anthropic::default_redirect_uri)
 }
 
+/// Bind an OAuth credential operation to the authenticated operator principal.
+///
+/// EAVS is a single-user gateway: the listener token identifies one operator
+/// principal, which is bound to a single user identity. Every per-user OAuth
+/// credential read/write/delete must be scoped to that identity rather than
+/// trusting a caller-supplied `user_id` (which would allow cross-user read,
+/// overwrite, and delete). If the requested user differs from the bound
+/// identity, the operation is rejected.
+fn effective_oauth_user(
+    state: &AppState,
+    requested: &str,
+) -> Result<String, (StatusCode, Json<OAuthApiError>)> {
+    let effective = state.oauth_default_user();
+    if requested != effective {
+        return Err(oauth_error(
+            StatusCode::FORBIDDEN,
+            "Cross-user OAuth operations are not permitted",
+        ));
+    }
+    Ok(effective.to_string())
+}
+
 fn split_oauth_code(code: &str) -> (String, Option<String>) {
     let mut parts = code.splitn(2, '#');
     let code_part = parts.next().unwrap_or_default().to_string();
@@ -1656,6 +1675,10 @@ pub async fn oauth_login_handler(
 
     let provider = OAuthProvider::from_str(&provider)
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
+
+    // Bind the flow to the authenticated principal rather than trusting the
+    // caller-supplied `user_id`.
+    let effective_user = effective_oauth_user(&state, &payload.user_id)?;
 
     let client = reqwest::Client::new();
     let state_id = Uuid::new_v4().to_string();
@@ -1695,7 +1718,7 @@ pub async fn oauth_login_handler(
             state.oauth_states.insert(
                 state_id.clone(),
                 OAuthPendingAuth {
-                    user_id: payload.user_id.clone(),
+                    user_id: effective_user.clone(),
                     provider,
                     code_verifier: Some(code_verifier.clone()),
                     redirect_uri: Some(redirect_uri),
@@ -1725,7 +1748,7 @@ pub async fn oauth_login_handler(
             state.oauth_states.insert(
                 state_id.clone(),
                 OAuthPendingAuth {
-                    user_id: payload.user_id.clone(),
+                    user_id: effective_user.clone(),
                     provider,
                     code_verifier: Some(code_verifier),
                     redirect_uri: Some(redirect_uri),
@@ -1757,7 +1780,7 @@ pub struct OAuthCallbackRequest {
     pub redirect_uri: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct OAuthStatusResponse {
     pub status: String,
     pub provider: String,
@@ -1778,6 +1801,10 @@ pub async fn oauth_callback_handler(
         .remove(&state_value)
         .map(|(_, v)| v)
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown or expired state"))?;
+
+    // The pending auth was bound to the effective user at /auth/login; enforce
+    // that here so a stored credential can never be written under another user.
+    effective_oauth_user(&state, &pending.user_id)?;
 
     let redirect_uri = payload.redirect_uri.or(pending.redirect_uri);
     let client = reqwest::Client::new();
@@ -1857,14 +1884,24 @@ pub async fn oauth_code_handler(
     let provider = OAuthProvider::from_str(&provider)
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
 
-    let mut user_id = payload.user_id.clone();
+    // Bind the write to the authenticated principal: reject a caller-supplied
+    // `user_id` that differs from the operator's bound identity.
+    let effective_user = effective_oauth_user(&state, &payload.user_id)?;
+    let mut user_id = effective_user.clone();
     let mut code_verifier = None;
     let mut redirect_uri = payload.redirect_uri;
     let (code, state_override) = split_oauth_code(&payload.code);
 
     if let Some(state_id) = state_override.as_ref().or(payload.state.as_ref()) {
         if let Some((_, pending)) = state.oauth_states.remove(state_id) {
-            user_id = pending.user_id;
+            // A pending auth must belong to the same authenticated principal.
+            if pending.user_id != effective_user {
+                return Err(oauth_error(
+                    StatusCode::FORBIDDEN,
+                    "Cross-user OAuth operations are not permitted",
+                ));
+            }
+            user_id = effective_user;
             code_verifier = pending.code_verifier;
             if redirect_uri.is_none() {
                 redirect_uri = pending.redirect_uri;
@@ -1933,7 +1970,7 @@ pub struct OAuthPollRequest {
     pub device_code: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct OAuthPollResponse {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1957,11 +1994,15 @@ pub async fn oauth_poll_handler(
         ));
     }
 
+    // Bind the poll to the authenticated principal rather than trusting the
+    // caller-supplied `user_id`.
+    let effective_user = effective_oauth_user(&state, &payload.user_id)?;
+
     let client = reqwest::Client::new();
     let config =
         github_copilot::config_from_env().map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?;
 
-    match github_copilot::poll_device_flow(&client, &config, &payload.user_id, &payload.device_code)
+    match github_copilot::poll_device_flow(&client, &config, &effective_user, &payload.device_code)
         .await
         .map_err(|e| oauth_error(StatusCode::BAD_REQUEST, e))?
     {
@@ -1988,9 +2029,11 @@ pub async fn oauth_status_handler(
     Path(user_id): Path<String>,
 ) -> Result<Json<Vec<String>>, (StatusCode, Json<OAuthApiError>)> {
     check_oauth_available(&state)?;
+    // Reject cross-user reads: only the authenticated principal's own user.
+    let effective_user = effective_oauth_user(&state, &user_id)?;
     let store = state.get_oauth_store().unwrap();
     let providers = store
-        .list_providers(&user_id)
+        .list_providers(&effective_user)
         .await
         .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(providers))
@@ -2005,9 +2048,12 @@ pub async fn oauth_delete_handler(
     let provider = OAuthProvider::from_str(&provider)
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "Unknown OAuth provider"))?;
 
+    // Reject cross-user deletes: only the authenticated principal's own user.
+    let effective_user = effective_oauth_user(&state, &user_id)?;
+
     let store = state.get_oauth_store().unwrap();
     let deleted = store
-        .delete_credentials(&user_id, provider)
+        .delete_credentials(&effective_user, provider)
         .await
         .map_err(|e| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2131,10 +2177,147 @@ mod tests {
         AnalysisConfig, AppConfig, KeysConfig, LoggingConfig, ProviderConfig, ServerConfig,
         StateConfig,
     };
+    use crate::oauth::{OAuthBackend, OAuthStore};
     use crate::state::Injection;
     use axum::{middleware, routing::get, Router};
     use std::collections::HashMap;
 
+    /// Create a temp-file SQLite-backed OAuth store for handler tests.
+    async fn test_oauth_store() -> OAuthStore {
+        let path =
+            std::env::temp_dir().join(format!("eavs-oauth-test-{}.db", uuid::Uuid::new_v4()));
+        OAuthStore::new(&path, OAuthBackend::Sqlite)
+            .await
+            .expect("temp OAuth store")
+    }
+
+    /// An AppState with virtual keys enabled and an initialized OAuth store so
+    /// the OAuth handlers can pass `check_oauth_available`.
+    async fn mock_oauth_state() -> AppState {
+        let mut config = AppConfig {
+            server: ServerConfig::default(),
+            providers: HashMap::new(),
+            upstream: HashMap::new(),
+            logging: LoggingConfig::default(),
+            analysis: AnalysisConfig {
+                enabled: true,
+                broadcast_channel_size: 10,
+                plugins: Vec::new(),
+            },
+            policy: Default::default(),
+            delegated_fetch: Default::default(),
+            state: StateConfig::default(),
+            keys: KeysConfig::default(),
+            capture: Default::default(),
+            transform: Default::default(),
+            network: Default::default(),
+            egress: Default::default(),
+            mock_responses: Default::default(),
+        };
+        config.keys.enabled = true;
+        let state = AppState::new(config);
+        state
+            .oauth_store
+            .set(std::sync::Arc::new(test_oauth_store().await))
+            .unwrap();
+        state
+    }
+
+    /// The operator/auth principal is bound to the configured default user
+    /// (KeysConfig::default() -> "default"). `effective_oauth_user` rejects a
+    /// caller-supplied `user_id` that differs from that bound identity.
+    #[test]
+    fn effective_oauth_user_binds_to_principal() {
+        let state = mock_state();
+        assert_eq!(effective_oauth_user(&state, "default").unwrap(), "default");
+        let err = effective_oauth_user(&state, "victim").unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    /// A caller cannot read, overwrite/list, or delete credentials for a
+    /// `user_id` other than the one bound to its authenticated identity. Every
+    /// per-user OAuth endpoint must reject the cross-user operation.
+    #[tokio::test]
+    async fn oauth_cross_user_operations_are_rejected() {
+        let state = mock_oauth_state().await;
+
+        // GET /auth/status/:user_id -- cross-user read rejected.
+        let res = oauth_status_handler(State(state.clone()), Path("victim".to_string())).await;
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        // DELETE /auth/:user_id/:provider -- cross-user delete rejected.
+        let res = oauth_delete_handler(
+            State(state.clone()),
+            Path(("victim".to_string(), "anthropic".to_string())),
+        )
+        .await;
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        // POST /auth/login/:provider -- cross-user flow start rejected.
+        let req = OAuthLoginRequest {
+            user_id: "victim".to_string(),
+            redirect_uri: None,
+            extra_data: None,
+        };
+        let res = oauth_login_handler(
+            State(state.clone()),
+            Path("anthropic".to_string()),
+            Json(req),
+        )
+        .await;
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        // POST /auth/code/:provider -- cross-user credential write rejected.
+        let req = OAuthCodeRequest {
+            user_id: "victim".to_string(),
+            code: "any".to_string(),
+            state: None,
+            redirect_uri: None,
+        };
+        let res = oauth_code_handler(
+            State(state.clone()),
+            Path("anthropic".to_string()),
+            Json(req),
+        )
+        .await;
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        // POST /auth/poll/:provider -- cross-user poll rejected.
+        let req = OAuthPollRequest {
+            user_id: "victim".to_string(),
+            device_code: "device".to_string(),
+        };
+        let res = oauth_poll_handler(
+            State(state.clone()),
+            Path("github-copilot".to_string()),
+            Json(req),
+        )
+        .await;
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
+    /// When the caller uses the authenticated principal's own user id, the
+    /// endpoints scope to that identity and proceed (rather than being rejected
+    /// as cross-user). /auth/status lists only the principal's providers and
+    /// DELETE reaches the store (NOT_FOUND on an empty store), proving writes
+    /// and deletes are scoped to the authenticated principal.
+    #[tokio::test]
+    async fn oauth_operations_scope_to_authenticated_principal() {
+        let state = mock_oauth_state().await;
+
+        // Same-user status: OK, returns the principal's (empty) provider list.
+        let res = oauth_status_handler(State(state.clone()), Path("default".to_string())).await;
+        assert_eq!(res.unwrap().0, Vec::<String>::new());
+
+        // Same-user delete: proceeds to the store -> NOT_FOUND (scoped to the
+        // principal), not a cross-user FORBIDDEN.
+        let res = oauth_delete_handler(
+            State(state.clone()),
+            Path(("default".to_string(), "anthropic".to_string())),
+        )
+        .await;
+        assert_eq!(res.unwrap(), StatusCode::NOT_FOUND);
+    }
     fn mock_state() -> AppState {
         let config = AppConfig {
             server: ServerConfig::default(),

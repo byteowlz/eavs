@@ -391,6 +391,33 @@ mod tests {
         assert!(parse_proxy_v2_head(&head).is_err());
     }
 
+    fn proxy_v2_tcp6(dst6: Ipv6Addr, dport: u16) -> Vec<u8> {
+        let mut v = PROXY_V2_SIG.to_vec();
+        v.push(0x21); // version 2, command PROXY
+        v.push(0x21); // AF_INET6, STREAM
+        v.extend_from_slice(&36u16.to_be_bytes()); // address block length
+        v.extend_from_slice(&[0u8; 16]); // src (::)
+        v.extend_from_slice(&dst6.octets()); // dst
+        v.extend_from_slice(&54321u16.to_be_bytes()); // src port
+        v.extend_from_slice(&dport.to_be_bytes()); // dst port
+        v
+    }
+
+    #[test]
+    fn proxy_v2_inet6_mapped_dst_is_parsed() {
+        // An Inet6 PROXY header declaring an IPv4-mapped IPv6 destination
+        // (::ffff:10.0.0.1) is parsed to that address; private classification
+        // of the mapped address is covered in network_acl tests.
+        let dst6: Ipv6Addr = "::ffff:10.0.0.1".parse().unwrap();
+        let hdr = proxy_v2_tcp6(dst6, 443);
+        let head: [u8; 16] = hdr[..16].try_into().unwrap();
+        let (len, fam) = parse_proxy_v2_head(&head).unwrap();
+        assert_eq!(fam, ProxyFam::Inet6);
+        let dst = parse_proxy_v2_dst(fam, &hdr[16..16 + len]).unwrap();
+        assert_eq!(dst.ip(), IpAddr::V6(dst6));
+        assert!(dst.ip().to_string().starts_with("::ffff:"));
+    }
+
     #[test]
     fn sni_extracted_from_clienthello() {
         // Minimal but well-formed ClientHello carrying SNI "example.com".
@@ -521,8 +548,17 @@ mod tests {
         let mut client = TcpStream::connect(front_addr).await.unwrap();
         let (server_side, _) = front.accept().await.unwrap();
 
+        // The fake upstream lives on loopback, so it is a trusted private
+        // endpoint for the presented host; this keeps the allow/deny semantics
+        // of these tests under the host->destination binding and private-IP
+        // blocking without invoking real DNS for the fake hostname.
         let network = NetworkConfig {
             allow_domains: allow.iter().map(|s| s.to_string()).collect(),
+            trusted_private_endpoints: vec![crate::config::TrustedPrivateEndpoint {
+                host: "allowed.test".into(),
+                address: up_addr.ip(),
+                port: up_addr.port(),
+            }],
             ..Default::default()
         };
         let h = tokio::spawn(async move {

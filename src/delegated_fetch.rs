@@ -55,6 +55,12 @@ pub struct StrippedItem {
 
 /// Remove delegated-fetch capabilities from an OpenAI-compatible request.
 ///
+/// The function is protocol-aware: it handles the top-level OpenAI Responses
+/// shape (input/tools/tool_choice) as well as the OpenAI Realtime WebSocket
+/// protocol (session.tools and conversation.item.create item.content), so a
+/// provider cannot perform a server-side fetch or run a hosted tool outside
+/// EAVS's network ACL on any code path.
+///
 /// The function deliberately mutates only known capability surfaces. Bodies
 /// without those surfaces remain byte-for-byte equivalent when serialized.
 pub fn sanitize(body: &mut Value, policy: &DelegatedFetchPolicy) -> Vec<StrippedItem> {
@@ -67,6 +73,15 @@ pub fn sanitize(body: &mut Value, policy: &DelegatedFetchPolicy) -> Vec<Stripped
     let removed_tool_types = sanitize_server_tools(body, policy, &mut stripped);
     normalize_tool_choice(body, &removed_tool_types, &mut stripped);
 
+    // Realtime WebSocket protocol surfaces.
+    match body.get("type").and_then(Value::as_str) {
+        Some("session.update") => sanitize_realtime_session_update(body, policy, &mut stripped),
+        Some("conversation.item.create") => {
+            sanitize_realtime_item_create(body, policy, &mut stripped)
+        }
+        _ => {}
+    }
+
     stripped
 }
 
@@ -75,12 +90,24 @@ fn sanitize_remote_input_files(body: &mut Value, stripped: &mut Vec<StrippedItem
         return;
     };
 
-    let original = std::mem::take(input);
+    strip_remote_input_files_from_array(input, stripped, "/input");
+}
+
+/// Strip remote input files from a list of content/items, recording each one.
+///
+/// Used for both the top-level `input` array (OpenAI Responses) and the
+/// Realtime `conversation.item.create` `item.content` array.
+fn strip_remote_input_files_from_array(
+    items: &mut Vec<Value>,
+    stripped: &mut Vec<StrippedItem>,
+    field_prefix: &str,
+) {
+    let original = std::mem::take(items);
     for (input_index, mut item) in original.into_iter().enumerate() {
         if is_remote_input_file(&item) {
             stripped.push(remote_file_audit_item(
                 &item,
-                format!("/input/{input_index}/file_url"),
+                format!("{field_prefix}/{input_index}/file_url"),
             ));
             continue;
         }
@@ -91,7 +118,7 @@ fn sanitize_remote_input_files(body: &mut Value, stripped: &mut Vec<StrippedItem
                 if is_remote_input_file(&content_item) {
                     stripped.push(remote_file_audit_item(
                         &content_item,
-                        format!("/input/{input_index}/content/{content_index}/file_url"),
+                        format!("{field_prefix}/{input_index}/content/{content_index}/file_url"),
                     ));
                 } else {
                     content.push(content_item);
@@ -99,7 +126,7 @@ fn sanitize_remote_input_files(body: &mut Value, stripped: &mut Vec<StrippedItem
             }
         }
 
-        input.push(item);
+        items.push(item);
     }
 }
 
@@ -131,6 +158,19 @@ fn sanitize_server_tools(
         return HashSet::new();
     };
 
+    strip_server_tools_from_array(tools, policy, stripped, "/tools")
+}
+
+/// Strip provider-hosted tools from a tools array, recording each one.
+///
+/// Used for both the top-level `tools` array (OpenAI Responses) and the
+/// Realtime `session.update` `session.tools` array.
+fn strip_server_tools_from_array(
+    tools: &mut Vec<Value>,
+    policy: &DelegatedFetchPolicy,
+    stripped: &mut Vec<StrippedItem>,
+    field_prefix: &str,
+) -> HashSet<String> {
     let allowed: HashSet<String> = policy
         .allowed_server_tools
         .iter()
@@ -146,7 +186,7 @@ fn sanitize_server_tools(
             {
                 removed.insert(tool_type.to_ascii_lowercase());
                 stripped.push(StrippedItem {
-                    field_path: format!("/tools/{index}"),
+                    field_path: format!("{field_prefix}/{index}"),
                     capability: format!("server_tool:{tool_type}"),
                     target_host: None,
                 });
@@ -157,6 +197,47 @@ fn sanitize_server_tools(
     }
 
     removed
+}
+
+/// Strip provider-hosted tools under `session.tools` on a Realtime
+/// `session.update` frame, and normalize `session.tool_choice` if needed.
+fn sanitize_realtime_session_update(
+    body: &mut Value,
+    policy: &DelegatedFetchPolicy,
+    stripped: &mut Vec<StrippedItem>,
+) {
+    let Some(session) = body.get_mut("session") else {
+        return;
+    };
+
+    let removed = if let Some(tools) = session.get_mut("tools").and_then(Value::as_array_mut) {
+        strip_server_tools_from_array(tools, policy, stripped, "/session/tools")
+    } else {
+        HashSet::new()
+    };
+
+    if !removed.is_empty() {
+        normalize_tool_choice(session, &removed, stripped);
+    }
+}
+
+/// Strip remote `input_file.file_url` under a Realtime
+/// `conversation.item.create` frame's `item.content`.
+fn sanitize_realtime_item_create(
+    body: &mut Value,
+    policy: &DelegatedFetchPolicy,
+    stripped: &mut Vec<StrippedItem>,
+) {
+    if policy.allow_remote_content {
+        return;
+    }
+
+    let Some(item) = body.get_mut("item") else {
+        return;
+    };
+    if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
+        strip_remote_input_files_from_array(content, stripped, "/item/content");
+    }
 }
 
 /// Function/custom tools execute client-side. Typed tools outside that set are
@@ -303,6 +384,103 @@ mod tests {
             }],
             "tools": [{"type": "function", "function": {"name": "local_tool"}}],
             "tool_choice": "auto"
+        });
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let mut body = original;
+
+        assert!(sanitize(&mut body, &deny_policy()).is_empty());
+        assert_eq!(serde_json::to_vec(&body).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn realtime_session_update_strips_hosted_tools_and_preserves_allowlist() {
+        let mut body = json!({
+            "type": "session.update",
+            "session": {
+                "instructions": "be helpful",
+                "tools": [
+                    {"type": "function", "name": "local_fn"},
+                    {"type": "web_search"},
+                    {"type": "web_fetch"},
+                    {"type": "computer_use"}
+                ],
+                "tool_choice": {"type": "web_search"}
+            }
+        });
+
+        let stripped = sanitize(&mut body, &deny_policy());
+
+        let tools = body["session"]["tools"].as_array().unwrap();
+        // function tool preserved, all hosted tools stripped
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        // tool_choice referencing a removed tool is normalized
+        assert_eq!(body["session"]["tool_choice"], "auto");
+        assert!(stripped
+            .iter()
+            .any(|s| s.capability == "server_tool:web_search"));
+        assert!(stripped
+            .iter()
+            .any(|s| s.capability == "server_tool:web_fetch"));
+        assert!(stripped
+            .iter()
+            .any(|s| s.capability == "server_tool:computer_use"));
+        // instructions untouched
+        assert_eq!(body["session"]["instructions"], "be helpful");
+    }
+
+    #[test]
+    fn realtime_session_update_keeps_allowlisted_hosted_tool() {
+        let policy = DelegatedFetchPolicy {
+            allow_remote_content: false,
+            allowed_server_tools: vec!["web_search".to_string()],
+        };
+        let original = json!({
+            "type": "session.update",
+            "session": {
+                "tools": [{"type": "web_search"}, {"type": "function", "name": "local"}],
+                "tool_choice": {"type": "web_search"}
+            }
+        });
+        let mut body = original.clone();
+
+        assert!(sanitize(&mut body, &policy).is_empty());
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn realtime_item_create_strips_remote_input_file() {
+        let mut body = json!({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "summarize this"},
+                    {"type": "input_file", "file_url": "https://realtime.example/private.pdf"}
+                ]
+            }
+        });
+
+        let stripped = sanitize(&mut body, &deny_policy());
+
+        let content = body["item"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].field_path, "/item/content/1/file_url");
+        assert_eq!(stripped[0].target_host.as_deref(), Some("realtime.example"));
+    }
+
+    #[test]
+    fn realtime_safe_control_body_is_unchanged() {
+        let original = json!({
+            "type": "session.update",
+            "session": {
+                "instructions": "no tools here",
+                "tools": [{"type": "function", "name": "local_fn"}],
+                "tool_choice": "auto"
+            }
         });
         let original_bytes = serde_json::to_vec(&original).unwrap();
         let mut body = original;

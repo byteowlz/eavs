@@ -23,7 +23,7 @@ use futures::StreamExt;
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ProviderConfig;
+use crate::config::{NetworkConfig, ProviderConfig};
 use crate::provider::ProviderType;
 use crate::proxy::{apply_http_auth_headers, apply_http_extra_headers};
 use crate::transform::ProviderTransformer;
@@ -170,6 +170,7 @@ enum Attempt {
 /// activity), otherwise `Ok(ProbeResponse)` with structured diagnostics.
 pub async fn run_probe(
     upstream: &Arc<dyn Upstream>,
+    network: &NetworkConfig,
     request: ProbeRequest,
 ) -> Result<ProbeResponse, ProbeRejection> {
     let ProbeRequest {
@@ -193,6 +194,15 @@ pub async fn run_probe(
     })?;
 
     let base_url = config.resolved_base_url();
+
+    // Enforce the same network ACL as the proxy before any network activity.
+    // The base_url is request-controlled, so a master-key holder must not be
+    // able to make EAVS fetch private/loopback/link-local addresses or violate
+    // the configured allow/deny lists by pointing the probe at them.
+    if let Err(reason) = crate::network_acl::check_url_allowed(network, &base_url) {
+        return Err(ProbeRejection::new(reason, "network_blocked"));
+    }
+
     let api_key = config.resolved_api_key();
     let prompt = prompt.unwrap_or_else(|| PROBE_DEFAULT_PROMPT.to_string());
 
@@ -729,12 +739,27 @@ mod tests {
         scripted
     }
 
+    /// Default ACL: block_private_ips on, empty allow/deny lists.
+    ///
+    /// `NetworkConfig::default()` has `block_private_ips = false` (the
+    /// serde default_true only applies during deserialization), so build the
+    /// operator-facing default explicitly.
+    fn net() -> NetworkConfig {
+        NetworkConfig {
+            allow_domains: vec![],
+            deny_domains: vec![],
+            trusted_private_endpoints: vec![],
+            block_private_ips: true,
+        }
+    }
+
     #[tokio::test]
     async fn rejects_unknown_provider_type_without_network() {
         let scripted = ScriptedUpstream::new(vec![]);
         let up = upstream(scripted.clone());
         let err = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
                 config: config("totally-not-a-provider", "http://up/v1"),
@@ -755,6 +780,7 @@ mod tests {
         let up = upstream(scripted.clone());
         let resp = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
                 config: config("openai", "http://up/v1"),
@@ -787,6 +813,7 @@ mod tests {
         let up = upstream(scripted.clone());
         let resp = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
                 config: config("openai", "http://up/v1"),
@@ -818,9 +845,10 @@ mod tests {
         let up = upstream(scripted.clone());
         let resp = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
-                config: config("openai", "http://127.0.0.1:1/v1"),
+                config: config("openai", "http://up:1/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
             },
@@ -843,6 +871,7 @@ mod tests {
         let up = upstream(scripted.clone());
         let resp = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
                 config: config("openai", "http://up/v1"),
@@ -870,6 +899,7 @@ mod tests {
         let up = upstream(scripted.clone());
         let resp = run_probe(
             &up,
+            &net(),
             ProbeRequest {
                 provider_name: None,
                 config: config("openai-compatible", "http://up:11434/v1"),
@@ -902,5 +932,136 @@ mod tests {
             resp.recommendations[0].value,
             serde_json::Value::Bool(false)
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_loopback_base_url_when_block_private_ips_on() {
+        let scripted = ScriptedUpstream::new(vec![]);
+        let up = upstream(scripted.clone());
+        let err = run_probe(
+            &up,
+            &net(),
+            ProbeRequest {
+                provider_name: None,
+                config: config("openai", "http://127.0.0.1:8080/v1"),
+                model: "gpt-4o-mini".to_string(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "network_blocked");
+        // Fail closed: no network activity for the blocked target.
+        assert!(scripted.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_cloud_metadata_base_url_when_block_private_ips_on() {
+        let scripted = ScriptedUpstream::new(vec![]);
+        let up = upstream(scripted.clone());
+        let err = run_probe(
+            &up,
+            &net(),
+            ProbeRequest {
+                provider_name: None,
+                config: config("openai", "http://169.254.169.254/latest/meta-data"),
+                model: "gpt-4o-mini".to_string(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "network_blocked");
+        assert!(scripted.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_private_hostname_base_url_when_block_private_ips_on() {
+        let scripted = ScriptedUpstream::new(vec![]);
+        let up = upstream(scripted.clone());
+        for host in ["localhost", "db.internal", "node.local"] {
+            let err = run_probe(
+                &up,
+                &net(),
+                ProbeRequest {
+                    provider_name: None,
+                    config: config("openai", &format!("http://{host}/v1")),
+                    model: "gpt-4o-mini".to_string(),
+                    prompt: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "network_blocked");
+        }
+        assert!(scripted.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn allow_list_restricts_probe_base_url() {
+        let scripted = ScriptedUpstream::new(vec![]);
+        let up = upstream(scripted.clone());
+        let mut n = net();
+        n.allow_domains = vec!["api.openai.com".to_string()];
+        let err = run_probe(
+            &up,
+            &n,
+            ProbeRequest {
+                provider_name: None,
+                config: config("openai", "http://up/v1"),
+                model: "gpt-4o-mini".to_string(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "network_blocked");
+        assert!(scripted.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deny_list_blocks_probe_base_url() {
+        let scripted = ScriptedUpstream::new(vec![]);
+        let up = upstream(scripted.clone());
+        let mut n = net();
+        n.deny_domains = vec!["up".to_string()];
+        let err = run_probe(
+            &up,
+            &n,
+            ProbeRequest {
+                provider_name: None,
+                config: config("openai", "http://up/v1"),
+                model: "gpt-4o-mini".to_string(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "network_blocked");
+        assert!(scripted.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn private_base_url_allowed_when_block_private_ips_off() {
+        // Preserves existing behavior: an operator who disables private-IP
+        // blocking (e.g. to probe an on-prem gateway) can still do so.
+        let scripted = ScriptedUpstream::new(vec![Ok((StatusCode::OK, ok_body()))]);
+        let up = upstream(scripted.clone());
+        let mut n = net();
+        n.block_private_ips = false;
+        let resp = run_probe(
+            &up,
+            &n,
+            ProbeRequest {
+                provider_name: None,
+                config: config("openai", "http://127.0.0.1:8080/v1"),
+                model: "gpt-4o-mini".to_string(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(resp.ok);
+        assert!(resp.capabilities.reachable);
     }
 }

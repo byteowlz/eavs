@@ -73,6 +73,14 @@ pub struct OAuthStore {
     backend_name: &'static str,
 }
 
+impl std::fmt::Debug for OAuthStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthStore")
+            .field("backend", &self.backend_name)
+            .finish()
+    }
+}
+
 impl OAuthStore {
     /// Create a new store with the specified backend.
     ///
@@ -685,5 +693,79 @@ mod tests {
             .await
             .unwrap();
         assert!(deleted);
+    }
+
+    /// Credential rows are keyed by `user_id`; operations against one user must
+    /// never read or mutate another user's rows. This is the data-layer half of
+    /// the cross-user (IDOR) fix: a caller scoped to its own user cannot read,
+    /// overwrite, or delete credentials belonging to a different user.
+    #[tokio::test]
+    async fn test_cross_user_isolation() {
+        let store = test_store().await;
+        let mk = |user_id: &str| OAuthCredentials {
+            user_id: user_id.to_string(),
+            provider: OAuthProvider::Anthropic,
+            account_label: "default".to_string(),
+            access_token: format!("token-{}", user_id),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            extra_data: None,
+        };
+
+        store.upsert_credentials(&mk("alice")).await.unwrap();
+
+        // A different user cannot read alice's credentials.
+        assert!(store
+            .get_credentials("bob", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .is_none());
+        // A different user sees no providers for their own identity.
+        assert!(store.list_providers("bob").await.unwrap().is_empty());
+        assert_eq!(
+            store.list_providers("alice").await.unwrap(),
+            vec!["anthropic".to_string()]
+        );
+
+        // A different user upserting under its own identity must not overwrite
+        // alice's row.
+        store.upsert_credentials(&mk("bob")).await.unwrap();
+        let alice = store
+            .get_credentials("alice", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice.access_token, "token-alice");
+        let bob = store
+            .get_credentials("bob", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bob.access_token, "token-bob");
+
+        // A different user deleting under its own identity must not delete
+        // alice's credentials.
+        let deleted = store
+            .delete_credentials("bob", OAuthProvider::Anthropic)
+            .await
+            .unwrap();
+        assert!(deleted);
+        assert!(store
+            .get_credentials("alice", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Deleting under alice's own identity removes only her credentials.
+        let deleted = store
+            .delete_credentials("alice", OAuthProvider::Anthropic)
+            .await
+            .unwrap();
+        assert!(deleted);
+        assert!(store
+            .get_credentials("alice", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
