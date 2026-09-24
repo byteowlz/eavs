@@ -55,8 +55,11 @@ fn native_inference_path(provider: ProviderType, path: &str) -> bool {
                 || path == "/v1/speech-to-text"
                 || path.starts_with("/v1/speech-to-text/")
         }
-        ProviderType::Cohere => matches!(path, "/v2/rerank" | "/v2/embed" | "/v1/embed"),
-        ProviderType::Voyage => matches!(path, "/v1/rerank" | "/v1/embeddings"),
+        ProviderType::Cohere => matches!(
+            path,
+            "/v1/eavs/rerank" | "/v2/rerank" | "/v2/embed" | "/v1/embed"
+        ),
+        ProviderType::Voyage => matches!(path, "/v1/eavs/rerank" | "/v1/rerank" | "/v1/embeddings"),
         _ => false,
     }
 }
@@ -84,6 +87,7 @@ fn native_inference_method(path: &str, method: &http::Method) -> bool {
 
 fn is_inference_path(path: &str) -> bool {
     path == "/v1/systemone"
+        || path == "/v1/eavs/rerank"
         || path == "/v1/embeddings"
         || path.starts_with("/v1/images/")
         || path == "/v1/videos"
@@ -474,6 +478,19 @@ async fn proxy_handler_inner(
         })?;
 
     let provider_config = provider_lookup.config;
+    if matches!(
+        provider_config.provider_type(),
+        ProviderType::Fal | ProviderType::Replicate
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Use the tenant-bound /{provider}/v1/eavs/jobs API for asynchronous jobs",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
     let api_path = if let Some(ref provider) = path_provider {
         parts
             .uri
@@ -683,6 +700,22 @@ async fn proxy_handler_inner(
         None
     };
 
+    // The OpenAI video job ID is a bearer-like handle at the upstream. With a
+    // shared provider credential, virtual tenants must not access each other's
+    // jobs by guessing/leaking an ID. Reject the whole lifecycle rather than
+    // allowing submission of jobs that this key cannot retrieve safely.
+    if api_path == "/v1/videos" || api_path.starts_with("/v1/videos/") {
+        if validated_key.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    "Native video jobs are not tenant-bound; virtual keys cannot use this route",
+                    "unsupported_api_shape",
+                )),
+            )
+                .into_response());
+        }
+    }
     // Native providers use incompatible or non-token billing units. Until cost
     // adapters exist, a virtual key's budget/TPM must not silently be bypassed.
     if is_native_inference
@@ -1052,6 +1085,15 @@ async fn proxy_handler_inner(
         })?;
         (body, model)
     } else {
+        // Explicit Eavs rerank contract: Cohere's top_n/results shape, with
+        // Voyage's top_k/data translated at the provider boundary.
+        if api_path == "/v1/eavs/rerank" && provider_type == ProviderType::Voyage {
+            if let Some(body) = json_body.as_object_mut() {
+                if let Some(top_n) = body.remove("top_n") {
+                    body.insert("top_k".to_string(), top_n);
+                }
+            }
+        }
         // Pass through for OpenAI-compatible providers
         if !is_native_format_request
             && !is_responses_api_request
@@ -1203,6 +1245,12 @@ async fn proxy_handler_inner(
             "/v1/messages"
         } else if is_google_native_request {
             request_path.strip_prefix("/v1").unwrap_or(request_path)
+        } else if request_path == "/v1/eavs/rerank" {
+            if provider_type == ProviderType::Cohere {
+                "/v2/rerank"
+            } else {
+                "/v1/rerank"
+            }
         } else if request_path == "/v1/codex/responses" {
             // Codex SSE upstream is {base}/codex/responses on chatgpt.com/backend-api
             "/codex/responses"
@@ -1580,6 +1628,63 @@ async fn proxy_handler_inner(
             .headers_mut()
             .insert("x-eavs-provider", resolved_provider.parse().unwrap());
         return Ok(response);
+    }
+
+    if api_path == "/v1/eavs/rerank" {
+        // Rerank results are bounded JSON, unlike media/streaming responses.
+        // Limit buffering rather than letting a malicious upstream exhaust RAM.
+        let mut body = Vec::new();
+        let mut stream = stream;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        "Upstream rerank stream failed",
+                        "upstream_error",
+                    )),
+                )
+                    .into_response()
+            })?;
+            if body.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        "Rerank response exceeds 2 MiB",
+                        "upstream_error",
+                    )),
+                )
+                    .into_response());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let mut result: Value = serde_json::from_slice(&body).map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(
+                    "Invalid rerank response JSON",
+                    "upstream_error",
+                )),
+            )
+                .into_response()
+        })?;
+        if provider_type == ProviderType::Voyage {
+            let data = result.as_object_mut().and_then(|r| r.remove("data"));
+            if let Some(data) = data {
+                result["results"] = data;
+            }
+        }
+        if !result.get("results").is_some_and(Value::is_array) {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(
+                    "Rerank response is missing results",
+                    "upstream_error",
+                )),
+            )
+                .into_response());
+        }
+        return Ok(Json(result).into_response());
     }
 
     // Prepare usage tracking state for virtual keys
@@ -2436,6 +2541,17 @@ pub async fn provider_ws_proxy_handler(
     ws_proxy_handler_inner(state, ws, headers, uri, Some(provider)).await
 }
 
+/// Voice-specific ElevenLabs WebSocket route.
+pub async fn provider_voice_ws_proxy_handler(
+    State(state): State<AppState>,
+    Path((provider, _voice_id)): Path<(String, String)>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    ws_proxy_handler_inner(state, ws, headers, uri, Some(provider)).await
+}
+
 /// Handler for the default WebSocket route: /v1/realtime
 pub async fn ws_proxy_handler(
     State(state): State<AppState>,
@@ -2466,14 +2582,40 @@ async fn ws_proxy_handler_inner(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
 
+    let request_path = path_provider
+        .as_ref()
+        .and_then(|p| uri.path().strip_prefix(&format!("/{p}")))
+        .unwrap_or(uri.path());
     let provider_name = path_provider
         .or(header_provider)
         .unwrap_or_else(|| "default".to_string());
+    let elevenlabs_ws = request_path == "/v1/speech-to-text/realtime"
+        || request_path.starts_with("/v1/text-to-speech/")
+            && matches!(
+                request_path.rsplit('/').next(),
+                Some("stream-input" | "multi-stream-input")
+            );
 
     // Determine the actual model the client requested (Realtime carries it in
     // the connection query, e.g. ?model=gpt-4o-realtime). Validating this real
     // model is what makes virtual-key model scope apply to Realtime.
-    let ws_model = extract_realtime_model(&uri);
+    let ws_model = if elevenlabs_ws {
+        uri.query()
+            .and_then(|q| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(name, _)| name == "model_id")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_else(|| {
+                if request_path == "/v1/speech-to-text/realtime" {
+                    "scribe_v2_realtime".to_string()
+                } else {
+                    "eleven_multilingual_v2".to_string()
+                }
+            })
+    } else {
+        extract_realtime_model(&uri)
+    };
 
     // Validate virtual API key if present (or required)
     let require_key = state.config.keys.enabled && state.config.keys.require_key;
@@ -2560,15 +2702,19 @@ async fn ws_proxy_handler_inner(
     // Usage accounting for the Realtime session. Token counts are filled from
     // upstream response.done events as the session runs; the request is debited
     // once the session ends so budget/TPM limits apply to Realtime traffic.
-    let ws_tracker: Option<UsageTracker> = validated_key.as_ref().map(|vk| UsageTracker {
-        key_hash: vk.key_hash.clone(),
-        model: ws_model.clone(),
-        provider: provider_name.clone(),
-        input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-    });
+    let ws_tracker: Option<UsageTracker> =
+        validated_key
+            .as_ref()
+            .filter(|_| !elevenlabs_ws)
+            .map(|vk| UsageTracker {
+                key_hash: vk.key_hash.clone(),
+                model: ws_model.clone(),
+                provider: provider_name.clone(),
+                input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            });
     let ws_state = state.clone();
 
     // Register/update conversation in store if capture_all is enabled
@@ -2603,6 +2749,102 @@ async fn ws_proxy_handler_inner(
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
+    if elevenlabs_ws
+        && (request_path.contains('%')
+            || request_path.contains('\\')
+            || request_path
+                .split('/')
+                .any(|segment| segment == "." || segment == ".."))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Encoded or traversal path segments are not allowed",
+                "invalid_path",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && state.config.policy.enabled
+        && state
+            .config
+            .policy
+            .rules
+            .iter()
+            .any(|rule| !matches!(rule, crate::policy::PolicyRule::Deny { .. }))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Body-mutating policies cannot be enforced for native realtime speech",
+                "unsupported_policy",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && state
+            .config
+            .policy
+            .apply(&provider_name, uri.path(), &mut json!({"model": ws_model}))
+            .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(
+                "Realtime speech request denied by policy",
+                "policy_violation",
+            )),
+        )
+            .into_response();
+    }
+    if (elevenlabs_ws && provider_type != ProviderType::ElevenLabs)
+        || (!elevenlabs_ws && provider_type == ProviderType::ElevenLabs)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "WebSocket API shape is not supported by this provider",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response();
+    }
+    // Never relay user-supplied provider tokens in the query string.
+    if elevenlabs_ws
+        && uri.query().is_some_and(|q| {
+            url::form_urlencoded::parse(q.as_bytes()).any(|(name, _)| {
+                matches!(
+                    name.as_ref(),
+                    "token" | "single_use_token" | "authorization"
+                )
+            })
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Use an Eavs Authorization header, not a provider token query parameter",
+                "invalid_request",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && validated_key.as_ref().is_some_and(|key| {
+            key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Native realtime speech cannot enforce this key's budget or token limit yet",
+                "unsupported_metering",
+            )),
+        )
+            .into_response();
+    }
     let mut api_key = provider_config.resolved_api_key();
 
     if let Some(ref validated) = validated_key {
@@ -2629,7 +2871,7 @@ async fn ws_proxy_handler_inner(
 
     let upstream_url = match build_ws_upstream_url(
         &provider_config.resolved_base_url(),
-        uri.path(),
+        request_path,
         uri.query(),
     ) {
         Ok(u) => u,
@@ -2720,11 +2962,15 @@ async fn ws_proxy_handler_inner(
         let upstream_tx_client = upstream_tx.clone();
         let client_to_upstream = tokio::spawn(async move {
             while let Some(Ok(msg)) = client_receiver.next().await {
-                let Some(up_msg) = sanitize_ws_client_message(
-                    msg,
-                    &delegated_fetch_policy,
-                    &delegated_fetch_analysis_tx,
-                ) else {
+                let Some(up_msg) = (if elevenlabs_ws {
+                    axum_to_tungstenite(msg)
+                } else {
+                    sanitize_ws_client_message(
+                        msg,
+                        &delegated_fetch_policy,
+                        &delegated_fetch_analysis_tx,
+                    )
+                }) else {
                     continue;
                 };
                 let is_close = matches!(up_msg, TungsteniteMessage::Close(_));
@@ -2786,6 +3032,9 @@ async fn ws_proxy_handler_inner(
 
         // Injection -> upstream (OpenAI Realtime semantics).
         let inject_to_upstream = tokio::spawn(async move {
+            if elevenlabs_ws {
+                return;
+            }
             while let Some(injections) = injection_rx.recv().await {
                 for inj in injections {
                     let event = serde_json::json!({
@@ -5537,6 +5786,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_canonical_rerank_translates_voyage_without_changing_native_route() {
+        let response = json!({"object":"list","data":[{"index":1,"relevance_score":0.9}],
+            "model":"rerank-2.5","usage":{"total_tokens":12}});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from(serde_json::to_vec(&response).unwrap())],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "voyage".into(),
+            ProviderConfig {
+                type_: "voyage".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"rerank-2.5","query":"test","documents":["a","b"],"top_n":1});
+        let result = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/voyage/v1/eavs/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(result.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["results"][0]["index"], 1);
+        assert_eq!(value["usage"]["total_tokens"], 12);
+        assert!(value.get("data").is_none());
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v1/rerank");
+        let upstream: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(upstream["top_k"], 1);
+        assert!(upstream.get("top_n").is_none());
+    }
+
+    #[tokio::test]
+    async fn e2e_canonical_rerank_keeps_cohere_shape() {
+        let value = json!({"results":[{"index":0,"relevance_score":0.9}]});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(serde_json::to_vec(&value).unwrap())],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "cohere".into(),
+            ProviderConfig {
+                type_: "cohere".into(),
+                base_url: "http://up".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = json!({"model":"rerank-v3.5","query":"q","documents":["a"],"top_n":1});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/cohere/v1/eavs/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body, value);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v2/rerank");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).unwrap(),
+            request
+        );
+    }
+
+    #[tokio::test]
     async fn e2e_cohere_rerank_uses_v2_native_path() {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
@@ -6974,6 +7331,98 @@ mod tests {
             .ok()
             .unwrap();
         (state, store)
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_realtime_relay_preserves_binary_frames_and_provider_auth() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (tcp, _) = upstream_listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(tcp,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(request.uri().path(), "/v1/speech-to-text/realtime");
+                    assert_eq!(request.headers().get("xi-api-key").unwrap(), "upstream-secret");
+                    Ok(response)
+                }).await.unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            assert_eq!(frame.into_data(), b"\xff\x00");
+            socket
+                .send(TungsteniteMessage::Binary(vec![0xfe, 0x01]))
+                .await
+                .unwrap();
+            socket.close(None).await.unwrap();
+        });
+        let mut providers = HashMap::new();
+        providers.insert(
+            "elevenlabs".into(),
+            ProviderConfig {
+                type_: "elevenlabs".into(),
+                base_url: format!("http://{upstream_addr}/v1"),
+                api_key: "upstream-secret".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        let app = Router::new()
+            .route(
+                "/:provider/v1/speech-to-text/realtime",
+                axum::routing::get(provider_ws_proxy_handler),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let exchange = async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                "ws://{addr}/elevenlabs/v1/speech-to-text/realtime?model_id=scribe_v2_realtime"
+            ))
+            .await
+            .unwrap();
+            socket
+                .send(TungsteniteMessage::Binary(vec![0xff, 0x00]))
+                .await
+                .unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            assert_eq!(frame.into_data(), b"\xfe\x01");
+            upstream_task.await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn virtual_key_cannot_start_unowned_native_video_job() {
+        let (state, store) = state_with_key_store().await;
+        let key = store
+            .create_key(CreateKeyRequest::default())
+            .await
+            .unwrap()
+            .key;
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .header("authorization", format!("Bearer {key}"))
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model":"sora-2","prompt":"a bird"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

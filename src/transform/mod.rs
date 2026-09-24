@@ -126,6 +126,8 @@ impl ProviderTransformer {
             | ProviderType::ElevenLabs
             | ProviderType::Cohere
             | ProviderType::Voyage
+            | ProviderType::Fal
+            | ProviderType::Replicate
             | ProviderType::Mock => {
                 let transformer = OpenAITransformer::new();
                 let transformer = match compat {

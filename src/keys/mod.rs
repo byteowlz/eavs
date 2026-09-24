@@ -15,6 +15,7 @@ mod word_lists;
 // Public API
 pub use cost::CostCalculator;
 pub use generation::is_virtual_key;
+pub(crate) use generation::hash_key;
 pub use pricing::SharedPricingTable;
 pub use rate_limit::RateLimiter;
 pub use store::{KeyStore, OwnerUsage, UsageRecord};
