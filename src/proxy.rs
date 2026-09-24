@@ -2799,7 +2799,8 @@ async fn ws_proxy_handler_inner(
         )
             .into_response();
     }
-    if (elevenlabs_ws && provider_type != ProviderType::ElevenLabs)
+    if matches!(provider_type, ProviderType::Fal | ProviderType::Replicate)
+        || (elevenlabs_ws && provider_type != ProviderType::ElevenLabs)
         || (!elevenlabs_ws && provider_type == ProviderType::ElevenLabs)
     {
         return (
@@ -3200,6 +3201,19 @@ async fn codex_ws_handler_inner(
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
+    if matches!(
+        provider_type,
+        ProviderType::Fal | ProviderType::Replicate | ProviderType::ElevenLabs
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Codex WebSocket is not supported by this provider",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response();
+    }
     let mut api_key = provider_config.resolved_api_key();
 
     // Resolve OAuth token if key is bound to an oauth_user
@@ -7331,6 +7345,42 @@ mod tests {
             .ok()
             .unwrap();
         (state, store)
+    }
+
+    #[tokio::test]
+    async fn fal_cannot_use_realtime_websocket_route() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "fal".into(),
+            ProviderConfig {
+                type_: "fal".into(),
+                base_url: "http://up".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        let app = Router::new()
+            .route(
+                "/:provider/v1/realtime",
+                axum::routing::get(provider_ws_proxy_handler),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = tokio_tungstenite::connect_async(format!("ws://{addr}/fal/v1/realtime"))
+            .await
+            .unwrap_err();
+        match result {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        server.abort();
     }
 
     #[tokio::test]
