@@ -36,7 +36,9 @@ pub async fn discover_provider_models(
         | ProviderType::XAI
         | ProviderType::Azure
         | ProviderType::OpenAIResponses
-        | ProviderType::OpenAICodex => {
+        | ProviderType::OpenAICodex
+        | ProviderType::OpenCode
+        | ProviderType::OpenCodeGo => {
             // Ollama exposes OpenAI-compat /v1/models but also native /api/tags.
             // Detect by URL and try the native endpoint first for richer metadata.
             if base_url.contains("11434") || base_url.contains("ollama") {

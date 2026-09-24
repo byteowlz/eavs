@@ -147,6 +147,7 @@ Supported providers:
 - `azure` - Azure OpenAI
 - `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
+- `opencode`, `opencode-go` - OpenCode / OpenCode Go gateways (requires `OPENCODE_API_KEY`; sends the `x-opencode-session` per-conversation header)
 - `mock` - Mock provider for testing (no network calls)
 
 When to use which OpenAI provider:

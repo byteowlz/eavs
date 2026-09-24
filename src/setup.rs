@@ -65,6 +65,16 @@ const PROVIDER_CHOICES: &[(&str, &str, &str)] = &[
         "openai-compatible",
         "vLLM, LM Studio, or any OpenAI-compatible API",
     ),
+    (
+        "OpenCode Go",
+        "opencode-go",
+        "OpenCode Go gateway (opencode.ai/zen/go, needs OPENCODE_API_KEY)",
+    ),
+    (
+        "OpenCode",
+        "opencode",
+        "OpenCode Zen gateway (opencode.ai/zen, needs OPENCODE_API_KEY)",
+    ),
 ];
 
 /// Index in PROVIDER_CHOICES for the Azure AI Foundry entry

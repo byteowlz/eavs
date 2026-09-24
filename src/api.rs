@@ -519,6 +519,7 @@ pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Opt
         | ProviderType::XAI
         | ProviderType::OpenRouter
         | ProviderType::OpenAICompatible => Some("openai-completions"),
+        ProviderType::OpenCode | ProviderType::OpenCodeGo => Some("openai-completions"),
         ProviderType::GithubCopilot => Some("openai-responses"),
         ProviderType::Mock => Some("openai-completions"),
     }
