@@ -35,6 +35,67 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use uuid::Uuid;
 
+/// Native inference operations do not use the chat-completions schema.
+/// Keep this an explicit allowlist: provider credentials must not become a
+/// general-purpose proxy to account, billing, or administrative endpoints.
+fn native_inference_path(provider: ProviderType, path: &str) -> bool {
+    let openai_media = path == "/v1/embeddings"
+        || path == "/v1/images/generations"
+        || path == "/v1/images/edits"
+        || path == "/v1/images/variations"
+        || path == "/v1/videos"
+        || path.starts_with("/v1/videos/");
+    match provider {
+        ProviderType::OpenAI | ProviderType::OpenAIResponses | ProviderType::OpenAICompatible => {
+            openai_media
+        }
+        ProviderType::TypeSafe => path == "/v1/systemone",
+        ProviderType::ElevenLabs => {
+            path.starts_with("/v1/text-to-speech/")
+                || path == "/v1/speech-to-text"
+                || path.starts_with("/v1/speech-to-text/")
+        }
+        ProviderType::Cohere => matches!(path, "/v2/rerank" | "/v2/embed" | "/v1/embed"),
+        ProviderType::Voyage => matches!(path, "/v1/rerank" | "/v1/embeddings"),
+        _ => false,
+    }
+}
+
+fn has_remote_media_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            ((key == "url" || key.ends_with("_url"))
+                && value
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("http://") || s.starts_with("https://")))
+                || has_remote_media_reference(value)
+        }),
+        Value::Array(values) => values.iter().any(has_remote_media_reference),
+        _ => false,
+    }
+}
+
+fn native_inference_method(path: &str, method: &http::Method) -> bool {
+    if path.starts_with("/v1/videos/") {
+        return *method == http::Method::GET;
+    }
+    *method == http::Method::POST
+}
+
+fn is_inference_path(path: &str) -> bool {
+    path == "/v1/systemone"
+        || path == "/v1/embeddings"
+        || path.starts_with("/v1/images/")
+        || path == "/v1/videos"
+        || path.starts_with("/v1/videos/")
+        || matches!(
+            path,
+            "/v1/rerank" | "/v2/rerank" | "/v1/embed" | "/v2/embed"
+        )
+        || path.starts_with("/v1/text-to-speech/")
+        || path.starts_with("/v1/speech-to-text")
+}
+
 /// Error response for proxy errors.
 #[derive(Serialize)]
 struct ProxyError {
@@ -325,6 +386,7 @@ async fn proxy_handler_inner(
     // Extract model from request for validation
     let model = json_body
         .get("model")
+        .or_else(|| json_body.get("model_id"))
         .and_then(|m| m.as_str())
         .unwrap_or("unknown")
         .to_string();
@@ -412,6 +474,121 @@ async fn proxy_handler_inner(
         })?;
 
     let provider_config = provider_lookup.config;
+    let api_path = if let Some(ref provider) = path_provider {
+        parts
+            .uri
+            .path()
+            .strip_prefix(&format!("/{provider}"))
+            .unwrap_or(parts.uri.path())
+    } else {
+        parts.uri.path()
+    };
+    // An allowlisted prefix must never be escapable through URL normalization
+    // or a backend decoding encoded separators/dot segments.
+    if api_path.contains('%')
+        || api_path.contains('\\')
+        || api_path.split('/').any(|s| s == "." || s == "..")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Encoded or traversal path segments are not allowed",
+                "invalid_path",
+            )),
+        )
+            .into_response());
+    }
+    let is_native_inference = native_inference_path(provider_config.provider_type(), api_path);
+    if (is_inference_path(api_path) && !is_native_inference)
+        || (matches!(
+            provider_config.provider_type(),
+            ProviderType::TypeSafe
+                | ProviderType::ElevenLabs
+                | ProviderType::Cohere
+                | ProviderType::Voyage
+        ) && !is_native_inference
+            && !(api_path == "/v1/models"
+                && provider_config.provider_type().supports_models_endpoint()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "This provider does not support the requested native inference API shape",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
+    if is_native_inference && !native_inference_method(api_path, &parts.method) {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(ProxyError::new(
+                "Method not supported for this inference endpoint",
+                "unsupported_method",
+            )),
+        )
+            .into_response());
+    }
+    let is_opaque_inference = is_native_inference
+        && !bytes.is_empty()
+        && !parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.starts_with("application/json"));
+    if is_native_inference && !is_opaque_inference && !bytes.is_empty() && json_body.is_null() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Invalid JSON inference request",
+                "invalid_request",
+            )),
+        )
+            .into_response());
+    }
+    if is_opaque_inference {
+        let allowed_upload = api_path == "/v1/images/edits"
+            || api_path == "/v1/images/variations"
+            || api_path.starts_with("/v1/speech-to-text")
+            || api_path.starts_with("/v1/text-to-speech/");
+        if !allowed_upload
+            || !parts
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(|s| {
+                    s.starts_with("multipart/form-data;")
+                        || s.starts_with("audio/")
+                        || s == "application/octet-stream"
+                })
+        {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ProxyError::new(
+                    "Unsupported native inference upload content type",
+                    "unsupported_media_type",
+                )),
+            )
+                .into_response());
+        }
+        if state.config.policy.enabled
+            && state
+                .config
+                .policy
+                .rules
+                .iter()
+                .any(|rule| !matches!(rule, crate::policy::PolicyRule::Deny { .. }))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    "Body-mutating policy rules cannot be applied to binary uploads",
+                    "unsupported_policy",
+                )),
+            )
+                .into_response());
+        }
+    }
     let resolved_provider = provider_lookup.resolved_name.clone();
     let provider_name = resolved_provider.clone();
 
@@ -506,6 +683,23 @@ async fn proxy_handler_inner(
         None
     };
 
+    // Native providers use incompatible or non-token billing units. Until cost
+    // adapters exist, a virtual key's budget/TPM must not silently be bypassed.
+    if is_native_inference
+        && validated_key.as_ref().is_some_and(|key| {
+            key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Native inference cannot enforce this virtual key's budget or token limit yet",
+                "unsupported_metering",
+            )),
+        )
+            .into_response());
+    }
+
     // Provider-side URL fetching and hosted tools bypass EAVS's network ACL.
     // Resolve tenant metadata after key validation, then sanitize before any
     // routing transform or passthrough serialization.
@@ -541,14 +735,16 @@ async fn proxy_handler_inner(
     }
 
     // Check for injections (new conversation store)
-    let injections = state.conversations.take_injections(&ns_conversation);
-    if !injections.is_empty() {
-        apply_injections(&mut json_body, &injections);
-    }
+    if !is_native_inference {
+        let injections = state.conversations.take_injections(&ns_conversation);
+        if !injections.is_empty() {
+            apply_injections(&mut json_body, &injections);
+        }
 
-    // Legacy fallback: check old injections map
-    if let Some((_, legacy_injections)) = state.injections.remove(&ns_conversation) {
-        apply_injections(&mut json_body, &legacy_injections);
+        // Legacy fallback: check old injections map
+        if let Some((_, legacy_injections)) = state.injections.remove(&ns_conversation) {
+            apply_injections(&mut json_body, &legacy_injections);
+        }
     }
 
     // Apply policy rules (deny/rewrite/filter) after injection.
@@ -560,6 +756,22 @@ async fn proxy_handler_inner(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ProxyError::new(err.message, "policy_violation")),
+        )
+            .into_response());
+    }
+
+    // Check the final body: policy rewrites may introduce new remote URLs.
+    if is_native_inference
+        && !delegated_fetch_policy.allow_remote_content
+        && (api_path.starts_with("/v1/images/") || api_path.starts_with("/v1/videos"))
+        && has_remote_media_reference(&json_body)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(
+                "Remote media references require delegated fetch permission",
+                "network_policy",
+            )),
         )
             .into_response());
     }
@@ -576,7 +788,13 @@ async fn proxy_handler_inner(
         id: correlation_id.clone(),
         method: parts.method.to_string(),
         uri: parts.uri.to_string(),
-        body: json_body.clone(),
+        // Native responses can contain large base64 media or sensitive documents.
+        // Audit metadata, never the raw content of native inference calls.
+        body: if is_native_inference {
+            json!({"native_api": api_path, "model": model, "request_bytes": bytes.len()})
+        } else {
+            json_body.clone()
+        },
     });
 
     // Use real API key from provider config (virtual key was just for auth)
@@ -633,18 +851,19 @@ async fn proxy_handler_inner(
         }
     }
 
-    // Determine the actual API path (strip provider prefix if using provider-prefixed routing)
-    let api_path = if let Some(ref provider) = path_provider {
-        let prefix = format!("/{}", provider);
-        parts
-            .uri
-            .path()
-            .strip_prefix(&prefix)
-            .unwrap_or(parts.uri.path())
-    } else {
-        parts.uri.path()
-    };
-
+    // Native-only providers have no OpenAI-format synthetic catalog.
+    if api_path == "/v1/models"
+        && matches!(provider_type, ProviderType::Cohere | ProviderType::Voyage)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ProxyError::new(
+                "This provider does not expose a compatible models endpoint",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
     // Handle /v1/models endpoint for providers that don't support it natively
     // Return a synthetic response with known models for that provider
     if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
@@ -700,9 +919,7 @@ async fn proxy_handler_inner(
     // Check if this is a pass-through endpoint that doesn't need transformation
     // (e.g., /v1/models, /v1/embeddings for providers that support them natively)
     let is_passthrough_endpoint = !is_native_format_request
-        && (api_path == "/v1/models"
-            || api_path.starts_with("/v1/models/")
-            || api_path == "/v1/embeddings");
+        && (api_path == "/v1/models" || api_path.starts_with("/v1/models/") || is_native_inference);
 
     // Check if client is sending Responses API format directly
     // This allows clients to use the Responses API natively with EAVS just handling OAuth
@@ -881,16 +1098,22 @@ async fn proxy_handler_inner(
                 }
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let body = serde_json::to_vec(&json_body).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProxyError::new(
-                    format!("Failed to serialize request: {}", e),
-                    "internal_error",
-                )),
-            )
-                .into_response()
-        })?;
+        let body = if is_opaque_inference {
+            bytes.to_vec()
+        } else if bytes.is_empty() && is_native_inference {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&json_body).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ProxyError::new(
+                        format!("Failed to serialize request: {}", e),
+                        "internal_error",
+                    )),
+                )
+                    .into_response()
+            })?
+        };
         (body, model)
     };
 
@@ -1047,10 +1270,18 @@ async fn proxy_handler_inner(
 
     // Build upstream request
     let mut upstream_headers = HeaderMap::new();
-    upstream_headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-    );
+    if !request_body.is_empty() {
+        if is_opaque_inference {
+            if let Some(content_type) = parts.headers.get(http::header::CONTENT_TYPE) {
+                upstream_headers.insert(http::header::CONTENT_TYPE, content_type.clone());
+            }
+        } else {
+            upstream_headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+        }
+    }
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
@@ -1302,6 +1533,15 @@ async fn proxy_handler_inner(
 
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
+
+    // Native inference APIs have their own error schemas. Preserve status,
+    // headers and bytes; never text-decode an audio/video error payload.
+    if !status.is_success() && is_native_inference {
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        return Ok(response);
+    }
 
     // Normalize non-success upstream errors to OpenAI-compatible error format.
     if !status.is_success() {
@@ -1637,10 +1877,15 @@ async fn proxy_handler_inner(
             Ok(response)
         }
     } else {
-        // Pass through without transformation
+        // Native media bytes are forwarded unchanged and never decoded into the
+        // text analysis stream (audio/video/image payloads can be sensitive).
         let tracker_clone = usage_tracker.clone();
         let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
             Ok(chunk) => {
+                if is_native_inference {
+                    // Never publish media, embeddings or typed decisions to text audit logs.
+                    return Ok(chunk);
+                }
                 let text = String::from_utf8_lossy(&chunk).to_string();
 
                 // Try to extract usage from streaming responses in the
@@ -3488,8 +3733,10 @@ fn apply_opencode_session_headers<H: HeadersExt>(
     provider_type: ProviderType,
     session_id: &str,
 ) {
-    if matches!(provider_type, ProviderType::OpenCode | ProviderType::OpenCodeGo)
-        && !session_id.is_empty()
+    if matches!(
+        provider_type,
+        ProviderType::OpenCode | ProviderType::OpenCodeGo
+    ) && !session_id.is_empty()
     {
         if let Ok(value) = http::HeaderValue::from_str(session_id) {
             headers.insert_header(
@@ -4132,7 +4379,10 @@ mod tests {
         // OpenCode (Zen) also gets the session header.
         let mut h2 = http::HeaderMap::new();
         apply_opencode_session_headers(&mut h2, ProviderType::OpenCode, "sess-2");
-        assert_eq!(h2.get("x-opencode-session").unwrap().to_str().unwrap(), "sess-2");
+        assert_eq!(
+            h2.get("x-opencode-session").unwrap().to_str().unwrap(),
+            "sess-2"
+        );
 
         // Non-OpenCode providers must NOT receive the header.
         let mut h3 = http::HeaderMap::new();
@@ -5078,6 +5328,299 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.starts_with("http://up2/"));
         assert!(requests[1].url.starts_with("http://up1/"));
+    }
+
+    #[test]
+    fn native_shapes_are_scoped_to_their_provider() {
+        assert!(native_inference_path(
+            ProviderType::TypeSafe,
+            "/v1/systemone"
+        ));
+        assert!(native_inference_path(ProviderType::Cohere, "/v2/rerank"));
+        assert!(native_inference_path(ProviderType::Voyage, "/v1/rerank"));
+        assert!(native_inference_path(
+            ProviderType::OpenAI,
+            "/v1/videos/vid_1/content"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::Anthropic,
+            "/v1/videos"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::ElevenLabs,
+            "/v1/admin/keys"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::TypeSafe,
+            "/v1/chat/completions"
+        ));
+        assert!(has_remote_media_reference(
+            &json!({"input_reference": {"image_url": "https://example.com/a.png"}})
+        ));
+        assert!(!has_remote_media_reference(
+            &json!({"input_reference": {"image_url": "data:image/png;base64,AAAA"}})
+        ));
+    }
+
+    #[tokio::test]
+    async fn e2e_typesafe_systemone_preserves_typed_json_and_errors() {
+        let payload = json!({"model":"jev-latest","state":{"ticket":"refund"},
+            "questions":{"urgent":{"type":"noul","instructions":"Is this urgent?"}}});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(br#"{"detail":"invalid question"}"#)],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "typesafe".into(),
+            ProviderConfig {
+                type_: "typesafe".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/typesafe/v1/systemone")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(response_body.as_ref(), br#"{"detail":"invalid question"}"#);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v1/systemone");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).unwrap(),
+            payload
+        );
+        assert_eq!(
+            sent[0].headers.get("authorization").unwrap(),
+            "Bearer secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_elevenlabs_binary_upload_and_download_preserve_bytes() {
+        let mut audio_headers = HeaderMap::new();
+        audio_headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("audio/mpeg"),
+        );
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: audio_headers,
+            chunks: vec![Bytes::from_static(b"\xff\xfb\x00\x80")],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "elevenlabs".into(),
+            ProviderConfig {
+                type_: "elevenlabs".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let multipart = b"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n\r\n\xff\x00\r\n--boundary--\r\n";
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/elevenlabs/v1/speech-to-text")
+            .header(
+                http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=boundary",
+            )
+            .body(Body::from(multipart.as_slice()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "audio/mpeg"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"\xff\xfb\x00\x80");
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].body.as_ref(), multipart);
+        assert_eq!(sent[0].headers.get("xi-api-key").unwrap(), "secret");
+        assert_eq!(
+            sent[0].headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "multipart/form-data; boundary=boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_video_reference_is_rejected_before_upstream() {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "openai".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"sora-2","prompt":"x","input_reference":{"image_url":"https://example.com/private"}});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(mock.take_requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_native_shape_rejected_before_upstream() {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "anthropic".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(mock.take_requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn e2e_cohere_rerank_uses_v2_native_path() {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(
+                br#"{"results":[{"index":0,"relevance_score":0.9}]}"#,
+            )],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "cohere".into(),
+            ProviderConfig {
+                type_: "cohere".into(),
+                base_url: "http://up".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v2/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"rerank-v3.5","query":"test","documents":["hello"]});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/cohere/v2/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v2/rerank");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).unwrap(),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_video_get_has_no_json_null_body() {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"mp4")],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "openai".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/videos/vid_1/content")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert!(sent[0].body.is_empty());
+        assert!(sent[0].headers.get(http::header::CONTENT_TYPE).is_none());
+        assert_eq!(sent[0].url, "http://up/v1/videos/vid_1/content");
     }
 
     #[tokio::test]

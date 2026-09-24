@@ -148,7 +148,37 @@ Supported providers:
 - `bedrock` - AWS Bedrock (with SigV4 signing)
 - `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
 - `opencode`, `opencode-go` - OpenCode / OpenCode Go gateways (requires `OPENCODE_API_KEY`; sends the `x-opencode-session` per-conversation header)
+- `typesafe` - TypeSafe System One (`TYPESAFE_API_KEY`)
+- `elevenlabs` - ElevenLabs speech HTTP APIs (`ELEVENLABS_API_KEY`)
+- `cohere` - Cohere native reranking/embedding (`COHERE_API_KEY`)
+- `voyage` - Voyage native reranking/embeddings (`VOYAGE_API_KEY`)
 - `mock` - Mock provider for testing (no network calls)
+
+### Native inference APIs (HTTP)
+
+Eavs relays selected non-chat API shapes without converting them to chat completions.
+Configure a provider as above (for example, `[providers.typesafe]` with
+`type = "typesafe"`), then call its provider-prefixed endpoint with the usual
+Eavs virtual key. Native requests retain JSON shape; media uploads retain their
+multipart boundary and bytes, and binary downloads stream unchanged.
+
+| Provider | Native endpoints |
+| --- | --- |
+| `openai`, `openai-responses`, `openai-compatible` | `POST /v1/embeddings`, `POST /v1/images/{generations,edits,variations}`, `POST /v1/videos`, `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content` |
+| `typesafe` | `POST /typesafe/v1/systemone` (typed `state` + `questions`) |
+| `elevenlabs` | `POST /elevenlabs/v1/text-to-speech/{voice_id}...`, `POST /elevenlabs/v1/speech-to-text...` |
+| `cohere` | `POST /cohere/v2/rerank`, `POST /cohere/v2/embed` (also `/v1/embed`) |
+| `voyage` | `POST /voyage/v1/rerank`, `POST /voyage/v1/embeddings` |
+
+Only these native operations are allowed for the new provider types; this is
+not a general proxy to provider account APIs. Opaque uploads cannot be
+inspected or rewritten: body-mutating policy rules reject them, and virtual
+keys restricted to particular models reject requests without a parseable
+`model`/`model_id`. Native response usage/cost tracking is not yet calibrated;
+virtual keys with a USD budget or TPM limit are rejected for native inference
+rather than silently bypassing those limits. Realtime ElevenLabs WebSockets, fal and
+Replicate async jobs, webhook handling, and cross-provider shape translation
+are **not yet supported**.
 
 When to use which OpenAI provider:
 

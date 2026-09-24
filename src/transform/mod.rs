@@ -122,6 +122,10 @@ impl ProviderTransformer {
             | ProviderType::GithubCopilot // GitHub Copilot uses OpenAI completions API
             | ProviderType::OpenCode
             | ProviderType::OpenCodeGo
+            | ProviderType::TypeSafe
+            | ProviderType::ElevenLabs
+            | ProviderType::Cohere
+            | ProviderType::Voyage
             | ProviderType::Mock => {
                 let transformer = OpenAITransformer::new();
                 let transformer = match compat {

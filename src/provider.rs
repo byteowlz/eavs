@@ -29,6 +29,14 @@ pub enum ProviderType {
     OpenCode,
     /// OpenCode Go - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai/zen/go)
     OpenCodeGo,
+    /// TypeSafe System One typed decisions.
+    TypeSafe,
+    /// ElevenLabs speech and audio APIs.
+    ElevenLabs,
+    /// Cohere embeddings and reranking APIs.
+    Cohere,
+    /// Voyage embeddings and reranking APIs.
+    Voyage,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -90,6 +98,10 @@ impl ProviderType {
             "google-vertex" | "vertex" => Self::GoogleVertex,
             "opencode" | "opencode-zen" => Self::OpenCode,
             "opencode-go" => Self::OpenCodeGo,
+            "typesafe" | "typesafe-ai" => Self::TypeSafe,
+            "elevenlabs" => Self::ElevenLabs,
+            "cohere" => Self::Cohere,
+            "voyage" | "voyageai" => Self::Voyage,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => return None,
         };
@@ -201,6 +213,30 @@ impl ProviderType {
                 env_key_name: Some("OPENCODE_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::TypeSafe => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.typesafe.ai/v1"),
+                env_key_name: Some("TYPESAFE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::ElevenLabs => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.elevenlabs.io/v1"),
+                env_key_name: Some("ELEVENLABS_API_KEY"),
+                auth_style: AuthStyle::ApiKeyHeader("xi-api-key"),
+            },
+            Self::Cohere => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.cohere.com"),
+                env_key_name: Some("COHERE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::Voyage => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.voyageai.com/v1"),
+                env_key_name: Some("VOYAGE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -264,6 +300,8 @@ impl ProviderType {
                 | Self::OpenAIResponses
                 | Self::OpenCode
                 | Self::OpenCodeGo
+                | Self::TypeSafe
+                | Self::ElevenLabs
         )
     }
 
@@ -863,6 +901,46 @@ mod tests {
         // Unknown hosts
         assert_eq!(detect_provider_from_host("example.com"), None);
         assert_eq!(detect_provider_from_host("localhost"), None);
+    }
+
+    #[test]
+    fn native_inference_provider_metadata() {
+        for (name, provider, url, env, auth) in [
+            (
+                "typesafe",
+                ProviderType::TypeSafe,
+                "https://api.typesafe.ai/v1",
+                "TYPESAFE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "elevenlabs",
+                ProviderType::ElevenLabs,
+                "https://api.elevenlabs.io/v1",
+                "ELEVENLABS_API_KEY",
+                AuthStyle::ApiKeyHeader("xi-api-key"),
+            ),
+            (
+                "cohere",
+                ProviderType::Cohere,
+                "https://api.cohere.com",
+                "COHERE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "voyage",
+                ProviderType::Voyage,
+                "https://api.voyageai.com/v1",
+                "VOYAGE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+        ] {
+            assert_eq!(ProviderType::try_from_str(name), Some(provider));
+            let info = provider.info();
+            assert_eq!(info.default_base_url, Some(url));
+            assert_eq!(info.env_key_name, Some(env));
+            assert_eq!(info.auth_style, auth);
+        }
     }
 
     #[test]
