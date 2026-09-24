@@ -37,6 +37,10 @@ pub enum ProviderType {
     Cohere,
     /// Voyage embeddings and reranking APIs.
     Voyage,
+    /// fal queued asynchronous inference.
+    Fal,
+    /// Replicate predictions API.
+    Replicate,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -102,6 +106,8 @@ impl ProviderType {
             "elevenlabs" => Self::ElevenLabs,
             "cohere" => Self::Cohere,
             "voyage" | "voyageai" => Self::Voyage,
+            "fal" | "fal-ai" => Self::Fal,
+            "replicate" => Self::Replicate,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => return None,
         };
@@ -235,6 +241,18 @@ impl ProviderType {
                 provider_type: *self,
                 default_base_url: Some("https://api.voyageai.com/v1"),
                 env_key_name: Some("VOYAGE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::Fal => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://queue.fal.run"),
+                env_key_name: Some("FAL_KEY"),
+                auth_style: AuthStyle::None, // Job gateway applies fal's `Authorization: Key` itself.
+            },
+            Self::Replicate => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.replicate.com/v1"),
+                env_key_name: Some("REPLICATE_API_TOKEN"),
                 auth_style: AuthStyle::BearerToken,
             },
             Self::Mock => ProviderInfo {
@@ -932,6 +950,20 @@ mod tests {
                 ProviderType::Voyage,
                 "https://api.voyageai.com/v1",
                 "VOYAGE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "fal",
+                ProviderType::Fal,
+                "https://queue.fal.run",
+                "FAL_KEY",
+                AuthStyle::None,
+            ),
+            (
+                "replicate",
+                ProviderType::Replicate,
+                "https://api.replicate.com/v1",
+                "REPLICATE_API_TOKEN",
                 AuthStyle::BearerToken,
             ),
         ] {

@@ -152,6 +152,8 @@ Supported providers:
 - `elevenlabs` - ElevenLabs speech HTTP APIs (`ELEVENLABS_API_KEY`)
 - `cohere` - Cohere native reranking/embedding (`COHERE_API_KEY`)
 - `voyage` - Voyage native reranking/embeddings (`VOYAGE_API_KEY`)
+- `fal` - fal asynchronous inference queue (`FAL_KEY`)
+- `replicate` - Replicate predictions (`REPLICATE_API_TOKEN`)
 - `mock` - Mock provider for testing (no network calls)
 
 ### Native inference APIs (HTTP)
@@ -170,15 +172,58 @@ multipart boundary and bytes, and binary downloads stream unchanged.
 | `cohere` | `POST /cohere/v2/rerank`, `POST /cohere/v2/embed` (also `/v1/embed`) |
 | `voyage` | `POST /voyage/v1/rerank`, `POST /voyage/v1/embeddings` |
 
+For a common reranking contract, `POST /cohere/v1/eavs/rerank` or
+`POST /voyage/v1/eavs/rerank` accepts `{model, query, documents, top_n?}`
+and returns `{results: [{index, relevance_score}], model, usage?}`. Native
+Cohere and Voyage rerank endpoints retain their original request/response
+shapes; only the `/v1/eavs/rerank` route translates.
+
 Only these native operations are allowed for the new provider types; this is
 not a general proxy to provider account APIs. Opaque uploads cannot be
 inspected or rewritten: body-mutating policy rules reject them, and virtual
 keys restricted to particular models reject requests without a parseable
 `model`/`model_id`. Native response usage/cost tracking is not yet calibrated;
 virtual keys with a USD budget or TPM limit are rejected for native inference
-rather than silently bypassing those limits. Realtime ElevenLabs WebSockets, fal and
-Replicate async jobs, webhook handling, and cross-provider shape translation
-are **not yet supported**.
+rather than silently bypassing those limits. OpenAI's native video job lifecycle
+is currently blocked for **all virtual keys**: raw video IDs cannot safely
+isolate tenants sharing one upstream credential.
+
+ElevenLabs realtime STT and streaming TTS WebSockets are available through
+`/elevenlabs/v1/speech-to-text/realtime` and
+`/elevenlabs/v1/text-to-speech/{voice_id}/stream-input` (or
+`multi-stream-input`). Frames are relayed byte-for-byte. Provider tokens in
+query parameters are rejected; use Eavs authentication. USD-budget/TPM-scoped
+virtual keys cannot use native realtime speech until metering is available.
+### Asynchronous inference jobs
+
+Fal and Replicate use a separate, tenant-bound Eavs job API, **not** their raw
+SDK URLs. Configure `[providers.fal]` (`type = "fal"`) or
+`[providers.replicate]` (`type = "replicate"`), and enable/provision Eavs
+virtual keys. Calls without a virtual key are rejected. For example:
+
+```http
+POST /fal/v1/eavs/jobs
+Authorization: Bearer eavs-...
+Content-Type: application/json
+
+{"model":"fal-ai/flux/schnell","input":{"prompt":"a red kite"}}
+```
+
+Replicate additionally requires `"version"` (its model-version ID). The
+submit response returns a signed `handle`, rather than upstream status URLs.
+Use the **same** virtual key for:
+
+- `GET /{provider}/v1/eavs/jobs/{handle}` — status
+- `GET /{provider}/v1/eavs/jobs/{handle}/result` — result
+- `POST /{provider}/v1/eavs/jobs/{handle}/cancel` — cancellation request
+
+Handles bind provider, model, job ID and virtual-key owner; they expire after
+seven days. They remain valid across restarts but changing the upstream
+provider credential invalidates them. Upstream callback URLs are never
+returned. Webhook inputs are rejected: polling is supported, but **verified
+webhook delivery is not yet implemented**. SDK-native job endpoints and
+translations beyond reranking are not yet supported. USD-budget and TPM-scoped
+keys are rejected until reliable provider-specific metering is available.
 
 When to use which OpenAI provider:
 

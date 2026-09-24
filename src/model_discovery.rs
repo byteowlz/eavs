@@ -63,7 +63,9 @@ pub async fn discover_provider_models(
         ProviderType::TypeSafe
         | ProviderType::ElevenLabs
         | ProviderType::Cohere
-        | ProviderType::Voyage => {
+        | ProviderType::Voyage
+        | ProviderType::Fal
+        | ProviderType::Replicate => {
             Err("Native provider model discovery is not supported by this endpoint".to_string())
         }
         ProviderType::Mock => Err("Mock provider".to_string()),

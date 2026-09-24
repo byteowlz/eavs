@@ -524,7 +524,9 @@ pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Opt
         ProviderType::TypeSafe
         | ProviderType::ElevenLabs
         | ProviderType::Cohere
-        | ProviderType::Voyage => None,
+        | ProviderType::Voyage
+        | ProviderType::Fal
+        | ProviderType::Replicate => None,
         ProviderType::Mock => Some("openai-completions"),
     }
 }
