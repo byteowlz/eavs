@@ -882,8 +882,10 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
         // This allows explicit provider selection via URL path
         .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
+        .route("/:provider/v2/*path", any(proxy::provider_proxy_handler))
         // Default proxy route with X-Provider header or auto-detection
         .route("/v1/*path", any(proxy::proxy_handler))
+        .route("/v2/*path", any(proxy::proxy_handler))
         .with_state(state)
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal
