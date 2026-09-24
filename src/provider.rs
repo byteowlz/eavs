@@ -25,6 +25,10 @@ pub enum ProviderType {
     GithubCopilot,
     /// Google Vertex AI - Google Generative AI via Vertex AI platform (ADC auth)
     GoogleVertex,
+    /// OpenCode Zen - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai)
+    OpenCode,
+    /// OpenCode Go - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai/zen/go)
+    OpenCodeGo,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -84,6 +88,8 @@ impl ProviderType {
             "openai-responses" | "responses" => Self::OpenAIResponses,
             "github-copilot" | "copilot" => Self::GithubCopilot,
             "google-vertex" | "vertex" => Self::GoogleVertex,
+            "opencode" | "opencode-zen" => Self::OpenCode,
+            "opencode-go" => Self::OpenCodeGo,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => return None,
         };
@@ -183,6 +189,18 @@ impl ProviderType {
                 env_key_name: Some("GEMINI_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::OpenCode => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://opencode.ai/zen/v1"),
+                env_key_name: Some("OPENCODE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::OpenCodeGo => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://opencode.ai/zen/go/v1"),
+                env_key_name: Some("OPENCODE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -211,6 +229,8 @@ impl ProviderType {
                 | Self::OpenRouter
                 | Self::OpenAICompatible
                 | Self::GithubCopilot
+                | Self::OpenCode
+                | Self::OpenCodeGo
         )
     }
 
@@ -242,6 +262,8 @@ impl ProviderType {
                 | Self::OpenRouter
                 | Self::OpenAICompatible
                 | Self::OpenAIResponses
+                | Self::OpenCode
+                | Self::OpenCodeGo
         )
     }
 
@@ -657,6 +679,19 @@ mod tests {
             ProviderType::from_str("openai-responses"),
             ProviderType::OpenAIResponses
         );
+        assert_eq!(ProviderType::from_str("opencode"), ProviderType::OpenCode);
+        assert_eq!(
+            ProviderType::from_str("opencode-zen"),
+            ProviderType::OpenCode
+        );
+        assert_eq!(
+            ProviderType::from_str("opencode-go"),
+            ProviderType::OpenCodeGo
+        );
+        assert_eq!(
+            ProviderType::from_str("OpenCode-Go"),
+            ProviderType::OpenCodeGo
+        );
         assert_eq!(
             ProviderType::from_str("responses"),
             ProviderType::OpenAIResponses
@@ -828,6 +863,23 @@ mod tests {
         // Unknown hosts
         assert_eq!(detect_provider_from_host("example.com"), None);
         assert_eq!(detect_provider_from_host("localhost"), None);
+    }
+
+    #[test]
+    fn test_opencode_provider_info() {
+        let oc = ProviderType::OpenCode.info();
+        assert_eq!(oc.default_base_url, Some("https://opencode.ai/zen/v1"));
+        assert_eq!(oc.env_key_name, Some("OPENCODE_API_KEY"));
+        assert_eq!(oc.auth_style, AuthStyle::BearerToken);
+
+        let ocg = ProviderType::OpenCodeGo.info();
+        assert_eq!(ocg.default_base_url, Some("https://opencode.ai/zen/go/v1"));
+        assert_eq!(ocg.env_key_name, Some("OPENCODE_API_KEY"));
+        assert_eq!(ocg.auth_style, AuthStyle::BearerToken);
+        // OpenAI-compatible: no request transformation, supports /v1/models.
+        assert!(ProviderType::OpenCodeGo.is_openai_compatible());
+        assert!(!ProviderType::OpenCodeGo.needs_transform());
+        assert!(ProviderType::OpenCodeGo.supports_models_endpoint());
     }
 
     #[test]

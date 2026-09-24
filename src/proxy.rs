@@ -1054,6 +1054,7 @@ async fn proxy_handler_inner(
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
+    apply_opencode_session_headers(&mut upstream_headers, provider_type, &conversation_id);
 
     // Add custom headers from provider config
     for (key, value) in &provider_config.headers {
@@ -2432,6 +2433,7 @@ async fn ws_proxy_handler_inner(
 
         apply_ws_auth_headers(&mut request, provider_type, &api_key);
         apply_ws_extra_headers(&mut request, provider_type);
+        apply_opencode_session_headers(&mut request, provider_type, &conversation_id);
 
         // Custom provider headers
         for (key, value) in &provider_config.headers {
@@ -3479,6 +3481,25 @@ pub(crate) fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: P
     apply_extra_headers(headers, provider_type);
 }
 
+/// OpenCode providers (opencode, opencode-go) route each request to a session via
+/// the `x-opencode-session` header, derived from the conversation id.
+fn apply_opencode_session_headers<H: HeadersExt>(
+    headers: &mut H,
+    provider_type: ProviderType,
+    session_id: &str,
+) {
+    if matches!(provider_type, ProviderType::OpenCode | ProviderType::OpenCodeGo)
+        && !session_id.is_empty()
+    {
+        if let Ok(value) = http::HeaderValue::from_str(session_id) {
+            headers.insert_header(
+                http::header::HeaderName::from_static("x-opencode-session"),
+                value,
+            );
+        }
+    }
+}
+
 async fn resolve_oauth_access_token_with_account(
     state: &AppState,
     provider_name: &str,
@@ -4098,6 +4119,31 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Mutex;
     use tower::util::ServiceExt;
+
+    #[test]
+    fn opencode_session_header_is_applied() {
+        let mut headers = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut headers, ProviderType::OpenCodeGo, "sess-1");
+        assert_eq!(
+            headers.get("x-opencode-session").unwrap().to_str().unwrap(),
+            "sess-1"
+        );
+
+        // OpenCode (Zen) also gets the session header.
+        let mut h2 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h2, ProviderType::OpenCode, "sess-2");
+        assert_eq!(h2.get("x-opencode-session").unwrap().to_str().unwrap(), "sess-2");
+
+        // Non-OpenCode providers must NOT receive the header.
+        let mut h3 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h3, ProviderType::OpenAI, "sess-3");
+        assert!(h3.get("x-opencode-session").is_none());
+
+        // Empty session id -> no header.
+        let mut h4 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h4, ProviderType::OpenCodeGo, "");
+        assert!(h4.get("x-opencode-session").is_none());
+    }
 
     #[test]
     fn websocket_text_messages_are_sanitized_and_audited() {
