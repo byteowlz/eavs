@@ -127,6 +127,13 @@ pub struct KeyUsage {
     /// Spend in current budget window
     pub window_spend_usd: f64,
 
+    /// Cost currently reserved against the budget for jobs that are in-flight
+    /// (submitted but not yet finalized). Reservation is released or reconciled
+    /// to actual spend when the job completes/fails/cancels. Keeps concurrent
+    /// jobs from collectively overspending a cap (eavs-avm8).
+    #[serde(default)]
+    pub reserved_spend_usd: f64,
+
     /// When the current budget window started
     pub window_start: Option<DateTime<Utc>>,
 
@@ -279,10 +286,12 @@ impl VirtualKey {
         true
     }
 
-    /// Check if the key has exceeded its budget.
+    /// Check if the key has exceeded its budget. Includes any in-flight
+    /// reservations so a burst of concurrent jobs cannot collectively overspend
+    /// a cap before their reserved cost is reconciled.
     pub fn is_over_budget(&self) -> bool {
         if let Some(max_budget) = self.permissions.max_budget_usd {
-            self.usage.window_spend_usd >= max_budget
+            self.usage.window_spend_usd + self.usage.reserved_spend_usd >= max_budget
         } else {
             false
         }

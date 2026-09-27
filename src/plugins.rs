@@ -200,6 +200,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         }
     }
 

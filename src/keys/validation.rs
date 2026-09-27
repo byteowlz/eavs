@@ -37,6 +37,33 @@ impl KeyValidator {
         provider: &str,
         estimated_tokens: Option<u32>,
     ) -> Result<ValidatedKey, KeyValidationError> {
+        self.validate_inner(api_key, model, provider, estimated_tokens, true)
+            .await
+    }
+
+    /// Like [`validate`](Self::validate) but skips the budget enforcement. Used
+    /// for job lifecycle routing (status/result/cancel) where the job was
+    /// already accepted and cost-reserved: the handle is MAC-authenticated and
+    /// no new spend is incurred, so a key at its cap must still be able to
+    /// retrieve its own in-flight jobs (eavs-avm8).
+    pub async fn validate_skip_budget(
+        &self,
+        api_key: &str,
+        model: &str,
+        provider: &str,
+    ) -> Result<ValidatedKey, KeyValidationError> {
+        self.validate_inner(api_key, model, provider, Some(0), false)
+            .await
+    }
+
+    async fn validate_inner(
+        &self,
+        api_key: &str,
+        model: &str,
+        provider: &str,
+        estimated_tokens: Option<u32>,
+        enforce_budget: bool,
+    ) -> Result<ValidatedKey, KeyValidationError> {
         // Check if it's a virtual key
         if !is_virtual_key(api_key) {
             return Err(KeyValidationError::NotVirtualKey);
@@ -76,7 +103,7 @@ impl KeyValidator {
         }
 
         // Check budget
-        if key.is_over_budget() {
+        if enforce_budget && key.is_over_budget() {
             return Err(KeyValidationError::BudgetExceeded {
                 limit: key.permissions.max_budget_usd.unwrap_or(0.0),
                 used: key.usage.window_spend_usd,

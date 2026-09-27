@@ -222,8 +222,25 @@ seven days. They remain valid across restarts but changing the upstream
 provider credential invalidates them. Upstream callback URLs are never
 returned. Webhook inputs are rejected: polling is supported, but **verified
 webhook delivery is not yet implemented**. SDK-native job endpoints and
-translations beyond reranking are not yet supported. USD-budget and TPM-scoped
-keys are rejected until reliable provider-specific metering is available.
+translations beyond reranking are not yet supported.
+
+**Job metering (USD budgets).** To let a USD-budgeted key submit jobs, the
+operator must supply an explicit per-job price per model; eavs never
+fabricates usage. A budgeted key on an unpriced model is rejected. Configure
+prices under `[native_pricing.jobs]`:
+
+```toml
+[native_pricing.jobs]
+'fal-ai/flux/schnell' = 0.003
+'replicate/example/model' = 0.01
+```
+
+On submit, eavs **reserves** the price against the key's budget so concurrent
+jobs cannot collectively overspend the cap. On a completed result the
+reservation is reconciled into actual spend (exactly once). On cancel or
+failure it is released. Keys that are not USD-budgeted require no price and
+pass through unmetered. A non-JD budgeted flow that has no per-job price is
+still rejected (fail-closed).
 
 When to use which OpenAI provider:
 

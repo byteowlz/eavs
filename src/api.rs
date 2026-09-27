@@ -2220,6 +2220,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         };
         config.keys.enabled = true;
         let state = AppState::new(config);
@@ -2345,6 +2346,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         };
         AppState::new(config)
     }
@@ -2385,6 +2387,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         };
         AppState::new(config)
     }
