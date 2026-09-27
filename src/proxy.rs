@@ -1593,7 +1593,22 @@ async fn proxy_handler_inner(
 
     // Normalize non-success upstream errors to OpenAI-compatible error format.
     if !status.is_success() {
-        let body_bytes = collect_stream_bytes(stream).await.unwrap_or_default();
+        // A non-success upstream (e.g. 401) may send a status but never terminate
+        // its error body, which would otherwise hang the request forever (eavs-1sfs).
+        // Bound the error-body read so we always return a prompt, well-formed error.
+        let body_bytes = tokio::time::timeout(
+            upstream_error_body_timeout(),
+            collect_stream_bytes(stream),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                status = %status,
+                "Timed out reading upstream error body; returning empty error body"
+            );
+            Ok(Bytes::new())
+        })
+        .unwrap_or_default();
         let text = String::from_utf8_lossy(&body_bytes).to_string();
 
         let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
@@ -3672,6 +3687,19 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
 
 /// Anthropic OAuth tokens are scoped to "Claude Code" - requests must identify as Claude Code.
 /// This injects the required system prompt prefix for the token to work.
+/// Bounds how long the proxy will wait to read an upstream error body before
+/// returning a prompt error (eavs-1sfs). Prevents an upstream that sends a
+/// non-success status (e.g. 401) but never terminates its body from hanging
+/// the request indefinitely. Defaults to 30s; `EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS`
+/// overrides it (used by tests to keep the hang-case fast).
+fn upstream_error_body_timeout() -> std::time::Duration {
+    std::env::var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(30))
+}
+
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 fn inject_claude_code_identity_into_context(context: &mut crate::types::Context) {
@@ -5591,6 +5619,86 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.starts_with("http://up2/"));
         assert!(requests[1].url.starts_with("http://up1/"));
+    }
+
+    /// An upstream whose error body never yields and never terminates — the
+    /// eavs-1sfs hang scenario. The proxy must bound the error-body read and
+    /// still return a prompt 401 rather than hang forever.
+    struct HangUpstream;
+    impl crate::upstream::Upstream for HangUpstream {
+        fn send<'a>(
+            &'a self,
+            _req: crate::upstream::UpstreamRequest,
+        ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+            Box::pin(async move {
+                let body = futures::stream::pending::<Result<Bytes, std::io::Error>>().boxed();
+                Ok(UpstreamResponse {
+                    status: StatusCode::UNAUTHORIZED,
+                    headers: HeaderMap::new(),
+                    body,
+                })
+            })
+        }
+    }
+
+    /// eavs-1sfs double-proof: (1) a terminated 401 surfaces promptly as a
+    /// well-formed error; (2) a 401 whose error body never terminates is bounded
+    /// by `upstream_error_body_timeout()` and does not hang.
+    #[tokio::test]
+    async fn upstream_401_with_non_terminating_body_does_not_hang() {
+        std::env::set_var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS", "50");
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai".to_string(),
+                base_url: "http://upstream/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(HangUpstream));
+        let app = Router::new().route("/v1/*path", any(proxy_handler)).with_state(state);
+        let req = http::Request::builder().method("POST").uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}).to_string()))
+            .unwrap();
+        // Must return well before the 50ms bounded read + margin, and as a 401.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req)).await;
+        assert!(result.is_ok(), "upstream 401 with a non-terminating body must not hang");
+        let response = result.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        std::env::remove_var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS");
+    }
+
+    #[tokio::test]
+    async fn upstream_401_returns_error_promptly() {
+        // Repro eavs-1sfs: an upstream 401 must be surfaced as a prompt
+        // OpenAI-style error, not leave the request hanging.
+        let body = br#"{"error":{"message":"invalid api key","type":"invalid_request_error"}}"#;
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::UNAUTHORIZED,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(&body[..])],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai".to_string(),
+                base_url: "http://upstream/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new().route("/v1/*path", any(proxy_handler)).with_state(state);
+        let req = http::Request::builder().method("POST").uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}).to_string()))
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(req)).await;
+        assert!(result.is_ok(), "upstream 401 must not hang");
+        let response = result.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]
