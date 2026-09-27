@@ -188,6 +188,11 @@ rather than silently bypassing those limits. OpenAI's native video job lifecycle
 is currently blocked for **all virtual keys**: raw video IDs cannot safely
 isolate tenants sharing one upstream credential.
 
+The `/v1/eavs/rerank` bridge is the exception: it returns the upstream's real
+token usage (Cohere `usage.input_tokens`/`output_tokens`, Voyage
+`usage.total_tokens`), which eavs meters through the cost calculator and records
+to the key, so budgeted/TPM-scoped keys are allowed on that shape.
+
 ElevenLabs realtime STT and streaming TTS WebSockets are available through
 `/elevenlabs/v1/speech-to-text/realtime` and
 `/elevenlabs/v1/text-to-speech/{voice_id}/stream-input` (or
