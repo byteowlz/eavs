@@ -909,6 +909,105 @@ impl KeyStore {
         Ok(())
     }
 
+    /// Reserve `amount` cost against a key's in-flight budget. Returns Ok(false)
+    /// if the key would exceed its budget with the reservation (fail-closed).
+    /// A no-op (returns Ok(true)) for keys without a budget.
+    pub async fn reserve_budget(&self, key_hash: &str, amount: f64) -> Result<bool, KeyStoreError> {
+        let mut key = match self.cache.get(key_hash) {
+            Some(k) => k.clone(),
+            None => return Ok(false),
+        };
+        if let Some(max) = key.permissions.max_budget_usd {
+            if key.usage.window_spend_usd + key.usage.reserved_spend_usd + amount > max {
+                return Ok(false);
+            }
+        }
+        key.usage.reserved_spend_usd += amount;
+        self.cache.insert(key_hash.to_string(), key.clone());
+        self.persist_key_usage(key_hash, &key).await?;
+        Ok(true)
+    }
+
+    /// Release a reservation without charging (e.g. job cancelled or failed
+    /// before consuming any cost).
+    pub async fn release_reservation(
+        &self,
+        key_hash: &str,
+        amount: f64,
+    ) -> Result<(), KeyStoreError> {
+        if amount <= 0.0 {
+            return Ok(());
+        }
+        let mut key = match self.cache.get(key_hash) {
+            Some(k) => k.clone(),
+            None => return Err(KeyStoreError::NotFound),
+        };
+        key.usage.reserved_spend_usd = (key.usage.reserved_spend_usd - amount).max(0.0);
+        self.cache.insert(key_hash.to_string(), key.clone());
+        self.persist_key_usage(key_hash, &key).await?;
+        Ok(())
+    }
+
+    /// Reconcile a reservation into actual spend: deduct the reservation and
+    /// add the actual (usually <= reserved) cost into the window spend. This
+    /// records a usage_history row so the charge is attributed once.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_reservation(
+        &self,
+        key_hash: &str,
+        reserved: f64,
+        actual: f64,
+        model: &str,
+        provider: &str,
+    ) -> Result<(), KeyStoreError> {
+        let mut key = self
+            .cache
+            .get(key_hash)
+            .map(|k| k.clone())
+            .ok_or(KeyStoreError::NotFound)?;
+        key.usage.reserved_spend_usd = (key.usage.reserved_spend_usd - reserved).max(0.0);
+        key.usage.total_spend_usd += actual;
+        key.usage.window_spend_usd += actual;
+        key.usage.total_requests += 1;
+        key.usage.last_request_at = Some(Utc::now());
+        self.cache.insert(key_hash.to_string(), key.clone());
+        self.persist_key_usage(key_hash, &key).await?;
+        // Attribute the charge once via usage_history.
+        let owner = key.owner.clone();
+        let timestamp = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd, owner) VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?)",
+        )
+        .bind(key_hash)
+        .bind(&timestamp)
+        .bind(model)
+        .bind(provider)
+        .bind(actual)
+        .bind(&owner)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Persist a key's usage JSON back to the database (used by reservation
+    /// bookkeeping, which keeps the in-memory cache authoritative).
+    async fn persist_key_usage(
+        &self,
+        key_hash: &str,
+        key: &VirtualKey,
+    ) -> Result<(), KeyStoreError> {
+        let usage_json = serde_json::to_string(&key.usage)
+            .map_err(|e| KeyStoreError::Serialization(e.to_string()))?;
+        sqlx::query("UPDATE virtual_keys SET usage = ? WHERE key_hash = ?")
+            .bind(&usage_json)
+            .bind(key_hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// Get usage history for a key.
     pub async fn get_usage_history(
         &self,
@@ -1305,6 +1404,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_budget_reservation_blocks_overspend_and_reconciles() {
+        let store = KeyStore::in_memory().await.unwrap();
+        // Key with a $1.00 budget.
+        let response = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    max_budget_usd: Some(1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let key_hash = crate::keys::generation::hash_key(&response.key);
+
+        // Two concurrent $0.60 reservations fit (0.6 + 0.6 = 1.2 > 1.0) -> the
+        // second must be rejected because the first is still in-flight.
+        assert!(store.reserve_budget(&key_hash, 0.60).await.unwrap());
+        assert!(!store.reserve_budget(&key_hash, 0.60).await.unwrap());
+
+        // A third reservation that would exceed the cap is also rejected.
+        assert!(!store.reserve_budget(&key_hash, 0.50).await.unwrap());
+
+        // Reconcile the first reservation to actual $0.55: reservation cleared,
+        // window spend charged, and the second $0.60 now fits again.
+        store
+            .reconcile_reservation(&key_hash, 0.60, 0.55, "fal-ai/x", "fal")
+            .await
+            .unwrap();
+        let key = store.get_by_key(&response.key).unwrap();
+        assert_eq!(key.usage.reserved_spend_usd, 0.0);
+        assert!((key.usage.window_spend_usd - 0.55).abs() < 1e-9);
+        assert!(!key.is_over_budget());
+        assert!(store.reserve_budget(&key_hash, 0.40).await.unwrap());
+
+        // Release the second reservation without charging.
+        store.release_reservation(&key_hash, 0.40).await.unwrap();
+        let key = store.get_by_key(&response.key).unwrap();
+        assert_eq!(key.usage.reserved_spend_usd, 0.0);
+        assert!((key.usage.window_spend_usd - 0.55).abs() < 1e-9);
+
+        // A reservation that, combined with already spent window, exceeds the
+        // budget is rejected.
+        assert!(!store.reserve_budget(&key_hash, 0.60).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn test_human_readable_key_id() {
         let store = KeyStore::in_memory().await.unwrap();
 
@@ -1475,7 +1621,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(by_model.len(), 2);
-        let gpt = by_model.iter().find(|r| r.model.as_deref() == Some("gpt-4"));
+        let gpt = by_model
+            .iter()
+            .find(|r| r.model.as_deref() == Some("gpt-4"));
         let claude = by_model
             .iter()
             .find(|r| r.model.as_deref() == Some("claude-3"));
@@ -1518,7 +1666,10 @@ mod tests {
 
         // JSON shape: omitted fields must not appear when not requested.
         let json = serde_json::to_string(&plain).unwrap();
-        assert!(!json.contains("model"), "model must be omitted in plain rollup");
+        assert!(
+            !json.contains("model"),
+            "model must be omitted in plain rollup"
+        );
         assert!(
             !json.contains("provider"),
             "provider must be omitted in plain rollup"
@@ -1618,7 +1769,10 @@ mod tests {
 
         // Reassign to bob.
         assert!(
-            store.update_owner(&h, Some("bob".to_string())).await.unwrap(),
+            store
+                .update_owner(&h, Some("bob".to_string()))
+                .await
+                .unwrap(),
             "update_owner returns true for existing key"
         );
         // Cache must reflect the new owner immediately.
@@ -1635,7 +1789,10 @@ mod tests {
 
         // Both buckets present, each with its own slice of history.
         let all = store.get_usage_by_owner(None, None).await.unwrap();
-        let alice = all.iter().find(|r| r.owner == "alice").expect("alice bucket");
+        let alice = all
+            .iter()
+            .find(|r| r.owner == "alice")
+            .expect("alice bucket");
         let bob = all.iter().find(|r| r.owner == "bob").expect("bob bucket");
         assert_eq!(alice.requests, 1);
         assert!((alice.cost_usd - 0.10).abs() < 1e-9);
@@ -1788,7 +1945,10 @@ mod tests {
         .fetch_one(&store.pool)
         .await
         .unwrap();
-        assert_eq!(has_cache_write, 1, "cache_write_tokens column should have been added");
+        assert_eq!(
+            has_cache_write, 1,
+            "cache_write_tokens column should have been added"
+        );
 
         // The owner-referencing index must exist.
         let idx_count: i32 = sqlx::query_scalar(
@@ -1805,7 +1965,10 @@ mod tests {
                 .fetch_one(&store.pool)
                 .await
                 .unwrap();
-        assert_eq!(row_count, 1, "legacy usage_history row must survive migration");
+        assert_eq!(
+            row_count, 1,
+            "legacy usage_history row must survive migration"
+        );
 
         // Functional sanity: the store should be usable end-to-end (create +
         // record usage with the new owner column populated).

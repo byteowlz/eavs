@@ -116,6 +116,13 @@ pub struct AppConfig {
     /// Mock provider predefined responses
     #[serde(default)]
     pub mock_responses: MockResponsesConfig,
+    /// Operator-supplied unit prices for native (non-token) inference shapes.
+    /// eavs never fabricates usage; when metering a shape that has no token
+    /// billing and no upstream usage surface (e.g. async jobs), it needs an
+    /// explicit price per unit/model. A budgeted key on an unpriced model is
+    /// rejected (fail-closed) rather than charged $0.
+    #[serde(default)]
+    pub native_pricing: NativePricingConfig,
 }
 
 impl AppConfig {
@@ -136,6 +143,7 @@ impl AppConfig {
             network: NetworkConfig::default(),
             egress: EgressConfig::default(),
             mock_responses: MockResponsesConfig::default(),
+            native_pricing: NativePricingConfig::default(),
         }
     }
 }
@@ -483,6 +491,25 @@ fn default_context_window() -> u64 {
 
 fn default_max_tokens() -> u64 {
     16_384
+}
+
+/// Prices for native shapes that are billed per-unit rather than per-token.
+/// eavs refuses to fabricate usage; this is where an operator supplies the
+/// authoritative unit price so budgeted keys can be metered honestly. Prices
+/// are USD per unit of the provider's finished job/request (fal, Replicate).
+///
+/// ```toml
+/// [native_pricing.jobs]
+/// 'fal-ai/flux/schnell' = 0.003
+/// 'replicate/example/model' = 0.01
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct NativePricingConfig {
+    /// Per-modal USD price for an async job (fal / Replicate). Keyed by the
+    /// model id as the client names it. A budgeted key using a model not listed
+    /// here is rejected rather than metered at $0.
+    #[serde(default)]
+    pub jobs: HashMap<String, f64>,
 }
 
 /// Cost per million tokens.

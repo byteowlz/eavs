@@ -1596,19 +1596,17 @@ async fn proxy_handler_inner(
         // A non-success upstream (e.g. 401) may send a status but never terminate
         // its error body, which would otherwise hang the request forever (eavs-1sfs).
         // Bound the error-body read so we always return a prompt, well-formed error.
-        let body_bytes = tokio::time::timeout(
-            upstream_error_body_timeout(),
-            collect_stream_bytes(stream),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            tracing::warn!(
-                status = %status,
-                "Timed out reading upstream error body; returning empty error body"
-            );
-            Ok(Bytes::new())
-        })
-        .unwrap_or_default();
+        let body_bytes =
+            tokio::time::timeout(upstream_error_body_timeout(), collect_stream_bytes(stream))
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        status = %status,
+                        "Timed out reading upstream error body; returning empty error body"
+                    );
+                    Ok(Bytes::new())
+                })
+                .unwrap_or_default();
         let text = String::from_utf8_lossy(&body_bytes).to_string();
 
         let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
@@ -5235,6 +5233,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         }
     }
 
@@ -5657,14 +5656,25 @@ mod tests {
             },
         );
         let state = AppState::new_with_upstream(make_config(providers), Arc::new(HangUpstream));
-        let app = Router::new().route("/v1/*path", any(proxy_handler)).with_state(state);
-        let req = http::Request::builder().method("POST").uri("/v1/chat/completions")
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}).to_string()))
+            .body(Body::from(
+                json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
             .unwrap();
         // Must return well before the 50ms bounded read + margin, and as a 401.
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req)).await;
-        assert!(result.is_ok(), "upstream 401 with a non-terminating body must not hang");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req)).await;
+        assert!(
+            result.is_ok(),
+            "upstream 401 with a non-terminating body must not hang"
+        );
         let response = result.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         std::env::remove_var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS");
@@ -5690,12 +5700,20 @@ mod tests {
             },
         );
         let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
-        let app = Router::new().route("/v1/*path", any(proxy_handler)).with_state(state);
-        let req = http::Request::builder().method("POST").uri("/v1/chat/completions")
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}).to_string()))
+            .body(Body::from(
+                json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
             .unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(req)).await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(req)).await;
         assert!(result.is_ok(), "upstream 401 must not hang");
         let response = result.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
