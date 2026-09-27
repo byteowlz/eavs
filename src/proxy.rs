@@ -718,7 +718,13 @@ async fn proxy_handler_inner(
     }
     // Native providers use incompatible or non-token billing units. Until cost
     // adapters exist, a virtual key's budget/TPM must not silently be bypassed.
+    //
+    // Exception: the /v1/eavs/rerank bridge returns real token usage from the
+    // upstream (Cohere input/output, Voyage total), which we meter through the
+    // cost calculator and record against the key, so budgeted/TPM keys are
+    // allowed on that shape.
     if is_native_inference
+        && api_path != "/v1/eavs/rerank"
         && validated_key.as_ref().is_some_and(|key| {
             key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
         })
@@ -1696,6 +1702,53 @@ async fn proxy_handler_inner(
                 )),
             )
                 .into_response());
+        }
+
+        // Meter rerank against the upstream's *real* reported usage (never
+        // fabricated from bytes). Cohere reports usage.input_tokens/output_tokens;
+        // Voyage reports usage.total_tokens. A budgeted/TPM key whose usage we
+        // cannot read is charged nothing here (it was already validated to be
+        // under budget), but is still recorded so usage/TPM history is accurate.
+        if let Some(vk) = validated_key.as_ref() {
+            let input = result
+                .pointer("/usage/input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            let output = result
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            // Voyage: total_tokens only.
+            let (input, output) = if input == 0 && output == 0 {
+                if let Some(total) = result.pointer("/usage/total_tokens").and_then(Value::as_u64)
+                {
+                    (0, total as u32)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (input, output)
+            };
+            let cost = if let Some(calc) = state.get_cost_calculator() {
+                calc.calculate_detailed_cost(&model, &provider_name, input, 0, 0, output)
+                    .await
+            } else {
+                0.0
+            };
+            if let Some(validator) = state.get_key_validator() {
+                validator
+                    .record_usage(
+                        &vk.key_hash,
+                        input,
+                        output,
+                        0,
+                        0,
+                        cost,
+                        &model,
+                        &provider_name,
+                    )
+                    .await;
+            }
         }
         return Ok(Json(result).into_response());
     }
@@ -6031,6 +6084,76 @@ mod tests {
             serde_json::from_slice::<Value>(&sent[0].body).unwrap(),
             request
         );
+    }
+
+    #[tokio::test]
+    async fn budgeted_key_rerank_is_metered_with_real_usage() {
+        use crate::keys::{CreateKeyRequest, KeyPermissions, KeyValidator, RateLimiter};
+        // Cohere rerank returns real usage; a budgeted key must be allowed and
+        // metered (not fail-closed) against that usage.
+        let value = json!({
+            "results": [{"index":0,"relevance_score":0.9}],
+            "usage": {"input_tokens": 100, "output_tokens": 5}
+        });
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(serde_json::to_vec(&value).unwrap())],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "cohere".into(),
+            ProviderConfig {
+                type_: "cohere".into(),
+                base_url: "http://up".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let store = Arc::new(KeyStore::in_memory().await.unwrap());
+        let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
+        state.key_validator.set(Arc::new(validator)).ok().unwrap();
+        state.key_store.set(store.clone()).ok().unwrap();
+        state
+            .cost_calculator
+            .set(CostCalculator::new(state.pricing.clone()))
+            .ok()
+            .unwrap();
+        let key = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    max_budget_usd: Some(1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .key;
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/cohere/v1/eavs/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::from(
+                        json!({"model":"rerank-v3.5","query":"q","documents":["a"]})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settled = store.get_by_key(&key).unwrap();
+        assert_eq!(settled.usage.total_input_tokens, 100);
+        assert_eq!(settled.usage.total_output_tokens, 5);
+        assert!(settled.usage.total_spend_usd > 0.0);
     }
 
     #[tokio::test]
