@@ -1,0 +1,803 @@
+# Configuration and API reference
+
+[Back to README](../README.md)
+
+Detailed examples for existing interfaces. Provider behavior varies; examples are not a compatibility certification. Native accounting and OAuth limitations are called out below. For current command syntax, use `eavs --help` and subcommand help.
+
+## Configuration
+
+EAVS uses TOML configuration. It looks for config files in:
+
+1. `--config PATH` / `EAVS_CONFIG` (explicit config file)
+2. `EAVS_*` environment variables (e.g. `EAVS_SERVER__PORT=3001`)
+3. `./eavs.toml` (current directory, overrides global)
+4. `$XDG_CONFIG_HOME/eavs/config.toml` (or `~/.config/eavs/config.toml`, auto-created on first run)
+
+See [`config/config.example.toml`](../config/config.example.toml) for a fully documented example configuration. A JSON schema is available at [`config/config.schema.json`](../config/config.schema.json) for editor validation and autocompletion.
+
+### Providers
+
+Configure multiple providers and select at runtime via `X-Provider` header:
+
+```toml
+[providers.default]
+type = "openai"
+api_key = "env:OPENAI_API_KEY"
+
+[providers.anthropic]
+type = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+
+[providers.local]
+type = "ollama"
+base_url = "http://localhost:11434/v1"
+```
+
+API key values support three resolution methods:
+
+| Syntax             | Source                  | Example                          |
+| ------------------ | ----------------------- | -------------------------------- |
+| `env:VAR_NAME`     | Environment variable    | `api_key = "env:OPENAI_API_KEY"` |
+| `keychain:account` | System keychain         | `api_key = "keychain:openai"`    |
+| literal value      | Config file (plaintext) | `api_key = "sk-..."`             |
+
+The `keychain:` prefix reads from the OS-native credential store (macOS Keychain, libsecret on Linux, Windows Credential Manager). Store secrets with `eavs secret set <account>` and reference them in config. This keeps credentials out of plaintext files -- useful for sandboxed environments where agents should not have direct access to secrets.
+
+Supported providers:
+
+- `openai` - OpenAI API
+- `openai-responses` - OpenAI Responses API (same keys, /v1/responses)
+- `openai-codex` - OpenAI Codex/ChatGPT backend via OAuth
+- `anthropic` - Anthropic Claude
+- `google` - Google Gemini
+- `google-vertex` - Google Vertex AI (ADC or API key, requires `gcp_project` + `gcp_location`)
+- `github-copilot` - GitHub Copilot (device code OAuth, auto token exchange + dynamic base URL)
+- `mistral` - Mistral AI
+- `groq` - Groq (fast inference)
+- `cerebras` - Cerebras
+- `xai` - xAI (Grok)
+- `openrouter` - OpenRouter
+- `azure` - Azure OpenAI
+- `bedrock` - AWS Bedrock (with SigV4 signing)
+- `ollama`, `vllm`, `openai-compatible` - Local/compatible APIs
+- `opencode`, `opencode-go` - OpenCode / OpenCode Go gateways (requires `OPENCODE_API_KEY`; sends the `x-opencode-session` per-conversation header)
+- `typesafe` - TypeSafe System One (`TYPESAFE_API_KEY`)
+- `elevenlabs` - ElevenLabs speech HTTP APIs (`ELEVENLABS_API_KEY`)
+- `cohere` - Cohere native reranking/embedding (`COHERE_API_KEY`)
+- `voyage` - Voyage native reranking/embeddings (`VOYAGE_API_KEY`)
+- `fal` - fal asynchronous inference queue (`FAL_KEY`)
+- `replicate` - Replicate predictions (`REPLICATE_API_TOKEN`)
+- `mock` - Mock provider for testing (no network calls)
+
+### Native inference APIs (HTTP)
+
+Eavs relays selected non-chat API shapes without converting them to chat completions.
+Configure a provider as above (for example, `[providers.typesafe]` with
+`type = "typesafe"`), then call its provider-prefixed endpoint with the usual
+Eavs virtual key. Native requests retain JSON shape; media uploads retain their
+multipart boundary and bytes, and binary downloads stream unchanged.
+
+| Provider | Native endpoints |
+| --- | --- |
+| `openai`, `openai-responses`, `openai-compatible` | `POST /v1/embeddings`, `POST /v1/images/{generations,edits,variations}`, `POST /v1/videos`, `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content` |
+| `typesafe` | `POST /typesafe/v1/systemone` (typed `state` + `questions`) |
+| `elevenlabs` | `POST /elevenlabs/v1/text-to-speech/{voice_id}...`, `POST /elevenlabs/v1/speech-to-text...` |
+| `cohere` | `POST /cohere/v2/rerank`, `POST /cohere/v2/embed` (also `/v1/embed`) |
+| `voyage` | `POST /voyage/v1/rerank`, `POST /voyage/v1/embeddings` |
+
+For a common reranking contract, `POST /cohere/v1/eavs/rerank` or
+`POST /voyage/v1/eavs/rerank` accepts `{model, query, documents, top_n?}`
+and returns `{results: [{index, relevance_score}], model, usage?}`. Native
+Cohere and Voyage rerank endpoints retain their original request/response
+shapes; only the `/v1/eavs/rerank` route translates.
+
+Only these native operations are allowed for the new provider types; this is
+not a general proxy to provider account APIs. Opaque uploads cannot be
+inspected or rewritten: body-mutating policy rules reject them, and virtual
+keys restricted to particular models reject requests without a parseable
+`model`/`model_id`. Native response usage/cost tracking is not yet calibrated;
+virtual keys with a USD budget or TPM limit are rejected for native inference
+rather than silently bypassing those limits. OpenAI's native video job lifecycle
+is currently blocked for **all virtual keys**: raw video IDs cannot safely
+isolate tenants sharing one upstream credential.
+
+The `/v1/eavs/rerank` bridge currently permits budgeted/TPM-scoped keys, but
+its provider usage mapping and budget enforcement remain under review
+(`eavs-avm8`). Do not rely on this path for hard spending or token limits.
+
+ElevenLabs realtime STT and streaming TTS WebSockets are available through
+`/elevenlabs/v1/speech-to-text/realtime` and
+`/elevenlabs/v1/text-to-speech/{voice_id}/stream-input` (or
+`multi-stream-input`). Frames are relayed byte-for-byte. Provider tokens in
+query parameters are rejected; use Eavs authentication. USD-budget/TPM-scoped
+virtual keys cannot use native realtime speech until metering is available.
+### Asynchronous inference jobs
+
+Fal and Replicate use a separate, tenant-bound Eavs job API, **not** their raw
+SDK URLs. Configure `[providers.fal]` (`type = "fal"`) or
+`[providers.replicate]` (`type = "replicate"`), and enable/provision Eavs
+virtual keys. Calls without a virtual key are rejected. For example:
+
+```http
+POST /fal/v1/eavs/jobs
+Authorization: Bearer eavs-...
+Content-Type: application/json
+
+{"model":"fal-ai/flux/schnell","input":{"prompt":"a red kite"}}
+```
+
+Replicate additionally requires `"version"` (its model-version ID). The
+submit response returns a signed `handle`, rather than upstream status URLs.
+Use the **same** virtual key for:
+
+- `GET /{provider}/v1/eavs/jobs/{handle}` — status
+- `GET /{provider}/v1/eavs/jobs/{handle}/result` — result
+- `POST /{provider}/v1/eavs/jobs/{handle}/cancel` — cancellation request
+
+Handles bind provider, model, job ID and virtual-key owner; they expire after
+seven days. They remain valid across restarts but changing the upstream
+provider credential invalidates them. Upstream callback URLs are never
+returned. Webhook inputs are rejected: polling is supported, but **verified
+webhook delivery is not yet implemented**. SDK-native job endpoints and
+translations beyond reranking are not yet supported.
+
+**Job metering (USD budgets).** To let a USD-budgeted key submit jobs, the
+operator must supply an explicit per-job price per model; eavs never
+fabricates usage. A budgeted key on an unpriced model is rejected. Configure
+prices under `[native_pricing.jobs]`:
+
+```toml
+[native_pricing.jobs]
+'fal-ai/flux/schnell' = 0.003
+'replicate/example/model' = 0.01
+```
+
+The current implementation reserves the configured flat price on submission
+and attempts settlement or release during lifecycle polling. **This is not yet
+concurrency-safe, restart-safe accounting:** reservation updates and settlement
+tracking have known gaps (`eavs-avm8`). A configured flat price is not verified
+upstream actual spend, and failed/cancelled jobs are not necessarily free.
+Do not rely on this implementation for hard spending caps. Unbudgeted keys
+can submit without a configured price.
+
+When to use which OpenAI provider:
+
+- `openai` for the Chat Completions API (`/v1/chat/completions`).
+- `openai-responses` for the Responses API (`/v1/responses`).
+- `openai-codex` for the Codex/ChatGPT backend with OAuth tokens.
+
+Provider shortcuts (no client changes required):
+
+- `eavs provider use <name>` sets a runtime default for the auto endpoint.
+- `eavs provider clear` resets to the config default.
+- State is stored in XDG state at `~/.local/state/eavs/state.toml` (or `$XDG_STATE_HOME`).
+
+### Interactive Setup
+
+Add providers interactively with guided prompts for API keys, base URLs, and provider-specific settings. The wizard supports all credential storage methods (literal, `env:`, `keychain:`).
+
+```bash
+# Interactive wizard -- walks through provider type, credentials, and base URL
+eavs setup add
+
+# Test a single provider directly (no server needed)
+eavs setup test anthropic
+eavs setup test foundry-openai --model gpt-4o
+
+# Test all configured providers in one shot
+eavs setup test-all
+
+# Show resolved config for a provider (env vars expanded, defaults applied)
+eavs setup show anthropic
+eavs setup show anthropic --reveal   # show unmasked API key
+```
+
+The `eavs setup test` command bypasses the proxy and sends an inference request
+to the upstream provider; it can incur charges. It is not a no-inference
+reachability check.
+
+### Logging
+
+Configure multiple logging backends:
+
+```toml
+[logging]
+default = "stdout"
+# Log full request/response CONTENT (prompts, the `messages` array, model
+# output). Default false -- only metadata (model, method, status, duration) is
+# logged. Enabling this records potentially sensitive conversation data;
+# `log_redact` covers API keys/tokens, NOT message content.
+log_bodies = false
+
+[[logging.backends]]
+type = "stdout"
+format = "json"  # or "pretty"
+
+[[logging.backends]]
+type = "file"
+path = "./logs/eavs.jsonl"
+rotate = "daily"
+
+[[logging.backends]]
+type = "webhook"
+url = "https://your-service.com/logs"
+headers = { Authorization = "env:LOG_API_KEY" }
+batch_size = 100
+flush_interval_secs = 5
+```
+
+### Conversation State
+
+```toml
+[state]
+enabled = true
+ttl_secs = 3600              # 1 hour TTL
+cleanup_interval_secs = 60   # Cleanup every minute
+max_conversations = 10000    # Max concurrent conversations
+```
+
+### Virtual API Keys
+
+Issue API keys with rate limits, budgets, and model restrictions:
+
+```toml
+[keys]
+enabled = true
+database_path = "~/.eavs/keys.db"
+master_key = "env:EAVS_MASTER_KEY"  # Required for admin operations
+default_rpm_limit = 60              # Requests per minute
+default_budget_usd = 10.0           # Budget in USD
+```
+
+Manage keys via CLI:
+
+```bash
+# Create a key with limits
+eavs key create --name "dev-key" --rpm 100 --budget 50.0
+
+# Create a key with model restrictions
+eavs key create --name "gpt4-only" --models "gpt-4,gpt-4-turbo"
+
+# List all keys
+eavs key list
+
+# Check usage
+eavs key usage <key-id>
+
+# Revoke a key
+eavs key revoke <key-id>
+
+# Bind a key to an OAuth user (Claude Code / Codex)
+eavs key bind <key-id> --oauth-user "<user-id>"
+
+# Clear the OAuth binding
+eavs key bind <key-id> --clear
+```
+
+#### Owner labels & cost rollups
+
+Each key can carry an optional, **organizational** `owner` label (a tag or
+user) so usage and cost can be rolled up across multiple keys that belong to
+the same person/team. `owner` is independent of `oauth_user` (which binds a
+key to a specific upstream OAuth account/seat).
+
+```bash
+# Create a key already tagged with an owner
+# (an existing key can be (re)tagged via the admin API below)
+eavs key create --name "alice-laptop" --owner "alice"
+eavs key create --name "alice-ci"      --owner "alice"
+eavs key create --name "bob-prod"     --owner "bob"
+
+# Cost rollup grouped by owner
+eavs cost by-owner
+
+# Restrict to one owner, last 7 days
+eavs cost by-owner --owner alice --days 7
+
+# Sub-aggregate within each owner by model and/or provider
+eavs cost by-owner --breakdown model
+eavs cost by-owner --breakdown model,provider --format json
+```
+
+Equivalent admin API:
+
+```bash
+# Set / clear an owner on an existing key
+#   PUT /admin/keys/<key-id-or-hash>/owner   {"owner": "alice"}
+#   PUT /admin/keys/<key-id-or-hash>/owner   {"owner": null}
+
+# Owner usage rollup
+#   GET  /admin/usage/by-owner
+#   GET  /admin/usage/by-owner?owner=alice&days=7
+#   GET  /admin/usage/by-owner?breakdown=model,provider
+```
+
+Owner is denormalized onto each usage row, so rollups need no join and
+survive key deletion/recreation.
+
+### OAuth Authentication
+
+OAuth login and account-binding code exists for the providers below. This is
+not a guarantee of current upstream compatibility or permitted subscription
+sharing. OpenAI/Codex needs stronger end-to-end verification (`eavs-4m7n.2`);
+the direct Anthropic OAuth path requires separate compatibility/policy review.
+
+```bash
+# Interactive login (shows provider selection menu)
+eavs login
+
+# Login to a specific provider
+eavs login anthropic
+eavs login openai        # OpenAI Codex (ChatGPT Pro)
+eavs login github-copilot # GitHub Copilot
+
+# Login with a specific account label (multi-account)
+eavs login openai --user default --account pro-subscription
+
+# Check OAuth status
+eavs auth status
+```
+
+Virtual keys can be bound to OAuth users and specific accounts:
+
+```bash
+# Create key bound to OAuth user + account
+eavs key create --name "codex-pro" --oauth-user "default" --oauth-account "pro-subscription"
+```
+
+### Policy Rules
+
+Rewrite request fields before they reach the upstream provider:
+
+```toml
+[[policy.rules]]
+action = "set_field"
+provider = "openai*"
+model = "gpt-5*"
+path = "store"
+value = true  # Force store=true for Codex models (fixes Pi 404 errors)
+```
+
+Policy rules support glob matching on provider and model names.
+
+### Delegated Fetch Protection
+
+Provider-side URL fetching and hosted tools travel through the allowed inference
+connection, bypassing EAVS's network ACL. EAVS therefore strips remote
+`input_file.file_url` items and provider-hosted tools by default on HTTP,
+Realtime WebSocket, and Codex WebSocket requests.
+
+```toml
+[delegated_fetch]
+# Permit remote file URLs only when this inference channel is trusted.
+enabled = false
+# Allow individual provider-hosted tool types explicitly.
+allowed_server_tools = [] # e.g. ["web_search", "web_fetch"]
+```
+
+Client-executed `function` and `custom` tools are unaffected. For authenticated
+virtual keys, `metadata.delegated_fetch.remote_content` overrides the global
+remote-content setting and defaults to `false` when absent, enabling tenant-level
+control without another admin endpoint. Each removal emits a structured
+`delegated_fetch_stripped` audit event with its JSON field path and target host
+when available.
+
+### Network Access Control
+
+Restrict which upstream domains the proxy can connect to:
+
+```toml
+[network]
+# Only allow these upstream domains (empty = allow all)
+allow_domains = ["api.openai.com", "*.anthropic.com", "api.groq.com"]
+
+# Block these domains (checked before allow list)
+deny_domains = ["*.internal.corp", "evil.com"]
+
+# Block private IPs to prevent SSRF (default: true)
+block_private_ips = true
+
+# Optional operator-controlled exceptions. Host, address, and port must all match.
+# Deny rules still take precedence.
+[[network.trusted_private_endpoints]]
+host = "model-gateway"
+address = "100.100.100.1"
+port = 8080
+```
+
+Precedence: deny list > exact trusted endpoint > private IP check > allow list. Empty lists impose no restriction.
+
+### Egress Firewall
+
+A general transparent egress proxy for front ends that redirect a client's TCP
+traffic and announce the original destination with a **PROXY protocol v2**
+header. The listener is front-end agnostic -- any redirector that speaks PROXY
+v2 works. eavs reads the original destination from the header, derives the
+hostname from the TLS ClientHello SNI or HTTP `Host` header, enforces the
+`[network]` domain ACL, and splices the connection to the real destination. A
+companion DNS relay answers the client's lookups.
+
+This is distinct from **Transparent Traffic Capture** (below): that uses
+mitmproxy to intercept *LLM API* calls; this captures *arbitrary* TCP egress and
+does allow/deny filtering with no MITM.
+
+```toml
+[egress]
+# Enable the transparent egress listener + DNS relay (default: false)
+enabled = true
+# Listen address (0.0.0.0 answers on every front-end address)
+host = "0.0.0.0"
+port = 3041
+# enforce = deny on ACL failure / missing hostname; false = monitor (log only)
+enforce = true
+# DNS relay: forwards client lookups to an upstream resolver
+dns_port = 3053
+dns_upstream = "1.1.1.1:53"
+```
+
+Posture: `enforce` blocks disallowed hosts; `enforce = false` (monitor) logs the
+verdict but allows everything -- useful for fleet-wide egress observability.
+Allow/deny domains come from the `[network]` section above. Credential injection
+(MITM into allowlisted hosts) is not part of this and is tracked separately.
+
+### Upstream Quota Tracking
+
+Rate limit headers from upstream providers are automatically parsed and tracked:
+
+```bash
+# View current quotas
+eavs quotas
+
+# JSON output
+eavs quotas --json
+```
+
+Supported headers:
+
+- OpenAI: `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, etc.
+- Anthropic: `anthropic-ratelimit-requests-limit`, `anthropic-ratelimit-requests-remaining`, etc.
+
+Quotas are also available via the admin API: `GET /admin/quotas`.
+
+### Model Catalog
+
+Browse cached metadata from [models.dev](https://models.dev/). Catalog membership
+does not prove a configured endpoint can serve a model:
+
+```bash
+# List models for a provider
+eavs models list openai
+eavs models list anthropic --json
+
+# Search across all providers
+eavs models search "codex"
+eavs models search "sonnet" --json
+
+# Update cached catalog
+eavs models update
+
+# Show catalog stats
+eavs models stats
+```
+
+Providers can define a model shortlist in config to curate which models are available:
+
+```toml
+[[providers.openai.models]]
+id = "gpt-5.2-codex"
+name = "GPT-5.2 Codex"
+
+[[providers.openai.models]]
+id = "o3"
+name = "o3"
+```
+
+When a shortlist is defined, only those models appear. When empty, the full models.dev catalog is used.
+
+### AWS Bedrock
+
+```toml
+[providers.bedrock]
+type = "bedrock"
+aws_region = "env:AWS_REGION"
+aws_access_key_id = "env:AWS_ACCESS_KEY_ID"
+aws_secret_access_key = "env:AWS_SECRET_ACCESS_KEY"
+# aws_session_token = "env:AWS_SESSION_TOKEN"  # Optional
+```
+
+### Transparent Traffic Capture
+
+Optional mitmproxy integration can redirect selected LLM traffic. Compatibility
+depends on the application's protocol, certificate trust and platform capture
+support; certificate pinning and unsupported protocols can prevent interception.
+It is not a guarantee of support for arbitrary desktop applications.
+
+**Prerequisites:**
+
+- mitmproxy 10.1.5+ (`brew install mitmproxy` on macOS, `pip install mitmproxy` elsewhere)
+- On first run, trust mitmproxy's CA certificate (see [mitmproxy docs](https://docs.mitmproxy.org/stable/concepts/certificates/))
+
+**Option 1: Auto-start via config (recommended)**
+
+```toml
+[capture]
+enabled = true
+mode = "local"              # Capture all local traffic
+# mode = "local:ChatGPT"    # Capture specific app only
+# verbose = true            # Enable verbose logging
+# api_only = true           # Skip desktop app domains
+```
+
+Then just run `eavs serve` - mitmproxy starts automatically.
+
+**Option 2: Manual mitmproxy start**
+
+```bash
+# Terminal 1: Start Eaves
+eavs serve
+
+# Terminal 2: Start mitmproxy with capture addon
+mitmproxy --mode local -s scripts/eavs_capture.py
+
+# Capture specific app only
+mitmproxy --mode local:ChatGPT -s scripts/eavs_capture.py
+```
+
+**Captured domains:**
+
+- API endpoints: api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, api.mistral.ai, api.groq.com, etc.
+- Desktop apps: chat.openai.com, claude.ai, gemini.google.com, perplexity.ai, poe.com, etc.
+
+**How it works:**
+
+1. mitmproxy intercepts outgoing HTTPS traffic using its local capture mode
+2. The `eavs_capture.py` addon detects LLM-related domains and redirects them to Eaves
+3. Eaves auto-detects the provider from the original host and proxies the request
+4. Supported redirected requests pass through the proxy; logging and policy behavior depend on configuration and request shape.
+
+## CLI Reference
+
+### Service Management
+
+```bash
+# Start server in foreground
+eavs serve --host 0.0.0.0 --port 8080
+
+# Background service
+eavs service start [--port 3033]
+eavs service stop
+eavs service restart
+eavs service status
+eavs service logs
+```
+
+### Keys
+
+```bash
+eavs key create --name "dev" --rpm 100 --budget 50.0
+eavs key create --name "codex" --oauth-user default --oauth-account pro
+eavs key list
+eavs key usage <key-id>
+eavs key revoke <key-id>
+eavs key bind <key-id> --oauth-user "<user-id>"
+```
+
+### OAuth
+
+```bash
+eavs login [provider]               # Interactive OAuth login
+eavs login openai --account second   # Multi-account login
+eavs auth status                     # Show OAuth credential status
+```
+
+### Models
+
+```bash
+eavs models list <provider>          # List models for a provider
+eavs models list openai --json       # JSON output
+eavs models search <query>           # Search across all providers
+eavs models search "codex" --json    # JSON output
+eavs models update                   # Refresh catalog from models.dev
+eavs models stats                    # Show catalog statistics
+```
+
+### Quotas
+
+```bash
+eavs quotas                          # Show upstream rate limit quotas
+eavs quotas --json                   # JSON output
+```
+
+### Secrets
+
+```bash
+eavs secret set openai                # Store interactively (hidden input)
+eavs secret set anthropic             # Interactive input; avoid secrets in argv/history
+eavs secret get openai                # Show masked value
+eavs secret get openai --reveal       # Show full value
+eavs secret delete openai             # Remove from keychain
+eavs secret list --check              # List keychain refs from config + check availability
+```
+
+### Providers
+
+```bash
+eavs provider list                   # List configured providers
+eavs provider use <name>             # Set runtime default
+eavs provider clear                  # Reset to config default
+eavs setup add                       # Interactive provider setup
+eavs setup test <provider>           # Test a provider directly
+eavs setup test-all                  # Test all providers
+```
+
+## API Reference
+
+Every listener endpoint, including `/health`, requires the capability configured
+by `EAVS_AUTH_TOKEN` or `server.auth_token`. Send it as
+`X-Eavs-Token: $EAVS_AUTH_TOKEN`. Bearer authentication is also accepted for
+control-plane calls; use `X-Eavs-Token` when `Authorization` carries a virtual
+API key.
+
+### Proxy Endpoints
+
+Supported `/v1/*` inference requests are routed to the configured provider,
+subject to authentication, operation allowlists and policy checks.
+
+```bash
+# Use default provider
+curl http://localhost:3033/v1/chat/completions ...
+
+# Use specific provider
+curl http://localhost:3033/v1/chat/completions \
+  -H "X-Provider: anthropic" ...
+
+# Track conversation
+curl http://localhost:3033/v1/chat/completions \
+  -H "X-Conversation-ID: my-session" ...
+```
+
+### Control API
+
+The abbreviated curl examples below omit authentication headers; add
+`-H "X-Eavs-Token: $EAVS_AUTH_TOKEN"` to each. Admin operations additionally
+require their configured administrative credential.
+
+#### Health Check
+
+```bash
+curl http://localhost:3033/health
+```
+
+#### Model Defaults (Zero-Config Aliases)
+
+```bash
+# Returns resolved model IDs for default / fast / reasoning / fallback
+curl http://localhost:3033/defaults
+
+# Optional provider override
+curl "http://localhost:3033/defaults?provider=anthropic"
+```
+
+Use aliases in OpenAI-compatible requests:
+
+- `model: "default"`
+- `model: "fast"`
+- `model: "reasoning"`
+- `model: "fallback"`
+
+#### List Providers
+
+```bash
+curl http://localhost:3033/providers \
+  -H "X-Eavs-Token: $EAVS_AUTH_TOKEN"
+```
+
+#### Inject Context
+
+```bash
+curl -X POST http://localhost:3033/inject/my-conversation \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "system", "content": "You are a pirate."}]}'
+```
+
+#### Clear Injections
+
+```bash
+curl -X POST http://localhost:3033/clear/my-conversation
+```
+
+#### List Conversations
+
+```bash
+curl http://localhost:3033/conversations
+```
+
+#### Get Conversation Stats
+
+```bash
+curl http://localhost:3033/conversations/stats
+```
+
+#### Get Conversation Details
+
+```bash
+curl http://localhost:3033/conversations/my-conversation
+```
+
+#### Update Conversation Metadata
+
+```bash
+curl -X PATCH http://localhost:3033/conversations/my-conversation \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "anthropic", "tags": ["test"]}'
+```
+
+#### Stream Logs (SSE)
+
+```bash
+curl http://localhost:3033/logs/stream
+```
+
+#### Provider Detail (for integrations)
+
+```bash
+# Get all providers with models, pricing, and Pi API mapping
+curl http://localhost:3033/providers/detail \
+  -H "Authorization: Bearer $EAVS_MASTER_KEY"
+```
+
+#### Admin: Upstream Quotas
+
+```bash
+curl http://localhost:3033/admin/quotas \
+  -H "Authorization: Bearer $EAVS_MASTER_KEY"
+```
+
+### WebSocket Endpoints
+
+#### OpenAI Realtime API
+
+```
+ws://localhost:3033/v1/realtime?model=gpt-4o-realtime-preview
+ws://localhost:3033/<provider>/v1/realtime?model=gpt-4o-realtime-preview
+```
+
+#### Codex Responses (WebSocket transport)
+
+```
+ws://localhost:3033/v1/codex/responses
+ws://localhost:3033/<provider>/v1/codex/responses
+```
+
+The Codex WebSocket proxy intercepts `response.create` messages for policy application (e.g., `store: true`) and tracks usage from `response.completed` events.
+
+## Testing and Benchmarking
+
+```bash
+# Run tests
+cargo test
+
+# Quick chat test
+eavs test chat "Hello" --provider openai
+
+# Sequential benchmark (mock provider = no API costs)
+eavs test bench --provider mock --count 50
+
+# Concurrent benchmark
+eavs test bench --provider mock --concurrent 10 --count 100
+
+# Duration-based load test
+eavs test bench --provider mock --concurrent 50 --duration 30s
+```
+
+### Benchmark Options
+
+| Flag                | Description                           |
+| ------------------- | ------------------------------------- |
+| `--provider <name>` | Provider to test (default: "default") |
+| `--count <n>`       | Number of requests (default: 10)      |
+| `--concurrent <n>`  | Parallel requests (default: 1)        |
+| `--duration <time>` | Run for duration (e.g., "30s", "1m")  |
+| `--model <model>`   | Model to use (optional)               |
+
+The `mock` provider returns synthetic responses without network calls, ideal for measuring proxy overhead.
