@@ -56,7 +56,7 @@ to eavs; it is separate from the upstream API key. See the
 
 Configuration can also live at `~/.config/eavs/config.toml` (or under
 `XDG_CONFIG_HOME`). See the [example configuration](config/config.example.toml)
-for options. The checked-in schema has [known gaps](docs/repository-quality.md).
+for options. The schema is manually maintained and [checked against fixtures](docs/repository-quality.md).
 
 ## Scope and limitations
 
@@ -64,8 +64,9 @@ for options. The checked-in schema has [known gaps](docs/repository-quality.md).
   keys, request policies and optional logging are available.
 - OAuth login/account binding exists, but provider-specific compatibility needs
   verification. It does not imply permission to share subscription access.
-- Native job and rerank accounting is incomplete. Do not rely on those paths
-  for hard spending caps.
+- Native job and rerank accounting is incomplete. USD-budgeted or TPM-limited
+  keys are rejected on those submission/inference paths; uncapped requests
+  may incur upstream charges not recorded in eavs's cost ledger.
 - Eavs only controls traffic that reaches it. It is not an agent sandbox;
   network isolation and protection of client credentials remain separate concerns.
 - Harness adoption, enforced run loadouts, mesh routing and Git configuration

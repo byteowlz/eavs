@@ -3,7 +3,7 @@
 EAVS now has template-aligned lint/check tooling. **The repository is not yet
 lint-compliant.** No warning baseline, file exclusions, `--cap-lints`, or CI
 `continue-on-error` hides the debt. Tracking: overall **eavs-h0pm**, lint cleanup
-**eavs-8nxb**, config/schema drift **eavs-5006**.
+**eavs-8nxb**, config/schema generation follow-up **eavs-5006**. The known missing configuration sections now have coverage and an offline validation gate; the schema remains manually maintained.
 
 ## Template comparison and deliberate differences
 
@@ -36,7 +36,8 @@ Compared against `../templates/rust-cli` and `../templates/rust-workspace`:
 - Edition **2021**, package version **0.8.3**, dependencies, and features are
   unchanged. The templates' 2024 edition migration and JSON/TOML-only dependency
   policy are not smuggled into a lint-only change. Their example-config generator
-  does not exist here and is not copied; schema drift is tracked separately.
+  is not copied. `just validate-config` uses pinned standard JSON Schema validation
+  and a limited mapped-field scanner; it is not generated Rust/serde parity.
 
 ## Gates and observed results
 
@@ -53,10 +54,13 @@ policy must enforce Check externally if required.
 | `just check-all-features` | PASS after parent fixed integration `AppConfig` fixture |
 | `just clippy` | FAIL: compiler summaries report 1,616 binary and 2,536 test-target errors (overlapping) |
 | `just lint-rust-ai-guardrails` | FAIL: 718 findings: 701 unwrap/expect, 17 Clippy suppression attributes, 0 debug/TODO |
-| `just doc-check` | FAIL: 11 diagnostics (crate docs, unclosed HTML tags, bare URLs) |
-| `just test` | PASS: 451 tests |
+| `just doc-check` | PASS after crate/docs markup fixes (previously 11 diagnostics) |
+| `just test` | PASS: 464 tests at the release-safety review snapshot |
 | `just test-tooling` | PASS: 3 isolated Python tests |
+| `just validate-config` | PASS: standard JSON Schema validation, mapped field coverage and 4 regression tests |
 | `just check-all` | FAIL at Clippy; not a green baseline |
+
+The Clippy/ast-grep counts above are the initial migration baseline, not a new count after the release-safety fixes. These gates still need a clean run before release; passing runtime tests is not a waiver.
 
 A diagnostic-only run of `cargo clippy --locked --all-targets --all-features
 --message-format=json` (without `-D warnings`) collected **4,152 emitted warnings,

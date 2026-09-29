@@ -29,15 +29,8 @@ async fn serve(app: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
 fn base_config(providers: HashMap<String, ProviderConfig>) -> AppConfig {
     AppConfig {
-        server: Default::default(),
         providers,
-        upstream: HashMap::new(),
-        logging: Default::default(),
-        analysis: Default::default(),
-        policy: Default::default(),
-        state: Default::default(),
-        keys: Default::default(),
-        capture: Default::default(),
+        ..AppConfig::with_defaults()
     }
 }
 

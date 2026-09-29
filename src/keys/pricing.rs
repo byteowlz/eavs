@@ -3,7 +3,7 @@
 //! Pricing data is sourced from LiteLLM's model_prices_and_context_window.json
 //! which is the most comprehensive and up-to-date source available.
 //!
-//! Data source: https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+//! Data source: <https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json>
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
