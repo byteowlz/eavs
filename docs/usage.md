@@ -101,9 +101,10 @@ rather than silently bypassing those limits. OpenAI's native video job lifecycle
 is currently blocked for **all virtual keys**: raw video IDs cannot safely
 isolate tenants sharing one upstream credential.
 
-The `/v1/eavs/rerank` bridge currently permits budgeted/TPM-scoped keys, but
-its provider usage mapping and budget enforcement remain under review
-(`eavs-avm8`). Do not rely on this path for hard spending or token limits.
+The `/v1/eavs/rerank` bridge also rejects USD-budgeted/TPM-scoped keys before
+upstream dispatch. Upstream usage is returned as reported, without converting
+search units or total tokens into guessed chat-token charges. Verified native
+billing remains unfinished (`eavs-avm8`).
 
 ElevenLabs realtime STT and streaming TTS WebSockets are available through
 `/elevenlabs/v1/speech-to-text/realtime` and
@@ -141,24 +142,17 @@ returned. Webhook inputs are rejected: polling is supported, but **verified
 webhook delivery is not yet implemented**. SDK-native job endpoints and
 translations beyond reranking are not yet supported.
 
-**Job metering (USD budgets).** To let a USD-budgeted key submit jobs, the
-operator must supply an explicit per-job price per model; eavs never
-fabricates usage. A budgeted key on an unpriced model is rejected. Configure
-prices under `[native_pricing.jobs]`:
+**Job accounting is not yet supported.** Keys with a USD budget or TPM limit
+cannot submit jobs, even if `[native_pricing.jobs]` contains a price. Uncapped
+keys can submit, but these jobs are not charged to eavs's token/cost ledger;
+upstream providers may still bill them.
 
-```toml
-[native_pricing.jobs]
-'fal-ai/flux/schnell' = 0.003
-'replicate/example/model' = 0.01
-```
-
-The current implementation reserves the configured flat price on submission
-and attempts settlement or release during lifecycle polling. **This is not yet
-concurrency-safe, restart-safe accounting:** reservation updates and settlement
-tracking have known gaps (`eavs-avm8`). A configured flat price is not verified
-upstream actual spend, and failed/cancelled jobs are not necessarily free.
-Do not rely on this implementation for hard spending caps. Unbudgeted keys
-can submit without a configured price.
+Authenticated owners can still retrieve or cancel existing jobs at their budget
+cap. Lifecycle polling does not automatically settle or release legacy
+reservations: old handles lack the durable billing evidence needed for safe
+reconciliation. Preserve existing holds for operator review rather than assuming
+failure/cancellation is free or releasing another job's reservation. Transactional
+native-unit accounting remains tracked in `eavs-avm8`.
 
 When to use which OpenAI provider:
 

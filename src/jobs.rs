@@ -146,11 +146,6 @@ struct JobContext {
     api_key: String,
     base: String,
     owner: ValidatedKey,
-    /// Operator-supplied USD price for this model's job, if any. Used to
-    /// reserve/reconcile cost against a budgeted key. `None` when the key has
-    /// no budget (metering is moot) or when no price is configured (fail-closed
-    /// for budgeted keys).
-    price_per_job: Option<f64>,
 }
 
 async fn context(
@@ -203,15 +198,13 @@ async fn context(
             .await
     }
     .map_err(|_| error(StatusCode::FORBIDDEN, "Job key or model is not authorized"))?;
-    // Meter a budgeted key only when an operator supplies an explicit per-job
-    // price for this model. eavs never fabricates usage, so if a price is
-    // absent we fail closed rather than charge $0 or silently bypass the cap.
-    let price_per_job = state.config.native_pricing.jobs.get(model).copied();
+    // Prices alone do not establish verified units or durable settlement.
+    // Only submission is denied; authenticated lifecycle access survives caps.
     let budgeted = owner.permissions.max_budget_usd.is_some();
-    if budgeted && price_per_job.is_none() {
+    if !skip_budget && (budgeted || owner.permissions.tpm_limit.is_some()) {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "No price configured for this job model; budgeted keys are not enabled",
+            "Jobs cannot enforce this virtual key's budget or token limit yet",
         ));
     }
     let api_key = lookup.config.resolved_api_key();
@@ -231,9 +224,6 @@ async fn context(
             .trim_end_matches('/')
             .to_string(),
         owner,
-        // Only meter when the key is budgeted; an unbudgeted key has no cap to
-        // protect, so no reservation is needed.
-        price_per_job: if budgeted { price_per_job } else { None },
     })
 }
 
@@ -396,20 +386,9 @@ pub async fn submit(
             json!({"version": version, "input": input}),
         )
     };
-    // Reserve the job cost against the (budgeted) key before hitting upstream,
-    // so a burst of concurrent jobs cannot collectively overspend the cap. If
-    // the job is not accepted (upstream error, no safe job id) the reservation
-    // is released so it is not left hanging.
-    let reservation = match reserve(&state, &context).await {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
     let result = match call(&state, &context, Method::POST, &path, Some(upstream_body)).await {
         Ok(result) => result,
-        Err(e) => {
-            release_reservation(&state, &context, reservation).await;
-            return e;
-        }
+        Err(e) => return e,
     };
     if context.kind == ProviderType::Replicate
         && result
@@ -431,7 +410,6 @@ pub async fn submit(
         .and_then(Value::as_str)
         .filter(|id| safe_component(id));
     let Some(job_id) = job_id else {
-        release_reservation(&state, &context, reservation).await;
         return error(
             StatusCode::BAD_GATEWAY,
             "Job upstream returned no safe job ID",
@@ -442,7 +420,7 @@ pub async fn submit(
         owner: context.owner.key_hash.clone(),
         model: model.to_string(),
         job_id: job_id.to_string(),
-        reserved_cost: reservation,
+        reserved_cost: 0.0,
         expires: chrono::Utc::now().timestamp() + 7 * 24 * 3600,
     };
     let token = match seal(&handle, &context.api_key) {
@@ -454,77 +432,6 @@ pub async fn submit(
         "handle": token, "provider": context.provider, "model": model,
         "status": normalized_status(result.get("status").and_then(Value::as_str).unwrap_or("queued"))
     }))).into_response()
-}
-
-/// Reserve the job cost against the key's budget. Returns the reserved amount
-/// (0 when the key is not budgeted). Fails closed (BAD_REQUEST) if the key is
-/// budgeted and the reservation would exceed it.
-async fn reserve(state: &AppState, context: &JobContext) -> Result<f64, Response> {
-    let Some(price) = context.price_per_job else {
-        return Ok(0.0);
-    };
-    let Some(store) = state.get_key_store() else {
-        return Err(error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Virtual keys are unavailable",
-        ));
-    };
-    match store.reserve_budget(&context.owner.key_hash, price).await {
-        Ok(true) => Ok(price),
-        Ok(false) => Err(error(
-            StatusCode::BAD_REQUEST,
-            "Job would exceed this key's budget",
-        )),
-        Err(e) => Err(error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to reserve job budget: {e}"),
-        )),
-    }
-}
-
-/// Release a reservation without charging (job cancelled or failed before
-/// consuming cost).
-async fn release_reservation(state: &AppState, context: &JobContext, reserved: f64) {
-    if reserved <= 0.0 {
-        return;
-    }
-    if let Some(store) = state.get_key_store() {
-        if let Err(e) = store
-            .release_reservation(&context.owner.key_hash, reserved)
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to release job reservation");
-        }
-    }
-}
-
-/// Settle a job once: if it was reserved, reconcile the reservation into actual
-/// spend. Idempotent per handle token so repeated result polls do not double-charge.
-async fn settle_job(
-    state: &AppState,
-    handle: &JobHandle,
-    token: &str,
-    reserved: f64,
-    provider: &str,
-) {
-    if reserved <= 0.0 {
-        return;
-    }
-    // Idempotency guard: settle exactly once.
-    if state.settled_jobs.contains_key(token) {
-        return;
-    }
-    state.settled_jobs.insert(token.to_string(), ());
-    if let Some(store) = state.get_key_store() {
-        // We only have the operator-supplied per-job price; that is the honest
-        // cost basis. actual == reserved here (no token/unit usage surface).
-        if let Err(e) = store
-            .reconcile_reservation(&handle.owner, reserved, reserved, &handle.model, provider)
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to reconcile job reservation");
-        }
-    }
 }
 
 fn normalized_status(status: &str) -> &str {
@@ -657,26 +564,10 @@ async fn lifecycle(
     } else {
         Value::Null
     };
-    // Metering (eavs-avm8): finalize cost once the job reaches a terminal state.
-    match (action, status.as_str()) {
-        // Completed result -> reconcile the reservation into actual spend.
-        (Action::Result, "completed") => {
-            settle_job(
-                &state,
-                &handle,
-                &token,
-                handle.reserved_cost,
-                &context.provider,
-            )
-            .await;
-        }
-        // Cancelled/failed -> release the reservation (no cost consumed).
-        (_, "cancelled" | "failed") => {
-            release_reservation(&state, &context, handle.reserved_cost).await;
-            let _ = state.settled_jobs.insert(token.clone(), ());
-        }
-        _ => {}
-    }
+    // No accounting mutations on repeatable lifecycle calls. Legacy reservations
+    // remain held until durable, operation-bound settlement exists (eavs-avm8).
+    // Failure/cancellation does not establish zero cost; process-local guards
+    // cannot prevent double release across restarts or replicas.
     Json(
         json!({"handle": token, "provider": context.provider, "model": handle.model,
         "status": status, "output": output}),
@@ -847,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budgeted_job_reserves_reconciles_and_blocks_overspend() {
+    async fn job_caps_deny_submission_and_lifecycle_never_mutates_reservations() {
         use crate::config::AppConfig;
         use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore, KeyValidator, RateLimiter};
         use axum::{
@@ -856,7 +747,7 @@ mod tests {
         };
         use std::sync::Arc;
         use tower::ServiceExt;
-        // Price $0.005/job, $0.01 budget -> two jobs fit, third is rejected.
+        // Even configured prices cannot enable capped submissions.
         let mock = MockJobs::default();
         let config: AppConfig = toml::from_str(
             r#"
@@ -893,13 +784,6 @@ mod tests {
             .unwrap()
             .key;
 
-        // Two submits return distinct request_ids; the result poll returns COMPLETED.
-        {
-            let mut r = mock.responses.lock().unwrap();
-            r.push_back(json!({"request_id":"job1","status":"IN_QUEUE"}));
-            r.push_back(json!({"request_id":"job2","status":"IN_QUEUE"}));
-            r.push_back(json!({"status":"COMPLETED","payload":{"ok":true}}));
-        }
         let app = Router::new()
             .route("/:provider/v1/eavs/jobs", post(submit))
             .with_state(state.clone());
@@ -915,46 +799,132 @@ mod tests {
                 .unwrap()
         };
 
-        // Two concurrent submissions each reserve $0.005 (total $0.01 fits).
-        let r1 = app.clone().oneshot(submit_req()).await.unwrap();
-        assert_eq!(r1.status(), StatusCode::ACCEPTED);
-        let r2 = app.clone().oneshot(submit_req()).await.unwrap();
-        assert_eq!(r2.status(), StatusCode::ACCEPTED);
-        let body = serde_json::from_slice::<Value>(
-            &axum::body::to_bytes(r1.into_body(), 1024 * 1024)
+        assert_eq!(
+            app.clone().oneshot(submit_req()).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(mock.requests.lock().unwrap().is_empty());
+
+        let tpm_key = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    tpm_limit: Some(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .key;
+        let mut request = submit_req();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {tpm_key}").parse().unwrap(),
+        );
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(mock.requests.lock().unwrap().is_empty());
+
+        let normal = store
+            .create_key(CreateKeyRequest::default())
+            .await
+            .unwrap()
+            .key;
+        mock.responses
+            .lock()
+            .unwrap()
+            .push_back(json!({"request_id":"job1","status":"IN_QUEUE"}));
+        let mut request = submit_req();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {normal}").parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), MAX_REPLY)
                 .await
                 .unwrap(),
         )
         .unwrap();
-        let h1 = body["handle"].as_str().unwrap().to_string();
+        let normal_handle = body["handle"].as_str().unwrap();
+        assert_eq!(
+            open(
+                normal_handle,
+                "secret",
+                "fal",
+                &crate::keys::hash_key(&normal)
+            )
+            .unwrap()
+            .reserved_cost,
+            0.0
+        );
 
-        // A third submission would exceed the $0.01 budget while two are reserved
-        // (two x $0.005 = $0.01, exactly the cap). Rejected before upstream.
-        let r3 = app.clone().oneshot(submit_req()).await.unwrap();
-        assert_eq!(r3.status(), StatusCode::FORBIDDEN);
-
-        // Reconcile the first job to completed, then assert spend reflects it
-        // and its reservation is released. The other reservation remains in-flight.
+        // Keep unrelated reservations for both owners. Capped owner is at cap.
+        assert!(store
+            .reserve_budget(&crate::keys::hash_key(&key), 0.01)
+            .await
+            .unwrap());
+        assert!(store
+            .reserve_budget(&crate::keys::hash_key(&normal), 0.02)
+            .await
+            .unwrap());
+        assert_eq!(
+            app.oneshot(submit_req()).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let legacy = seal(
+            &JobHandle {
+                provider: "fal".into(),
+                owner: crate::keys::hash_key(&key),
+                model: "fal-ai/flux/schnell".into(),
+                job_id: "legacy".into(),
+                reserved_cost: 0.005,
+                expires: chrono::Utc::now().timestamp() + 3600,
+            },
+            "secret",
+        )
+        .unwrap();
         let result_app = Router::new()
             .route("/:provider/v1/eavs/jobs/:handle/result", get(result))
+            .route("/:provider/v1/eavs/jobs/:handle/status", get(status))
+            .route("/:provider/v1/eavs/jobs/:handle/cancel", post(cancel))
             .with_state(state.clone());
-        let rr = result_app
-            .clone()
-            .oneshot(
-                http::Request::builder()
-                    .method("GET")
-                    .uri(format!("/fal/v1/eavs/jobs/{h1}/result"))
-                    .header("authorization", format!("Bearer {key}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(rr.status(), StatusCode::OK);
-        let settled = store.get_by_key(&key).unwrap();
-        assert!((settled.usage.window_spend_usd - 0.005).abs() < 1e-9);
-        // Only the unreconciled second job still holds a reservation.
-        assert!((settled.usage.reserved_spend_usd - 0.005).abs() < 1e-9);
+        for (owner, handle, reserved) in [
+            (&key, legacy.as_str(), 0.01),
+            (&normal, normal_handle, 0.02),
+        ] {
+            for (endpoint, method, status) in [
+                ("status", "GET", "failed"),
+                ("cancel", "POST", "cancelled"),
+                ("result", "GET", "COMPLETED"),
+            ] {
+                for _ in 0..3 {
+                    mock.responses
+                        .lock()
+                        .unwrap()
+                        .push_back(json!({"status":status,"payload":{"ok":true}}));
+                    let response = result_app
+                        .clone()
+                        .oneshot(
+                            http::Request::builder()
+                                .method(method)
+                                .uri(format!("/fal/v1/eavs/jobs/{handle}/{endpoint}"))
+                                .header("authorization", format!("Bearer {owner}"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let usage = store.get_by_key(owner).unwrap().usage;
+                    assert_eq!(usage.reserved_spend_usd, reserved);
+                    assert_eq!(usage.window_spend_usd, 0.0);
+                }
+            }
+        }
+        assert_eq!(mock.requests.lock().unwrap().len(), 19);
     }
 
     #[tokio::test]

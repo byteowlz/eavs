@@ -178,7 +178,7 @@ pub enum ModelCommands {
     },
     /// Export configured providers and models for an agent harness
     ///
-    /// Uses TypeScript adapters (in adapters/<name>/adapter.ts) to generate
+    /// Uses TypeScript adapters (in `adapters/<name>/adapter.ts`) to generate
     /// config files for different agent harnesses. Run without arguments to
     /// list available adapters.
     ///
@@ -189,7 +189,7 @@ pub enum ModelCommands {
     Export {
         /// Target adapter name (e.g., "pi"). Omit to list available adapters.
         adapter: Option<String>,
-        /// Override eavs base URL (default: http://127.0.0.1:<port> from config)
+        /// Override eavs base URL (default: `http://127.0.0.1:<port>` from config)
         #[arg(long)]
         base_url: Option<String>,
         /// API key to embed in the output (default: "EAVS_API_KEY" placeholder)
@@ -231,7 +231,7 @@ pub enum SetupCommands {
         env_file: Option<String>,
 
         /// Import provider configs from a TOML file (appended to config).
-        /// The file should contain [providers.<name>] sections.
+        /// The file should contain `[providers.<name>]` sections.
         #[arg(long)]
         import: Option<String>,
     },
@@ -324,7 +324,7 @@ pub enum AuthCommands {
 pub enum SecretCommands {
     /// Store a secret in the system keychain
     Set {
-        /// Account name (used as keychain account, referenced in config as "keychain:<account>")
+        /// Account name (used as keychain account, referenced in config as `keychain:<account>`)
         account: String,
 
         /// Secret value (if omitted, reads interactively from terminal)
@@ -1005,6 +1005,66 @@ impl EavsClient {
         } else {
             request
         }
+    }
+
+    async fn oauth_test_chat_and_revoke(
+        &self,
+        master_key: &str,
+        key: &crate::keys::CreateKeyResponse,
+        request: (&str, &str, &str, bool),
+    ) -> Result<ChatResponse, CliError> {
+        let (message, model, provider, stream) = request;
+        let result = self
+            .chat(message, model, provider, Some(&key.key), stream)
+            .await;
+        let cleanup = self
+            .oauth_test_admin_request(
+                reqwest::Method::DELETE,
+                &format!("/admin/keys/{}", key.key_hash),
+                master_key,
+                None,
+            )
+            .await;
+        if let Err(error) = cleanup {
+            return Err(CliError::Other(format!(
+                "Failed to revoke temporary OAuth key {}: {error}; request outcome: {}. Key expires after five minutes.",
+                key.key_id,
+                match &result { Ok(_) => "received response".to_string(), Err(error) => error.to_string() }
+            )));
+        }
+        result
+    }
+
+    /// Admin mutations must reach the same server/cache used by inference.
+    async fn oauth_test_admin_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        master_key: &str,
+        body: Option<&crate::keys::CreateKeyRequest>,
+    ) -> Result<reqwest::Response, CliError> {
+        let mut request = self
+            .client
+            .request(
+                method,
+                format!("{}{}", self.config.server_url.trim_end_matches('/'), path),
+            )
+            .bearer_auth(master_key);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = self
+            .authenticate_listener(request)
+            .send()
+            .await
+            .map_err(CliError::Request)?;
+        if !response.status().is_success() {
+            return Err(CliError::Api {
+                status: response.status().as_u16(),
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(response)
     }
 
     async fn post_chat_completions(
@@ -1805,12 +1865,7 @@ fn owner_table_row(
     }
     s.push_str(&format!(
         " {:>8} {:>12} {:>12} {:>12} {:>12} ${:>10.4}",
-        requests,
-        input_tokens,
-        output_tokens,
-        cached_tokens,
-        cache_write_tokens,
-        cost_usd,
+        requests, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd,
     ));
     s
 }
@@ -2444,6 +2499,208 @@ fn print_routing_result(result: &RoutingTestResult) {
     println!();
 }
 
+/// Resolve only a route with the OAuth provider's actual protocol identity.
+fn select_oauth_test_route(
+    config: &crate::config::AppConfig,
+    provider: OAuthProvider,
+    explicit_model: Option<&str>,
+) -> Result<(String, String), CliError> {
+    use crate::provider::ProviderType;
+    let expected = match provider {
+        OAuthProvider::Anthropic => ProviderType::Anthropic,
+        OAuthProvider::OpenAICodex => ProviderType::OpenAICodex,
+        OAuthProvider::GithubCopilot => ProviderType::GithubCopilot,
+    };
+    let mut routes: Vec<_> = config
+        .providers
+        .iter()
+        .filter(|(_, route)| route.provider_type() == expected)
+        .collect();
+    routes.sort_by_key(|(name, _)| *name);
+    let [(name, route)] = routes.as_slice() else {
+        return Err(CliError::Other(format!(
+            "Expected exactly one configured {expected:?} OAuth route, found {}: {:?}. Configure a single matching provider route.",
+            routes.len(), routes.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        )));
+    };
+    let model = explicit_model.unwrap_or(&route.test_model).trim();
+    if model.is_empty() {
+        return Err(CliError::Other(format!(
+            "Specify --model or providers.{name}.test_model for this OAuth test; no model is guessed"
+        )));
+    }
+    Ok(((*name).clone(), model.to_string()))
+}
+
+#[cfg(test)]
+mod oauth_test_route_tests {
+    use super::*;
+
+    fn config(entries: &[(&str, &str, &str)]) -> crate::config::AppConfig {
+        let mut config = crate::config::AppConfig::with_defaults();
+        config.providers.clear();
+        for (name, kind, model) in entries {
+            let route = crate::config::ProviderConfig {
+                type_: kind.to_string(),
+                test_model: model.to_string(),
+                ..Default::default()
+            };
+            config.providers.insert(name.to_string(), route);
+        }
+        config
+    }
+
+    #[tokio::test]
+    async fn oauth_test_rejects_invalid_config_before_any_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("invalid.toml");
+        std::fs::write(&path, "[not valid TOML")?;
+        let result = run_test_oauth(
+            "fixture",
+            None,
+            None,
+            "unused".to_string(),
+            false,
+            "http://127.0.0.1:1",
+            OutputFormat::Text,
+            path.to_str(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CliError::Other(message)) if message.contains("Failed to load config"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_admin_auth_and_failure_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{extract::Request, routing::any, Router};
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let captured = captured.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let headers = request.headers();
+                assert_eq!(
+                    headers.get("x-eavs-token").and_then(|v| v.to_str().ok()),
+                    Some("listener-fixture")
+                );
+                let expected = if path.starts_with("/admin/") {
+                    "Bearer admin-fixture"
+                } else {
+                    "Bearer virtual-fixture"
+                };
+                assert_eq!(
+                    headers.get("authorization").and_then(|v| v.to_str().ok()),
+                    Some(expected)
+                );
+                captured
+                    .lock()
+                    .expect("capture lock")
+                    .push((method.clone(), path.clone()));
+                if path == "/v1/chat/completions" {
+                    (axum::http::StatusCode::BAD_GATEWAY, "mock upstream failure")
+                } else {
+                    (axum::http::StatusCode::OK, "{}")
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = EavsClient {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()?,
+            config: CliConfig {
+                server_url: format!("http://{address}"),
+                timeout: Duration::from_secs(2),
+                listener_token: Some("listener-fixture".to_string()),
+            },
+        };
+        client
+            .oauth_test_admin_request(
+                reqwest::Method::POST,
+                "/admin/keys",
+                "admin-fixture",
+                Some(&crate::keys::CreateKeyRequest::default()),
+            )
+            .await?;
+        let key: crate::keys::CreateKeyResponse = serde_json::from_value(serde_json::json!({
+            "key": "virtual-fixture", "key_id": "fixture", "key_hash": "hash-fixture",
+            "created_at": "2026-01-01T00:00:00Z", "permissions": {}
+        }))?;
+        let result = client
+            .oauth_test_chat_and_revoke(
+                "admin-fixture",
+                &key,
+                ("test", "model", "subscription", false),
+            )
+            .await;
+        server.abort();
+        assert!(matches!(result, Err(CliError::Api { status: 502, .. })));
+        assert_eq!(
+            *seen.lock().map_err(|e| e.to_string())?,
+            vec![
+                (reqwest::Method::POST, "/admin/keys".to_string()),
+                (reqwest::Method::POST, "/v1/chat/completions".to_string()),
+                (
+                    reqwest::Method::DELETE,
+                    "/admin/keys/hash-fixture".to_string()
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_routes_use_protocol_not_name() -> Result<(), CliError> {
+        for (provider, kind) in [
+            (OAuthProvider::Anthropic, "anthropic"),
+            (OAuthProvider::OpenAICodex, "openai-codex"),
+            (OAuthProvider::GithubCopilot, "github-copilot"),
+        ] {
+            let config = config(&[
+                ("openai", "openai", "wrong"),
+                ("subscription", kind, "configured"),
+            ]);
+            assert_eq!(
+                select_oauth_test_route(&config, provider, None)?,
+                ("subscription".to_string(), "configured".to_string())
+            );
+            assert_eq!(
+                select_oauth_test_route(&config, provider, Some("explicit"))?.1,
+                "explicit"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_routes_reject_absent_ambiguous_and_missing_models() {
+        for provider in [OAuthProvider::OpenAICodex, OAuthProvider::GithubCopilot] {
+            assert!(select_oauth_test_route(
+                &config(&[("openai", "openai", "gpt-4o")]),
+                provider,
+                Some("explicit")
+            )
+            .is_err());
+        }
+        let ambiguous = config(&[("a", "openai-codex", "m"), ("b", "openai-codex", "m")]);
+        assert!(
+            select_oauth_test_route(&ambiguous, OAuthProvider::OpenAICodex, Some("m")).is_err()
+        );
+        let missing = config(&[("custom", "openai-codex", "")]);
+        assert!(select_oauth_test_route(&missing, OAuthProvider::OpenAICodex, None).is_err());
+        assert!(select_oauth_test_route(&missing, OAuthProvider::OpenAICodex, Some(" ")).is_err());
+    }
+}
+
 /// Test OAuth authentication end-to-end
 ///
 /// This creates a temporary virtual key bound to the OAuth user,
@@ -2461,7 +2718,7 @@ pub async fn run_test_oauth(
     format: OutputFormat,
     config_path: Option<&str>,
 ) -> Result<(), CliError> {
-    use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore};
+    use crate::keys::{CreateKeyRequest, KeyPermissions};
 
     // Load config
     let config = if let Some(path) = config_path {
@@ -2469,7 +2726,7 @@ pub async fn run_test_oauth(
             .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
     } else {
         crate::config::AppConfig::load()
-            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
     };
 
     // Fail fast: OAuth testing requires virtual keys to be enabled on the
@@ -2527,26 +2784,22 @@ pub async fn run_test_oauth(
             )));
         }
         p.clone()
-    } else {
+    } else if authenticated_providers.len() == 1 {
         authenticated_providers[0].clone()
+    } else {
+        return Err(CliError::Other(
+            "Multiple authenticated OAuth providers; select one with --provider".to_string(),
+        ));
     };
 
     let oauth_provider = OAuthProvider::from_str(&oauth_provider_str)
         .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", oauth_provider_str)))?;
 
-    // Determine model based on provider if not specified
-    let model = model.unwrap_or_else(|| match oauth_provider {
-        OAuthProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
-        OAuthProvider::OpenAICodex => "gpt-4o".to_string(),
-        OAuthProvider::GithubCopilot => "gpt-4o".to_string(),
-    });
-
-    // Map OAuth provider to EAVS provider name
-    let eavs_provider = match oauth_provider {
-        OAuthProvider::Anthropic => "anthropic",
-        OAuthProvider::OpenAICodex => "openai",
-        OAuthProvider::GithubCopilot => "openai", // GitHub Copilot uses OpenAI-compatible API
-    };
+    let (eavs_provider, model) =
+        select_oauth_test_route(&config, oauth_provider, model.as_deref())?;
+    let listener_token = config.resolved_listener_auth_token().ok_or_else(|| {
+        CliError::Other("OAuth testing requires listener authentication; configure auth_token or EAVS_AUTH_TOKEN".to_string())
+    })?;
 
     println!("Testing OAuth Authentication");
     println!("{}", "=".repeat(50));
@@ -2556,25 +2809,44 @@ pub async fn run_test_oauth(
     println!("Stream:   {}", stream);
     println!();
 
-    // Create a temporary virtual key bound to the OAuth user
-    let key_store = KeyStore::new(&db_path)
-        .await
-        .map_err(|e| CliError::Other(format!("Failed to open key store: {}", e)))?;
+    // Mutate the running server's store, not a separate process-local key cache.
+    let master_key = config.keys.resolved_master_key().ok_or_else(|| {
+        CliError::Other(
+            "OAuth testing requires keys.master_key for server-side temporary key creation"
+                .to_string(),
+        )
+    })?;
+    let client = EavsClient::new(CliConfig {
+        server_url: server_url.to_string(),
+        timeout: Duration::from_secs(30),
+        listener_token: Some(listener_token),
+    });
 
     let key_request = CreateKeyRequest {
         name: Some(format!("oauth-test-{}", chrono::Utc::now().timestamp())),
         expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
-        permissions: KeyPermissions::default(),
+        permissions: KeyPermissions {
+            allowed_providers: Some([eavs_provider.clone()].into_iter().collect()),
+            allowed_models: Some([model.clone()].into_iter().collect()),
+            ..Default::default()
+        },
         metadata: serde_json::Value::Null,
         owner: None,
         oauth_user: Some(user_id.to_string()),
         oauth_account: None,
     };
 
-    let key_response = key_store
-        .create_key(key_request)
+    let key_response: crate::keys::CreateKeyResponse = client
+        .oauth_test_admin_request(
+            reqwest::Method::POST,
+            "/admin/keys",
+            &master_key,
+            Some(&key_request),
+        )
+        .await?
+        .json()
         .await
-        .map_err(|e| CliError::Other(format!("Failed to create test key: {}", e)))?;
+        .map_err(CliError::Request)?;
 
     println!("Created temporary key: {}", key_response.key_id);
     println!();
@@ -2583,19 +2855,13 @@ pub async fn run_test_oauth(
     let start = std::time::Instant::now();
     println!("Sending test request...");
 
-    let client = EavsClient::with_url(server_url.to_string());
     let result = client
-        .chat(
-            &message,
-            &model,
-            eavs_provider,
-            Some(&key_response.key),
-            stream,
+        .oauth_test_chat_and_revoke(
+            &master_key,
+            &key_response,
+            (&message, &model, &eavs_provider, stream),
         )
         .await;
-
-    // Clean up: disable the temporary key
-    let _ = key_store.disable_key(&key_response.key_hash).await;
 
     let elapsed = start.elapsed();
 

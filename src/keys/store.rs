@@ -909,9 +909,9 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Reserve `amount` cost against a key's in-flight budget. Returns Ok(false)
-    /// if the key would exceed its budget with the reservation (fail-closed).
-    /// A no-op (returns Ok(true)) for keys without a budget.
+    /// Seed a legacy hold for sequential migration fixtures only.
+    /// This is not an atomic reservation API and must not be used in production.
+    #[cfg(test)]
     pub async fn reserve_budget(&self, key_hash: &str, amount: f64) -> Result<bool, KeyStoreError> {
         let mut key = match self.cache.get(key_hash) {
             Some(k) => k.clone(),
@@ -928,8 +928,8 @@ impl KeyStore {
         Ok(true)
     }
 
-    /// Release a reservation without charging (e.g. job cancelled or failed
-    /// before consuming any cost).
+    /// Legacy accounting fixture helper; not a production settlement API.
+    #[cfg(test)]
     pub async fn release_reservation(
         &self,
         key_hash: &str,
@@ -948,10 +948,8 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Reconcile a reservation into actual spend: deduct the reservation and
-    /// add the actual (usually <= reserved) cost into the window spend. This
-    /// records a usage_history row so the charge is attributed once.
-    #[allow(clippy::too_many_arguments)]
+    /// Legacy accounting fixture helper. No concurrent or exactly-once guarantee.
+    #[cfg(test)]
     pub async fn reconcile_reservation(
         &self,
         key_hash: &str,
@@ -990,8 +988,8 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Persist a key's usage JSON back to the database (used by reservation
-    /// bookkeeping, which keeps the in-memory cache authoritative).
+    /// Persist sequential legacy accounting fixtures.
+    #[cfg(test)]
     async fn persist_key_usage(
         &self,
         key_hash: &str,
@@ -1404,7 +1402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_budget_reservation_blocks_overspend_and_reconciles() {
+    async fn legacy_accounting_fixture_roundtrip() {
         let store = KeyStore::in_memory().await.unwrap();
         // Key with a $1.00 budget.
         let response = store
@@ -1419,16 +1417,15 @@ mod tests {
             .unwrap();
         let key_hash = crate::keys::generation::hash_key(&response.key);
 
-        // Two concurrent $0.60 reservations fit (0.6 + 0.6 = 1.2 > 1.0) -> the
-        // second must be rejected because the first is still in-flight.
+        // Sequential legacy fixture operations; this does not test concurrency.
         assert!(store.reserve_budget(&key_hash, 0.60).await.unwrap());
         assert!(!store.reserve_budget(&key_hash, 0.60).await.unwrap());
 
         // A third reservation that would exceed the cap is also rejected.
         assert!(!store.reserve_budget(&key_hash, 0.50).await.unwrap());
 
-        // Reconcile the first reservation to actual $0.55: reservation cleared,
-        // window spend charged, and the second $0.60 now fits again.
+        // Exercise the old serialization shape with a synthetic $0.55 charge.
+        // This is not evidence of provider billing or safe settlement.
         store
             .reconcile_reservation(&key_hash, 0.60, 0.55, "fal-ai/x", "fal")
             .await

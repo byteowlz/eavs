@@ -52,7 +52,7 @@ pub fn build_authorize_url(
 ) -> Result<String, String> {
     let challenge = code_challenge(code_verifier)?;
     let mut url = url::Url::parse(AUTH_URL)
-        .unwrap_or_else(|_| url::Url::parse("https://claude.ai/oauth/authorize").unwrap());
+        .map_err(|err| format!("invalid Anthropic authorization URL: {err}"))?;
     url.query_pairs_mut()
         .append_pair("code", "true")
         .append_pair("response_type", "code")
@@ -175,5 +175,38 @@ fn token_to_credentials(user_id: &str, token: TokenResponse) -> OAuthCredentials
         extra_data: token
             .token_type
             .map(|t| serde_json::json!({"token_type": t})),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_url_retains_oauth_parameters() -> Result<(), String> {
+        let config = AnthropicOAuthConfig {
+            client_id: "client id".to_string(),
+            client_secret: None,
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: "scope one".to_string(),
+        };
+        let authorized = build_authorize_url(&config, "state value", "verifier")?;
+        let url = url::Url::parse(&authorized).map_err(|err| err.to_string())?;
+        assert_eq!(url.host_str(), Some("claude.ai"));
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("client_id").map(String::as_str),
+            Some("client id")
+        );
+        assert_eq!(pairs.get("state").map(String::as_str), Some("state value"));
+        assert_eq!(
+            pairs.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(
+            pairs.get("code_challenge").map(String::as_str),
+            Some(code_challenge("verifier")?.as_str())
+        );
+        Ok(())
     }
 }

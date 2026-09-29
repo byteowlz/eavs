@@ -44,10 +44,6 @@ pub struct AppState {
     pub model_catalog: Arc<OnceCell<ModelCatalog>>,
     /// Upstream rate limit quota tracker
     pub quota_tracker: QuotaTracker,
-    /// Job handles already cost-reconciled (or reservation-released). Keyed by
-    /// handle token so a job's cost is settled exactly once even if the client
-    /// polls the result endpoint multiple times (eavs-avm8).
-    pub settled_jobs: Arc<DashMap<String, ()>>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -440,7 +436,6 @@ impl AppState {
             cost_calculator: Arc::new(OnceCell::new()),
             model_catalog: Arc::new(OnceCell::new()),
             quota_tracker: QuotaTracker::new(),
-            settled_jobs: Arc::new(DashMap::new()),
         }
     }
 
