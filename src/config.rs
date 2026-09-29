@@ -116,11 +116,9 @@ pub struct AppConfig {
     /// Mock provider predefined responses
     #[serde(default)]
     pub mock_responses: MockResponsesConfig,
-    /// Operator-supplied unit prices for native (non-token) inference shapes.
-    /// eavs never fabricates usage; when metering a shape that has no token
-    /// billing and no upstream usage surface (e.g. async jobs), it needs an
-    /// explicit price per unit/model. A budgeted key on an unpriced model is
-    /// rejected (fail-closed) rather than charged $0.
+    /// Ignored legacy pricing configuration, retained for compatibility only.
+    /// Does not enable budgeted native jobs or establish actual billing.
+    /// Native jobs with capped keys remain disabled (fail-closed).
     #[serde(default)]
     pub native_pricing: NativePricingConfig,
 }
@@ -493,10 +491,10 @@ fn default_max_tokens() -> u64 {
     16_384
 }
 
-/// Prices for native shapes that are billed per-unit rather than per-token.
-/// eavs refuses to fabricate usage; this is where an operator supplies the
-/// authoritative unit price so budgeted keys can be metered honestly. Prices
-/// are USD per unit of the provider's finished job/request (fal, Replicate).
+/// Ignored legacy native pricing configuration, retained for compatibility only.
+/// These operator-supplied values are not authoritative actual billing and do
+/// not enable budgeted jobs. Native jobs with capped keys fail closed.
+/// The legacy syntax below still parses but has no billing effect.
 ///
 /// ```toml
 /// [native_pricing.jobs]
@@ -505,9 +503,8 @@ fn default_max_tokens() -> u64 {
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct NativePricingConfig {
-    /// Per-modal USD price for an async job (fal / Replicate). Keyed by the
-    /// model id as the client names it. A budgeted key using a model not listed
-    /// here is rejected rather than metered at $0.
+    /// Ignored legacy per-model job prices, retained only to parse old configs.
+    /// Not actual billing evidence; setting these never enables capped jobs.
     #[serde(default)]
     pub jobs: HashMap<String, f64>,
 }
@@ -1219,6 +1216,13 @@ impl AppConfig {
     ) -> Result<Self, ConfigError> {
         let mut config: AppConfig = builder.build()?.try_deserialize()?;
 
+        if !config.native_pricing.jobs.is_empty() {
+            tracing::warn!(
+                "native_pricing.jobs is an ignored legacy setting; it does not establish \
+                 actual billing or enable budgeted native jobs. Capped native jobs remain disabled."
+            );
+        }
+
         // Merge legacy "upstream" into "providers" for backward compatibility
         if config.providers.is_empty() && !config.upstream.is_empty() {
             config.providers = config.upstream.clone();
@@ -1536,6 +1540,19 @@ fn keychain_help_text() -> &'static str {
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn config_schema_examples_deserialize_without_side_effects() {
+        // Deserialize only: never load config, resolve secrets, or start plugins/providers.
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../config/config.schema.json")).unwrap();
+        let examples = schema["examples"].as_array().unwrap();
+        assert!(examples.len() >= 2);
+        for example in examples {
+            serde_json::from_value::<AppConfig>(example.clone()).unwrap();
+        }
+        toml::from_str::<AppConfig>(include_str!("../config/config.example.toml")).unwrap();
+    }
 
     #[test]
     fn delegated_fetch_config_defaults_to_deny_and_parses_allowlist() {
