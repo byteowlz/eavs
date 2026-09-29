@@ -147,6 +147,56 @@ fn sanitize_delegated_fetch_body(
     }
 }
 
+// Operator rewrites do not grant tenant delegated-fetch permission.
+fn apply_policy_and_sanitize(
+    body: &mut Value,
+    policy: &crate::policy::PolicyConfig,
+    provider: &str,
+    path: &str,
+    delegated_fetch: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+    correlation_id: &str,
+) -> Result<(), crate::policy::PolicyViolation> {
+    policy.apply(provider, path, body)?;
+    sanitize_delegated_fetch_body(body, delegated_fetch, analysis_tx, correlation_id);
+    Ok(())
+}
+
+fn sanitize_codex_ws_message(
+    message: AxumWsMessage,
+    policy: &crate::policy::PolicyConfig,
+    provider: &str,
+    delegated_fetch: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+) -> Option<TungsteniteMessage> {
+    let payload = match &message {
+        AxumWsMessage::Text(text) => text.as_bytes(),
+        AxumWsMessage::Binary(bytes) => bytes.as_slice(),
+        _ => return axum_to_tungstenite(message),
+    };
+    let mut body = parse_and_sanitize_ws_json(payload, delegated_fetch, analysis_tx)?;
+    if body.get("type").and_then(Value::as_str) == Some("response.create") {
+        if let Err(error) = apply_policy_and_sanitize(
+            &mut body,
+            policy,
+            provider,
+            "/codex/responses",
+            delegated_fetch,
+            analysis_tx,
+            &Uuid::new_v4().to_string(),
+        ) {
+            tracing::warn!("Policy violation on Codex WS: {}", error.message);
+            return None;
+        }
+    }
+    match message {
+        AxumWsMessage::Text(_) => Some(TungsteniteMessage::Text(body.to_string())),
+        _ => serde_json::to_vec(&body)
+            .ok()
+            .map(TungsteniteMessage::Binary),
+    }
+}
+
 fn parse_and_sanitize_ws_json(
     payload: &[u8],
     policy: &crate::delegated_fetch::DelegatedFetchPolicy,
@@ -718,13 +768,9 @@ async fn proxy_handler_inner(
     }
     // Native providers use incompatible or non-token billing units. Until cost
     // adapters exist, a virtual key's budget/TPM must not silently be bypassed.
-    //
-    // Exception: the /v1/eavs/rerank bridge returns real token usage from the
-    // upstream (Cohere input/output, Voyage total), which we meter through the
-    // cost calculator and record against the key, so budgeted/TPM keys are
-    // allowed on that shape.
+    // Canonical rerank is not an exception: reported units are not a verified
+    // pricing contract and durable accounting is not implemented (eavs-avm8).
     if is_native_inference
-        && api_path != "/v1/eavs/rerank"
         && validated_key.as_ref().is_some_and(|key| {
             key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
         })
@@ -787,11 +833,15 @@ async fn proxy_handler_inner(
     }
 
     // Apply policy rules (deny/rewrite/filter) after injection.
-    if let Err(err) = state
-        .config
-        .policy
-        .apply(&provider_name, parts.uri.path(), &mut json_body)
-    {
+    if let Err(err) = apply_policy_and_sanitize(
+        &mut json_body,
+        &state.config.policy,
+        &provider_name,
+        parts.uri.path(),
+        &delegated_fetch_policy,
+        &state.analysis_tx,
+        &correlation_id,
+    ) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ProxyError::new(err.message, "policy_violation")),
@@ -1704,52 +1754,9 @@ async fn proxy_handler_inner(
                 .into_response());
         }
 
-        // Meter rerank against the upstream's *real* reported usage (never
-        // fabricated from bytes). Cohere reports usage.input_tokens/output_tokens;
-        // Voyage reports usage.total_tokens. A budgeted/TPM key whose usage we
-        // cannot read is charged nothing here (it was already validated to be
-        // under budget), but is still recorded so usage/TPM history is accurate.
-        if let Some(vk) = validated_key.as_ref() {
-            let input = result
-                .pointer("/usage/input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u32;
-            let output = result
-                .pointer("/usage/output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u32;
-            // Voyage: total_tokens only.
-            let (input, output) = if input == 0 && output == 0 {
-                if let Some(total) = result.pointer("/usage/total_tokens").and_then(Value::as_u64)
-                {
-                    (0, total as u32)
-                } else {
-                    (0, 0)
-                }
-            } else {
-                (input, output)
-            };
-            let cost = if let Some(calc) = state.get_cost_calculator() {
-                calc.calculate_detailed_cost(&model, &provider_name, input, 0, 0, output)
-                    .await
-            } else {
-                0.0
-            };
-            if let Some(validator) = state.get_key_validator() {
-                validator
-                    .record_usage(
-                        &vk.key_hash,
-                        input,
-                        output,
-                        0,
-                        0,
-                        cost,
-                        &model,
-                        &provider_name,
-                    )
-                    .await;
-            }
-        }
+        // Preserve upstream usage verbatim, including absent/unknown usage.
+        // Do not reinterpret search units or total_tokens as output tokens or
+        // bill them with chat pricing. Capped keys were rejected before dispatch.
         return Ok(Json(result).into_response());
     }
 
@@ -3414,51 +3421,13 @@ async fn codex_ws_handler_inner(
         let upstream_tx_client = upstream_tx.clone();
         let client_to_upstream = tokio::spawn(async move {
             while let Some(Ok(msg)) = client_receiver.next().await {
-                let processed = match &msg {
-                    AxumWsMessage::Text(text) => {
-                        let Some(mut json) = parse_and_sanitize_ws_json(
-                            text.as_bytes(),
-                            &delegated_fetch_policy,
-                            &delegated_fetch_analysis_tx,
-                        ) else {
-                            continue;
-                        };
-                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
-                            if let Err(e) = policy.apply(
-                                &provider_name_for_policy,
-                                "/codex/responses",
-                                &mut json,
-                            ) {
-                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
-                                continue;
-                            }
-                        }
-                        Some(TungsteniteMessage::Text(json.to_string()))
-                    }
-                    AxumWsMessage::Binary(bytes) => {
-                        let Some(mut json) = parse_and_sanitize_ws_json(
-                            bytes,
-                            &delegated_fetch_policy,
-                            &delegated_fetch_analysis_tx,
-                        ) else {
-                            continue;
-                        };
-                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
-                            if let Err(e) = policy.apply(
-                                &provider_name_for_policy,
-                                "/codex/responses",
-                                &mut json,
-                            ) {
-                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
-                                continue;
-                            }
-                        }
-                        serde_json::to_vec(&json)
-                            .ok()
-                            .map(TungsteniteMessage::Binary)
-                    }
-                    _ => axum_to_tungstenite(msg),
-                };
+                let processed = sanitize_codex_ws_message(
+                    msg,
+                    &policy,
+                    &provider_name_for_policy,
+                    &delegated_fetch_policy,
+                    &delegated_fetch_analysis_tx,
+                );
 
                 let Some(up_msg) = processed else {
                     continue;
@@ -3684,7 +3653,7 @@ fn is_openai_codex_oauth_token(api_key: &str) -> bool {
 }
 
 /// Extract account ID from OpenAI OAuth JWT token.
-/// The account ID is stored in the JWT claims under "https://api.openai.com/auth"
+/// The account ID is stored in the JWT claims under `https://api.openai.com/auth`
 fn extract_openai_account_id(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
     let parts: Vec<&str> = token.split('.').collect();
@@ -6087,73 +6056,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budgeted_key_rerank_is_metered_with_real_usage() {
+    async fn capped_rerank_denied_before_upstream_uncapped_usage_preserved() {
         use crate::keys::{CreateKeyRequest, KeyPermissions, KeyValidator, RateLimiter};
-        // Cohere rerank returns real usage; a budgeted key must be allowed and
-        // metered (not fail-closed) against that usage.
-        let value = json!({
-            "results": [{"index":0,"relevance_score":0.9}],
-            "usage": {"input_tokens": 100, "output_tokens": 5}
-        });
-        let mock = MockUpstream::new(vec![ResponseSpec {
-            status: StatusCode::OK,
-            headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&value).unwrap())],
-        }]);
-        let mut providers = HashMap::new();
-        providers.insert(
-            "cohere".into(),
-            ProviderConfig {
-                type_: "cohere".into(),
-                base_url: "http://up".into(),
-                api_key: "secret".into(),
-                ..Default::default()
-            },
-        );
-        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
-        let store = Arc::new(KeyStore::in_memory().await.unwrap());
-        let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
-        state.key_validator.set(Arc::new(validator)).ok().unwrap();
-        state.key_store.set(store.clone()).ok().unwrap();
-        state
-            .cost_calculator
-            .set(CostCalculator::new(state.pricing.clone()))
-            .ok()
-            .unwrap();
-        let key = store
-            .create_key(CreateKeyRequest {
-                permissions: KeyPermissions {
+        for provider in ["cohere", "voyage"] {
+            for permissions in [
+                KeyPermissions {
                     max_budget_usd: Some(1.0),
                     ..Default::default()
                 },
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .key;
-        let app = Router::new()
-            .route("/:provider/v1/*path", any(provider_proxy_handler))
-            .with_state(state);
-        let response = app
-            .oneshot(
-                http::Request::builder()
-                    .method("POST")
-                    .uri("/cohere/v1/eavs/rerank")
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .header("authorization", format!("Bearer {key}"))
-                    .body(Body::from(
-                        json!({"model":"rerank-v3.5","query":"q","documents":["a"]})
-                            .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let settled = store.get_by_key(&key).unwrap();
-        assert_eq!(settled.usage.total_input_tokens, 100);
-        assert_eq!(settled.usage.total_output_tokens, 5);
-        assert!(settled.usage.total_spend_usd > 0.0);
+                KeyPermissions {
+                    tpm_limit: Some(1000),
+                    ..Default::default()
+                },
+                KeyPermissions::default(),
+            ] {
+                let capped =
+                    permissions.max_budget_usd.is_some() || permissions.tpm_limit.is_some();
+                let mut value = json!({
+                    "results": [{"index":0,"relevance_score":0.9}],
+                    "usage": {"total_tokens": 100},
+                    "meta": {"billed_units": {"search_units": 1}}
+                });
+                if provider == "voyage" {
+                    value["data"] = value.as_object_mut().unwrap().remove("results").unwrap();
+                }
+                let mock = MockUpstream::new(vec![ResponseSpec {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    chunks: vec![Bytes::from(serde_json::to_vec(&value).unwrap())],
+                }]);
+                let mut providers = HashMap::new();
+                providers.insert(
+                    "cohere".into(),
+                    ProviderConfig {
+                        type_: "cohere".into(),
+                        base_url: "http://up".into(),
+                        api_key: "secret".into(),
+                        ..Default::default()
+                    },
+                );
+                let mut provider_config = providers.remove("cohere").unwrap();
+                provider_config.type_ = provider.into();
+                providers.insert(provider.into(), provider_config);
+                let state =
+                    AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+                let store = Arc::new(KeyStore::in_memory().await.unwrap());
+                let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
+                state.key_validator.set(Arc::new(validator)).ok().unwrap();
+                state.key_store.set(store.clone()).ok().unwrap();
+                state
+                    .cost_calculator
+                    .set(CostCalculator::new(state.pricing.clone()))
+                    .ok()
+                    .unwrap();
+                let key = store
+                    .create_key(CreateKeyRequest {
+                        permissions,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .key;
+                let app = Router::new()
+                    .route("/:provider/v1/*path", any(provider_proxy_handler))
+                    .with_state(state);
+                let response = app
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/{provider}/v1/eavs/rerank"))
+                            .header(http::header::CONTENT_TYPE, "application/json")
+                            .header("authorization", format!("Bearer {key}"))
+                            .body(Body::from(
+                                json!({"model":"rerank-v3.5","query":"q","documents":["a"]})
+                                    .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if capped {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::OK
+                    }
+                );
+                let body: Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let requests = mock.take_requests().await;
+                if capped {
+                    assert!(requests.is_empty());
+                    assert_eq!(body["error"]["type"], "unsupported_metering");
+                } else {
+                    assert_eq!(requests.len(), 1);
+                    assert_eq!(body["usage"], value["usage"]);
+                    assert_eq!(body["meta"], value["meta"]);
+                    assert!(body["results"].is_array());
+                }
+                let settled = store.get_by_key(&key).unwrap();
+                assert_eq!(settled.usage.total_input_tokens, 0);
+                assert_eq!(settled.usage.total_output_tokens, 0);
+                assert_eq!(settled.usage.total_spend_usd, 0.0);
+            }
+        }
     }
 
     #[tokio::test]
@@ -6502,7 +6513,9 @@ mod tests {
             },
         );
 
-        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let mut config = make_config(providers);
+        config.delegated_fetch.enabled = true;
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
         let app = Router::new()
             .route("/v1/*path", any(proxy_handler))
             .with_state(state);
@@ -7389,6 +7402,209 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             11
         );
+    }
+
+    #[test]
+    fn websocket_remote_images_and_policy_injection_are_sanitized() {
+        let input = json!([{"role":"user","content":[
+            {"type":"input_text","text":"describe"},
+            {"type":"input_image","image_url":"https://private.example/image"},
+            {"type":"input_image","image_url":"data:image/png;base64,AQID"}
+        ]}]);
+        let policy = crate::policy::PolicyConfig {
+            enabled: true,
+            rules: vec![crate::policy::PolicyRule::SetField {
+                provider: None,
+                model: None,
+                path: None,
+                field: "input".into(),
+                value: input.clone(),
+            }],
+        };
+        let (tx, mut audit) = tokio::sync::broadcast::channel(32);
+        let no_policy = crate::policy::PolicyConfig::default();
+        for binary in [false, true] {
+            for rewrite in [false, true] {
+                let body = json!({"type":"response.create", "input":input});
+                let message = if binary {
+                    AxumWsMessage::Binary(serde_json::to_vec(&body).unwrap())
+                } else {
+                    AxumWsMessage::Text(body.to_string())
+                };
+                let result = sanitize_codex_ws_message(
+                    message,
+                    if rewrite { &policy } else { &no_policy },
+                    "openai-codex",
+                    &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+                    &tx,
+                )
+                .unwrap();
+                let value: Value = match result {
+                    TungsteniteMessage::Text(text) => {
+                        assert!(!binary);
+                        serde_json::from_str(&text).unwrap()
+                    }
+                    TungsteniteMessage::Binary(bytes) => {
+                        assert!(binary);
+                        serde_json::from_slice(&bytes).unwrap()
+                    }
+                    _ => panic!("expected JSON frame"),
+                };
+                let content = value["input"][0]["content"].as_array().unwrap();
+                assert_eq!(content.len(), 2);
+                assert_eq!(content[0], input[0]["content"][0]);
+                assert_eq!(content[1], input[0]["content"][2]);
+            }
+        }
+        let mut stripped = 0;
+        while let Ok(event) = audit.try_recv() {
+            if let AnalysisEvent::DelegatedFetchStripped { target_host, .. } = event {
+                assert_eq!(target_host.as_deref(), Some("private.example"));
+                stripped += 1;
+            }
+        }
+        assert_eq!(stripped, 6); // Four inbound strips, two policy reinjections.
+    }
+
+    #[tokio::test]
+    async fn e2e_remote_media_policy_preserves_inline_native_shapes() {
+        use crate::keys::{CreateKeyRequest, KeyValidator, RateLimiter};
+        let remote = "https://private.example/media";
+        for (provider, path, body, parts_path) in [
+            (
+                "openai-compatible",
+                "chat/completions",
+                json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                    {"type":"text","text":"describe"},
+                    {"type":"image_url","image_url":{"url":remote}},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}
+                ]}]}),
+                "/messages/0/content",
+            ),
+            (
+                "openai-compatible",
+                "responses",
+                json!({"model":"gpt-5","input":[{"role":"user","content":[
+                    {"type":"input_text","text":"describe"},
+                    {"type":"input_image","image_url":remote},
+                    {"type":"input_image","image_url":"data:image/png;base64,AQID"}
+                ]}]}),
+                "/input/0/content",
+            ),
+            (
+                "anthropic",
+                "messages",
+                json!({"model":"claude-opus-4-6","max_tokens":32,"messages":[{"role":"user","content":[
+                    {"type":"text","text":"describe"},
+                    {"type":"image","source":{"type":"url","url":remote}},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}
+                ]}]}),
+                "/messages/0/content",
+            ),
+            (
+                "google",
+                "models/gemini-2.5-pro:generateContent",
+                json!({"contents":[{"role":"user","parts":[
+                    {"text":"describe"},
+                    {"fileData":{"mimeType":"image/png","fileUri":remote}},
+                    {"inlineData":{"mimeType":"image/png","data":"AQID"}}
+                ]}]}),
+                "/contents/0/parts",
+            ),
+        ] {
+            let mock = MockUpstream::new(
+                (0..2)
+                    .map(|_| ResponseSpec {
+                        status: StatusCode::OK,
+                        headers: HeaderMap::new(),
+                        chunks: vec![Bytes::from_static(b"{}")],
+                    })
+                    .collect(),
+            );
+            let providers = HashMap::from([(
+                "test".into(),
+                ProviderConfig {
+                    type_: provider.into(),
+                    base_url: "http://up/v1".into(),
+                    api_key: "secret".into(),
+                    ..Default::default()
+                },
+            )]);
+            let mut config = make_config(providers);
+            // A tenant must not inherit the permissive process fallback or
+            // media injected by an operator body-mutating policy.
+            config.delegated_fetch.enabled = true;
+            let field = parts_path.split('/').nth(1).unwrap();
+            config.policy = crate::policy::PolicyConfig {
+                enabled: true,
+                rules: vec![crate::policy::PolicyRule::SetField {
+                    provider: None,
+                    model: None,
+                    path: None,
+                    field: field.into(),
+                    value: body[field].clone(),
+                }],
+            };
+            let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+            let store = Arc::new(KeyStore::in_memory().await.unwrap());
+            state
+                .key_validator
+                .set(Arc::new(KeyValidator::new(
+                    store.clone(),
+                    Arc::new(RateLimiter::new()),
+                )))
+                .ok()
+                .unwrap();
+            let mut audit = state.analysis_tx.subscribe();
+            let app = Router::new()
+                .route("/:provider/v1/*path", any(provider_proxy_handler))
+                .with_state(state);
+            for allowed in [false, true] {
+                let key = store
+                    .create_key(CreateKeyRequest {
+                        metadata: json!({"delegated_fetch":{"remote_content":allowed}}),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .key;
+                let response = app
+                    .clone()
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/test/v1/{path}"))
+                            .header("content-type", "application/json")
+                            .header("authorization", format!("Bearer {key}"))
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{provider}: {allowed}");
+                let requests = mock.take_requests().await;
+                assert_eq!(requests.len(), 1, "No gateway fetch may occur");
+                assert_eq!(requests[0].method, Method::POST);
+                let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+                let mut expected = body.clone();
+                if !allowed {
+                    expected
+                        .pointer_mut(parts_path)
+                        .unwrap()
+                        .as_array_mut()
+                        .unwrap()
+                        .remove(1);
+                }
+                assert_eq!(sent, expected, "{provider}: {allowed}");
+            }
+            let mut stripped = false;
+            while let Ok(event) = audit.try_recv() {
+                if let AnalysisEvent::DelegatedFetchStripped { target_host, .. } = event {
+                    stripped |= target_host.as_deref() == Some("private.example");
+                }
+            }
+            assert!(stripped, "{provider}: missing denial audit");
+        }
     }
 
     #[tokio::test]

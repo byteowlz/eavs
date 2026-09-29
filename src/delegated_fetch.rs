@@ -15,7 +15,7 @@ pub struct DelegatedFetchPolicy {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DelegatedFetchConfig {
-    /// Permit remote `input_file.file_url` content.
+    /// Permit provider-delegated remote file, image, and document content.
     pub enabled: bool,
     /// Provider-hosted tool types allowed through, for example `web_search`.
     pub allowed_server_tools: Vec<String>,
@@ -53,13 +53,11 @@ pub struct StrippedItem {
     pub target_host: Option<String>,
 }
 
-/// Remove delegated-fetch capabilities from an OpenAI-compatible request.
+/// Remove known delegated-fetch capabilities from provider request bodies.
 ///
-/// The function is protocol-aware: it handles the top-level OpenAI Responses
-/// shape (input/tools/tool_choice) as well as the OpenAI Realtime WebSocket
-/// protocol (session.tools and conversation.item.create item.content), so a
-/// provider cannot perform a server-side fetch or run a hosted tool outside
-/// EAVS's network ACL on any code path.
+/// Covers OpenAI Chat/Responses, Anthropic and Google media content, including
+/// HTTP and Realtime/Codex envelopes. Hosted-tool handling covers top-level
+/// tools and Realtime session.update. This is not a general URL scanner.
 ///
 /// The function deliberately mutates only known capability surfaces. Bodies
 /// without those surfaces remain byte-for-byte equivalent when serialized.
@@ -67,7 +65,7 @@ pub fn sanitize(body: &mut Value, policy: &DelegatedFetchPolicy) -> Vec<Stripped
     let mut stripped = Vec::new();
 
     if !policy.allow_remote_content {
-        sanitize_remote_input_files(body, &mut stripped);
+        sanitize_remote_media(body, &mut stripped, "");
     }
 
     let removed_tool_types = sanitize_server_tools(body, policy, &mut stripped);
@@ -76,77 +74,109 @@ pub fn sanitize(body: &mut Value, policy: &DelegatedFetchPolicy) -> Vec<Stripped
     // Realtime WebSocket protocol surfaces.
     match body.get("type").and_then(Value::as_str) {
         Some("session.update") => sanitize_realtime_session_update(body, policy, &mut stripped),
-        Some("conversation.item.create") => {
-            sanitize_realtime_item_create(body, policy, &mut stripped)
-        }
         _ => {}
     }
 
     stripped
 }
 
-fn sanitize_remote_input_files(body: &mut Value, stripped: &mut Vec<StrippedItem>) {
-    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
-        return;
-    };
-
-    strip_remote_input_files_from_array(input, stripped, "/input");
+/// Walk only protocol content/envelope fields, never arbitrary metadata,
+/// tool schemas, arguments, or text. Original array indices are retained in
+/// audit paths even when earlier siblings are removed.
+fn sanitize_remote_media(body: &mut Value, stripped: &mut Vec<StrippedItem>, prefix: &str) {
+    sanitize_media_arrays(
+        body,
+        stripped,
+        prefix,
+        &["input", "messages", "contents", "content", "parts"],
+    );
+    // Realtime item/response envelopes and wrapped HTTP/Codex requests.
+    for field in ["item", "response", "request", "session"] {
+        if let Some(envelope) = body.get_mut(field).filter(|value| value.is_object()) {
+            sanitize_remote_media(envelope, stripped, &format!("{prefix}/{field}"));
+        }
+    }
 }
 
-/// Strip remote input files from a list of content/items, recording each one.
-///
-/// Used for both the top-level `input` array (OpenAI Responses) and the
-/// Realtime `conversation.item.create` `item.content` array.
-fn strip_remote_input_files_from_array(
-    items: &mut Vec<Value>,
+fn sanitize_media_arrays(
+    body: &mut Value,
     stripped: &mut Vec<StrippedItem>,
-    field_prefix: &str,
+    prefix: &str,
+    fields: &[&str],
 ) {
-    let original = std::mem::take(items);
-    for (input_index, mut item) in original.into_iter().enumerate() {
-        if is_remote_input_file(&item) {
-            stripped.push(remote_file_audit_item(
-                &item,
-                format!("{field_prefix}/{input_index}/file_url"),
-            ));
-            continue;
-        }
-
-        if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
-            let original_content = std::mem::take(content);
-            for (content_index, content_item) in original_content.into_iter().enumerate() {
-                if is_remote_input_file(&content_item) {
-                    stripped.push(remote_file_audit_item(
-                        &content_item,
-                        format!("{field_prefix}/{input_index}/content/{content_index}/file_url"),
-                    ));
+    for field in fields {
+        if let Some(items) = body.get_mut(*field).and_then(Value::as_array_mut) {
+            let original = std::mem::take(items);
+            for (index, mut item) in original.into_iter().enumerate() {
+                let path = format!("{prefix}/{field}/{index}");
+                let references = remote_media_references(&item);
+                if references.is_empty() {
+                    // Only message/content containers may nest content. In
+                    // particular, never interpret function-call JSON as a request.
+                    if matches!(
+                        item.get("type").and_then(Value::as_str),
+                        None | Some("message" | "tool_result")
+                    ) {
+                        sanitize_media_arrays(&mut item, stripped, &path, &["content", "parts"]);
+                    }
+                    items.push(item);
                 } else {
-                    content.push(content_item);
+                    for (suffix, capability, uri) in references {
+                        stripped.push(StrippedItem {
+                            field_path: format!("{path}{suffix}"),
+                            capability: capability.to_string(),
+                            target_host: url::Url::parse(uri)
+                                .ok()
+                                .and_then(|url| url.host_str().map(ToString::to_string)),
+                        });
+                    }
                 }
             }
         }
-
-        items.push(item);
     }
 }
 
-fn is_remote_input_file(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("input_file")
-        && value.get("file_url").and_then(Value::as_str).is_some()
-}
-
-fn remote_file_audit_item(value: &Value, field_path: String) -> StrippedItem {
-    let file_url = value
-        .get("file_url")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    StrippedItem {
-        field_path,
-        capability: "input_file.file_url".to_string(),
-        target_host: url::Url::parse(file_url)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(ToString::to_string)),
+/// Fail closed for non-inline URI strings, including non-HTTP provider storage
+/// schemes and malformed URLs. URL parsing is for audit hosts, not permission.
+fn remote_media_references(value: &Value) -> Vec<(&'static str, &'static str, &str)> {
+    let mut references = Vec::new();
+    let mut add = |path, capability| {
+        if let Some(uri) = value.pointer(path).and_then(Value::as_str) {
+            if !uri
+                .trim_start()
+                .get(..5)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+            {
+                references.push((path, capability, uri));
+            }
+        }
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("input_file") => add("/file_url", "input_file.file_url"),
+        Some("input_image") => {
+            add("/image_url", "input_image.image_url");
+            add("/image_url/url", "input_image.image_url");
+        }
+        Some("image_url") => {
+            add("/image_url/url", "image_url.url");
+            add("/image_url", "image_url.url");
+        }
+        Some("image" | "document")
+            if value.pointer("/source/type").and_then(Value::as_str) == Some("url") =>
+        {
+            add("/source/url", "source.url");
+        }
+        _ => {}
     }
+    for (path, capability) in [
+        ("/fileData/fileUri", "fileData.fileUri"),
+        ("/fileData/file_uri", "fileData.file_uri"),
+        ("/file_data/file_uri", "file_data.file_uri"),
+        ("/file_data/fileUri", "file_data.fileUri"),
+    ] {
+        add(path, capability);
+    }
+    references
 }
 
 fn sanitize_server_tools(
@@ -221,25 +251,6 @@ fn sanitize_realtime_session_update(
     }
 }
 
-/// Strip remote `input_file.file_url` under a Realtime
-/// `conversation.item.create` frame's `item.content`.
-fn sanitize_realtime_item_create(
-    body: &mut Value,
-    policy: &DelegatedFetchPolicy,
-    stripped: &mut Vec<StrippedItem>,
-) {
-    if policy.allow_remote_content {
-        return;
-    }
-
-    let Some(item) = body.get_mut("item") else {
-        return;
-    };
-    if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
-        strip_remote_input_files_from_array(content, stripped, "/item/content");
-    }
-}
-
 /// Function/custom tools execute client-side. Typed tools outside that set are
 /// provider-hosted and therefore bypass EAVS's egress controls unless allowed.
 fn is_server_side_tool(tool_type: &str) -> bool {
@@ -288,6 +299,141 @@ fn normalize_tool_choice(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn remote_media_matrix_across_http_realtime_and_codex_envelopes() {
+        let cases = [
+            (
+                json!({"type":"image_url","image_url":{"url":"https://media.example/a?secret=x"}}),
+                "/image_url/url",
+                "image_url.url",
+            ),
+            (
+                json!({"type":"input_image","image_url":"https://media.example/a"}),
+                "/image_url",
+                "input_image.image_url",
+            ),
+            (
+                json!({"type":"image","source":{"type":"url","url":"https://media.example/a"}}),
+                "/source/url",
+                "source.url",
+            ),
+            (
+                json!({"type":"document","source":{"type":"url","url":"https://media.example/a"}}),
+                "/source/url",
+                "source.url",
+            ),
+            (
+                json!({"fileData":{"fileUri":"gs://media.example/a"}}),
+                "/fileData/fileUri",
+                "fileData.fileUri",
+            ),
+            (
+                json!({"file_data":{"file_uri":"https://media.example/a"}}),
+                "/file_data/file_uri",
+                "file_data.file_uri",
+            ),
+        ];
+        for (part, suffix, capability) in cases {
+            for (mut body, prefix) in [
+                (
+                    json!({"messages":[{"content":[part.clone(), part.clone()]}]}),
+                    "/messages/0/content",
+                ),
+                (
+                    json!({"input":[{"content":[part.clone(), part.clone()]}]}),
+                    "/input/0/content",
+                ),
+                (
+                    json!({"contents":[{"parts":[part.clone(), part.clone()]}]}),
+                    "/contents/0/parts",
+                ),
+                (
+                    json!({"type":"conversation.item.create","item":{"content":[part.clone(), part.clone()]}}),
+                    "/item/content",
+                ),
+                (
+                    json!({"type":"response.create","response":{"input":[part.clone(), part.clone()]}}),
+                    "/response/input",
+                ),
+                (
+                    json!({"type":"response.create","input":[part.clone(), part.clone()]}),
+                    "/input",
+                ),
+                (
+                    json!({"request":{"contents":[{"parts":[part.clone(), part.clone()]}]}}),
+                    "/request/contents/0/parts",
+                ),
+            ] {
+                let original = body.clone();
+                let allowed = DelegatedFetchPolicy {
+                    allow_remote_content: true,
+                    ..Default::default()
+                };
+                assert!(sanitize(&mut body, &allowed).is_empty());
+                assert_eq!(body, original);
+                let audit = sanitize(&mut body, &deny_policy());
+                assert_eq!(audit.len(), 2, "{original}");
+                for (index, entry) in audit.iter().enumerate() {
+                    assert_eq!(entry.field_path, format!("{prefix}/{index}{suffix}"));
+                    assert_eq!(entry.capability, capability);
+                    assert_eq!(entry.target_host.as_deref(), Some("media.example"));
+                }
+                assert!(body.pointer(prefix).unwrap().as_array().unwrap().is_empty());
+                assert!(sanitize(&mut body, &deny_policy()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_inline_media_and_unrelated_url_shaped_data() {
+        let original = json!({
+            "messages": [{"content": [
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}},
+                {"type":"input_image","image_url":"DATA:image/png;base64,YQ=="},
+                {"type":"input_file","file_url":"data:application/pdf;base64,YQ=="},
+                {"type":"input_file","file_data":"YQ=="},
+                {"type":"image","source":{"type":"base64","data":"YQ=="}},
+                {"type":"document","source":{"type":"base64","data":"YQ=="}},
+                {"inlineData":{"mimeType":"image/png","data":"YQ=="}},
+                {"inline_data":{"mime_type":"image/png","data":"YQ=="}},
+                {"type":"text","text":"https://media.example/a"},
+                null, 42, "https://media.example/a",
+                {"type":"input_image","image_url":42},
+                {"type":"image","source":null},
+                {"type":"function_call","arguments":{"content":[{"type":"input_image","image_url":"https://media.example/a"}]},"content":[{"type":"input_image","image_url":"https://media.example/a"}]},
+                {"type":"tool_use","input":{"contents":[{"fileData":{"fileUri":"https://media.example/a"}}]}},
+                {"type":"function_call","arguments":"{\"image_url\":\"https://media.example/a\"}"}
+            ]}],
+            "metadata":{"input":[{"type":"input_image","image_url":"https://media.example/a"}]},
+            "tools":[{"type":"function","parameters":{"contents":[{"fileData":{"fileUri":"https://media.example/a"}}]}}]
+        });
+        let mut body = original.clone();
+        assert!(sanitize(&mut body, &deny_policy()).is_empty());
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn nested_tool_result_media_is_stripped_and_invalid_uri_fails_closed() {
+        let mut body = json!({"messages":[{"content":[{"type":"tool_result","content":[
+            {"type":"text","text":"keep"},
+            {"type":"image","source":{"type":"url","url":"not a valid URL"}},
+            {"type":"image","source":{"type":"url","url":"https://user:password@media.example/private?token=secret"}}
+        ]}]}]});
+        let audit = sanitize(&mut body, &deny_policy());
+        assert_eq!(audit.len(), 2);
+        assert_eq!(
+            audit[0].field_path,
+            "/messages/0/content/0/content/1/source/url"
+        );
+        assert_eq!(audit[0].target_host, None);
+        assert_eq!(audit[1].target_host.as_deref(), Some("media.example"));
+        assert!(!serde_json::to_string(&audit).unwrap().contains("secret"));
+        assert_eq!(
+            body["messages"][0]["content"][0]["content"],
+            json!([{"type":"text","text":"keep"}])
+        );
+    }
 
     fn deny_policy() -> DelegatedFetchPolicy {
         DelegatedFetchPolicy::default()
