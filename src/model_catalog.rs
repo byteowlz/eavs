@@ -1,6 +1,6 @@
 //! Model catalog backed by models.dev
 //!
-//! Fetches the full model catalog from https://models.dev/api.json and caches it locally.
+//! Fetches the full model catalog from <https://models.dev/api.json> and caches it locally.
 //! Used to enrich provider detail responses and power the `eavs models` CLI.
 
 use anyhow::{Context, Result};
@@ -22,7 +22,7 @@ pub struct CatalogProvider {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    /// API base URL (e.g., "https://api.minimax.io/anthropic/v1")
+    /// API base URL (e.g., `https://api.minimax.io/anthropic/v1`)
     #[serde(default)]
     pub api: Option<String>,
     /// Environment variable names for API keys (e.g., ["ANTHROPIC_API_KEY"])

@@ -8,19 +8,50 @@ help:
 
 # Format code
 fmt:
-    cargo fmt
+    cargo fmt --all
+
+# Check formatting without rewriting sources
+fmt-check:
+    cargo fmt --all -- --check
 
 # Check for errors
 check:
-    cargo check
+    cargo check --locked --all-targets
 
-# Run clippy lints
-lint:
-    cargo clippy
+# Strict lint gate; known source debt fails rather than being suppressed
+clippy:
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
-# Run tests
+# Alias for the strict lint gate
+lint: clippy
+
+# Scan all Rust sources (including tests); warning rules become failing errors
+lint-rust-ai-guardrails:
+    ast-grep scan --config .ast-grep/sgconfig.yml --error
+
+# Run default tests; integration tests require a live provider
 test:
-    cargo test
+    cargo test --locked
+
+# Explicit integration-feature compile gate (no live provider needed)
+check-all-features:
+    cargo check --locked --all-targets --all-features
+
+# Strict rustdoc gate for the manifest's rustdoc lint group
+doc-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+
+# Isolated standard-library tests for the config/schema copy helper
+test-tooling:
+    uv run scripts/test_copy_config_schema.py
+
+# Validate manual schema, example config and mapped field coverage
+validate-config:
+    uv run scripts/check_config_schema.py
+    uv run scripts/test_config_schema.py
+
+# Complete local gate; no baseline/continue-on-error exceptions
+check-all: fmt-check check-all-features clippy lint-rust-ai-guardrails doc-check test test-tooling validate-config
 
 # Build release binary
 build:
@@ -66,9 +97,7 @@ release-check:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Checking release readiness..."
-    cargo test --quiet
-    cargo clippy --quiet -- -D warnings
-    cargo fmt -- --check
+    just check-all
     echo "All checks passed!"
 
 # Update CHANGELOG for release

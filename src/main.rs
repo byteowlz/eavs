@@ -1,3 +1,9 @@
+//! Eavs inference gateway and command-line entry point.
+//!
+//! Routes requests to configured providers and exposes authenticated control
+//! operations. See the repository usage reference for supported protocols and
+//! the architecture decisions for planned provisioning boundaries.
+
 mod api;
 mod aws_credentials;
 mod aws_sigv4;
@@ -7,6 +13,7 @@ mod config;
 mod delegated_fetch;
 mod egress;
 mod export;
+mod jobs;
 mod keys;
 mod logging;
 mod mock_provider;
@@ -23,7 +30,6 @@ mod provider_probe;
 mod provider_store;
 mod provider_templates;
 mod proxy;
-mod jobs;
 mod runtime_state;
 mod setup;
 mod state;
@@ -869,9 +875,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             get(proxy::provider_ws_proxy_handler),
         )
         // ElevenLabs native realtime STT and streaming TTS.
-        .route("/:provider/v1/speech-to-text/realtime", get(proxy::provider_ws_proxy_handler))
-        .route("/:provider/v1/text-to-speech/:voice_id/stream-input", get(proxy::provider_voice_ws_proxy_handler))
-        .route("/:provider/v1/text-to-speech/:voice_id/multi-stream-input", get(proxy::provider_voice_ws_proxy_handler))
+        .route(
+            "/:provider/v1/speech-to-text/realtime",
+            get(proxy::provider_ws_proxy_handler),
+        )
+        .route(
+            "/:provider/v1/text-to-speech/:voice_id/stream-input",
+            get(proxy::provider_voice_ws_proxy_handler),
+        )
+        .route(
+            "/:provider/v1/text-to-speech/:voice_id/multi-stream-input",
+            get(proxy::provider_voice_ws_proxy_handler),
+        )
         // Codex Responses proxy - default route
         // GET is the WebSocket upgrade, POST the SSE transport (pi falls back
         // to SSE when the WebSocket is unavailable or connection-limited)
@@ -1110,14 +1125,8 @@ async fn run_cost_command(action: cli::CostCommands) -> Result<(), cli::CliError
             config,
         } => {
             let store = open_store(config).await?;
-            run_cost_by_owner_direct(
-                &store,
-                owner.as_deref(),
-                breakdown.as_deref(),
-                days,
-                format,
-            )
-            .await
+            run_cost_by_owner_direct(&store, owner.as_deref(), breakdown.as_deref(), days, format)
+                .await
         }
         CostCommands::ByKey {
             days,

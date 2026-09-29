@@ -1049,7 +1049,7 @@ fn parse_owner_breakdown(value: Option<&str>) -> (bool, bool) {
 
 /// Aggregate usage/cost grouped by owner across all keys.
 ///
-/// GET /admin/usage/by-owner[?owner=<name>]
+/// `GET /admin/usage/by-owner[?owner=<name>]`
 /// Authorization: Bearer <master_key>
 ///
 /// Rows with no owner are grouped under the empty-string bucket.

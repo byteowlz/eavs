@@ -56,3 +56,58 @@ integration = []
 
 [dev-dependencies]
 tempfile = "3.23.0"
+
+# Template maximum policy, staged for this existing codebase:
+# Keep debt visible as warnings in ordinary builds/tests so source remediation
+# can proceed separately. `just clippy`/CI promote ALL warnings to errors; there
+# is no passing baseline or suppression list. Once debt is resolved, promote
+# these levels to deny (unsafe_code to forbid, after reviewing capture.rs).
+# Existing debt includes public API docs, test unwraps, libc unsafe, process
+# exits, complexity and source allow attributes. No source files are excluded.
+[lints.rust]
+unsafe_code = "warn"
+non_ascii_idents = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+missing_copy_implementations = "warn"
+unfulfilled_lint_expectations = "warn"
+
+[lints.rustdoc]
+all = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+panic_in_result_fn = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+await_holding_lock = "warn"
+large_futures = "warn"
+exit = "warn"
+mem_forget = "warn"
+large_stack_arrays = "warn"
+large_types_passed_by_value = "warn"
+cognitive_complexity = "warn"
+# The template's cyclomatic_complexity alias is deprecated; cognitive_complexity
+# is its replacement and uses the threshold in clippy.toml.
+
+# Template exceptions retained with their original scope, not debt suppressions.
+multiple_crate_versions = "allow" # Transitive dependency graphs require duplicates.
+cast_possible_truncation = "allow" # Template numeric-cast policy.
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+print_stdout = "allow" # CLI output is intentional.
+print_stderr = "allow"
+struct_excessive_bools = "allow" # CLI option structs contain boolean flags.
