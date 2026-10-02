@@ -22,10 +22,10 @@ pub fn sign_request_headers(
     now: chrono::DateTime<chrono::Utc>,
     creds: &AwsCredentials,
 ) -> Result<(), String> {
-    let url = url::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
+    let url = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
 
     let host = match (url.host_str(), url.port()) {
-        (Some(h), Some(p)) => format!("{}:{}", h, p),
+        (Some(h), Some(p)) => format!("{h}:{p}"),
         (Some(h), None) => h.to_string(),
         (None, _) => return Err("missing host".to_string()),
     };
@@ -79,11 +79,9 @@ pub fn sign_request_headers(
     );
 
     let canonical_request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-    let credential_scope = format!("{}/{}/{}/aws4_request", date, region, service);
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date, credential_scope, canonical_request_hash
-    );
+    let credential_scope = format!("{date}/{region}/{service}/aws4_request");
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
 
     let signing_key = derive_signing_key(creds, &date, region, service);
 
@@ -113,7 +111,7 @@ fn canonical_query_string(url: &url::Url) -> String {
     pairs.sort();
     pairs
         .into_iter()
-        .map(|(k, v)| format!("{}={}", k, v))
+        .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -138,7 +136,7 @@ fn canonical_headers(headers: &HeaderMap) -> (String, String) {
 
     let canonical = items
         .into_iter()
-        .map(|(k, v)| format!("{}:{}\n", k, v))
+        .map(|(k, v)| format!("{k}:{v}\n"))
         .collect::<String>();
 
     (canonical, signed_headers)

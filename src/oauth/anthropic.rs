@@ -92,20 +92,20 @@ pub async fn exchange_code(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Token request failed: {}", e))?;
+        .map_err(|e| format!("Token request failed: {e}"))?;
 
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to read response: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("Token exchange failed ({}): {}", status, text));
+        return Err(format!("Token exchange failed ({status}): {text}"));
     }
 
     let token: TokenResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Token parse failed: {} - body: {}", e, text))?;
+        .map_err(|e| format!("Token parse failed: {e} - body: {text}"))?;
 
     Ok(token_to_credentials(user_id, token))
 }
@@ -132,20 +132,20 @@ pub async fn refresh_token(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Refresh request failed: {}", e))?;
+        .map_err(|e| format!("Refresh request failed: {e}"))?;
 
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read refresh response: {}", e))?;
+        .map_err(|e| format!("Failed to read refresh response: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("Token refresh failed ({}): {}", status, text));
+        return Err(format!("Token refresh failed ({status}): {text}"));
     }
 
     let token: TokenResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Refresh parse failed: {} - body: {}", e, text))?;
+        .map_err(|e| format!("Refresh parse failed: {e} - body: {text}"))?;
 
     Ok(token_to_credentials(user_id, token))
 }
@@ -175,6 +175,7 @@ fn token_to_credentials(user_id: &str, token: TokenResponse) -> OAuthCredentials
         extra_data: token
             .token_type
             .map(|t| serde_json::json!({"token_type": t})),
+        provenance: crate::oauth::types::CredentialProvenance::Owned,
     }
 }
 

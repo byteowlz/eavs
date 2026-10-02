@@ -1,6 +1,6 @@
 //! Model pricing data and cost calculation.
 //!
-//! Pricing data is sourced from LiteLLM's model_prices_and_context_window.json
+//! Pricing data is sourced from `LiteLLM`'s `model_prices_and_context_window.json`
 //! which is the most comprehensive and up-to-date source available.
 //!
 //! Data source: <https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json>
@@ -11,7 +11,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Pricing information for a single model.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
     /// Model identifier (e.g., "gpt-4o", "claude-3-opus")
@@ -32,7 +31,7 @@ pub struct ModelPricing {
 
     /// Cost per cache-write (cache-creation) input token. Only some providers
     /// (e.g. Anthropic) bill cache writes separately; `None`/absent means writes
-    /// are billed as ordinary input (e.g. OpenAI automatic caching).
+    /// are billed as ordinary input (e.g. `OpenAI` automatic caching).
     #[serde(default)]
     pub cache_write_cost_per_token: Option<f64>,
 
@@ -56,8 +55,10 @@ pub struct ModelPricing {
 impl ModelPricing {
     /// Calculate cost for a given number of input and output tokens.
     pub fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> f64 {
-        (input_tokens as f64 * self.input_cost_per_token)
-            + (output_tokens as f64 * self.output_cost_per_token)
+        f64::from(output_tokens).mul_add(
+            self.output_cost_per_token,
+            f64::from(input_tokens) * self.input_cost_per_token,
+        )
     }
 
     /// Calculate cost with cached (read) tokens.
@@ -72,14 +73,18 @@ impl ModelPricing {
             .cached_input_cost_per_token
             .unwrap_or(self.input_cost_per_token * 0.5); // Default 50% discount
 
-        (regular_input as f64 * self.input_cost_per_token)
-            + (cached_tokens as f64 * cached_cost)
-            + (output_tokens as f64 * self.output_cost_per_token)
+        f64::from(output_tokens).mul_add(
+            self.output_cost_per_token,
+            f64::from(cached_tokens).mul_add(
+                cached_cost,
+                f64::from(regular_input) * self.input_cost_per_token,
+            ),
+        )
     }
 
     /// Calculate cost distinguishing cache reads and cache writes.
     ///
-    /// `input_includes_cache` reflects the provider's usage convention: OpenAI /
+    /// `input_includes_cache` reflects the provider's usage convention: `OpenAI` /
     /// Google report a prompt-token count that *includes* cached tokens, so those
     /// are subtracted out; Anthropic reports `input_tokens` already *excluding*
     /// cache read/write, so nothing is subtracted.
@@ -107,10 +112,16 @@ impl ModelPricing {
             .cache_write_cost_per_token
             .unwrap_or(self.input_cost_per_token);
 
-        (regular_input as f64 * self.input_cost_per_token)
-            + (cache_read_tokens as f64 * read_rate)
-            + (cache_write_tokens as f64 * write_rate)
-            + (output_tokens as f64 * self.output_cost_per_token)
+        f64::from(output_tokens).mul_add(
+            self.output_cost_per_token,
+            f64::from(cache_write_tokens).mul_add(
+                write_rate,
+                f64::from(cache_read_tokens).mul_add(
+                    read_rate,
+                    f64::from(regular_input) * self.input_cost_per_token,
+                ),
+            ),
+        )
     }
 }
 
@@ -148,15 +159,24 @@ impl PricingTable {
 
     /// Load embedded pricing data (compiled into binary).
     fn load_embedded_data(&mut self) {
-        // Core OpenAI models
+        self.add_openai_models();
+        self.add_anthropic_models();
+        self.add_google_models();
+        self.add_mistral_models();
+        self.add_groq_models();
+
+        self.last_updated = Some(chrono::Utc::now());
+    }
+
+    fn add_openai_models(&mut self) {
         self.add_model(ModelPricing {
             model: "gpt-4o".into(),
             provider: "openai".into(),
-            input_cost_per_token: 0.0000025,
+            input_cost_per_token: 0.000_002_5,
             output_cost_per_token: 0.00001,
-            cached_input_cost_per_token: Some(0.00000125),
+            cached_input_cost_per_token: Some(0.000_001_25),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(128000),
+            max_input_tokens: Some(128_000),
             max_output_tokens: Some(16384),
             supports_vision: true,
             supports_function_calling: true,
@@ -164,11 +184,11 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "gpt-4o-mini".into(),
             provider: "openai".into(),
-            input_cost_per_token: 0.00000015,
-            output_cost_per_token: 0.0000006,
-            cached_input_cost_per_token: Some(0.000000075),
+            input_cost_per_token: 0.000_000_15,
+            output_cost_per_token: 0.000_000_6,
+            cached_input_cost_per_token: Some(0.000_000_075),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(128000),
+            max_input_tokens: Some(128_000),
             max_output_tokens: Some(16384),
             supports_vision: true,
             supports_function_calling: true,
@@ -180,7 +200,7 @@ impl PricingTable {
             output_cost_per_token: 0.00003,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(128000),
+            max_input_tokens: Some(128_000),
             max_output_tokens: Some(4096),
             supports_vision: true,
             supports_function_calling: true,
@@ -200,8 +220,8 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "gpt-3.5-turbo".into(),
             provider: "openai".into(),
-            input_cost_per_token: 0.0000005,
-            output_cost_per_token: 0.0000015,
+            input_cost_per_token: 0.000_000_5,
+            output_cost_per_token: 0.000_001_5,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
             max_input_tokens: Some(16385),
@@ -212,37 +232,38 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "o1".into(),
             provider: "openai".into(),
-            input_cost_per_token: 0.000015,
+            input_cost_per_token: 0.000_015,
             output_cost_per_token: 0.00006,
-            cached_input_cost_per_token: Some(0.0000075),
+            cached_input_cost_per_token: Some(0.000_007_5),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
-            max_output_tokens: Some(100000),
+            max_input_tokens: Some(200_000),
+            max_output_tokens: Some(100_000),
             supports_vision: true,
             supports_function_calling: true,
         });
         self.add_model(ModelPricing {
             model: "o1-mini".into(),
             provider: "openai".into(),
-            input_cost_per_token: 0.000003,
-            output_cost_per_token: 0.000012,
-            cached_input_cost_per_token: Some(0.0000015),
+            input_cost_per_token: 0.000_003,
+            output_cost_per_token: 0.000_012,
+            cached_input_cost_per_token: Some(0.000_001_5),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(128000),
+            max_input_tokens: Some(128_000),
             max_output_tokens: Some(65536),
             supports_vision: true,
             supports_function_calling: true,
         });
+    }
 
-        // Core Anthropic models
+    fn add_anthropic_models(&mut self) {
         self.add_model(ModelPricing {
             model: "claude-3-opus-20240229".into(),
             provider: "anthropic".into(),
-            input_cost_per_token: 0.000015,
-            output_cost_per_token: 0.000075,
-            cached_input_cost_per_token: Some(0.00001875),
+            input_cost_per_token: 0.000_015,
+            output_cost_per_token: 0.000_075,
+            cached_input_cost_per_token: Some(0.000_018_75),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(4096),
             supports_vision: true,
             supports_function_calling: true,
@@ -250,11 +271,11 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "claude-3-5-sonnet-20241022".into(),
             provider: "anthropic".into(),
-            input_cost_per_token: 0.000003,
-            output_cost_per_token: 0.000015,
-            cached_input_cost_per_token: Some(0.0000003),
+            input_cost_per_token: 0.000_003,
+            output_cost_per_token: 0.000_015,
+            cached_input_cost_per_token: Some(0.000_000_3),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(8192),
             supports_vision: true,
             supports_function_calling: true,
@@ -262,11 +283,11 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "claude-3-5-haiku-20241022".into(),
             provider: "anthropic".into(),
-            input_cost_per_token: 0.0000008,
-            output_cost_per_token: 0.000004,
-            cached_input_cost_per_token: Some(0.00000008),
+            input_cost_per_token: 0.000_000_8,
+            output_cost_per_token: 0.000_004,
+            cached_input_cost_per_token: Some(0.000_000_08),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(8192),
             supports_vision: true,
             supports_function_calling: true,
@@ -274,11 +295,11 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "claude-sonnet-4-5-20250929".into(),
             provider: "anthropic".into(),
-            input_cost_per_token: 0.000003,
-            output_cost_per_token: 0.000015,
-            cached_input_cost_per_token: Some(0.0000003),
+            input_cost_per_token: 0.000_003,
+            output_cost_per_token: 0.000_015,
+            cached_input_cost_per_token: Some(0.000_000_3),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(64000),
             supports_vision: true,
             supports_function_calling: true,
@@ -286,25 +307,26 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "claude-haiku-4-5-20251001".into(),
             provider: "anthropic".into(),
-            input_cost_per_token: 0.000001,
-            output_cost_per_token: 0.000005,
-            cached_input_cost_per_token: Some(0.0000001),
+            input_cost_per_token: 0.000_001,
+            output_cost_per_token: 0.000_005,
+            cached_input_cost_per_token: Some(0.000_000_1),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(200000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(64000),
             supports_vision: true,
             supports_function_calling: true,
         });
+    }
 
-        // Core Google models
+    fn add_google_models(&mut self) {
         self.add_model(ModelPricing {
             model: "gemini-1.5-pro".into(),
             provider: "google".into(),
-            input_cost_per_token: 0.00000125,
-            output_cost_per_token: 0.000005,
-            cached_input_cost_per_token: Some(0.0000003125),
+            input_cost_per_token: 0.000_001_25,
+            output_cost_per_token: 0.000_005,
+            cached_input_cost_per_token: Some(0.000_000_312_5),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(2097152),
+            max_input_tokens: Some(2_097_152),
             max_output_tokens: Some(8192),
             supports_vision: true,
             supports_function_calling: true,
@@ -312,11 +334,11 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "gemini-1.5-flash".into(),
             provider: "google".into(),
-            input_cost_per_token: 0.000000075,
-            output_cost_per_token: 0.0000003,
-            cached_input_cost_per_token: Some(0.00000001875),
+            input_cost_per_token: 0.000_000_075,
+            output_cost_per_token: 0.000_000_3,
+            cached_input_cost_per_token: Some(0.000_000_018_75),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(1048576),
+            max_input_tokens: Some(1_048_576),
             max_output_tokens: Some(8192),
             supports_vision: true,
             supports_function_calling: true,
@@ -324,25 +346,26 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "gemini-2.0-flash".into(),
             provider: "google".into(),
-            input_cost_per_token: 0.0000001,
-            output_cost_per_token: 0.0000004,
-            cached_input_cost_per_token: Some(0.000000025),
+            input_cost_per_token: 0.000_000_1,
+            output_cost_per_token: 0.000_000_4,
+            cached_input_cost_per_token: Some(0.000_000_025),
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(1048576),
+            max_input_tokens: Some(1_048_576),
             max_output_tokens: Some(8192),
             supports_vision: true,
             supports_function_calling: true,
         });
+    }
 
-        // Mistral models
+    fn add_mistral_models(&mut self) {
         self.add_model(ModelPricing {
             model: "mistral-large-latest".into(),
             provider: "mistral".into(),
-            input_cost_per_token: 0.000002,
-            output_cost_per_token: 0.000006,
+            input_cost_per_token: 0.000_002,
+            output_cost_per_token: 0.000_006,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(128000),
+            max_input_tokens: Some(128_000),
             max_output_tokens: Some(8192),
             supports_vision: false,
             supports_function_calling: true,
@@ -350,8 +373,8 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "mistral-small-latest".into(),
             provider: "mistral".into(),
-            input_cost_per_token: 0.0000002,
-            output_cost_per_token: 0.0000006,
+            input_cost_per_token: 0.000_000_2,
+            output_cost_per_token: 0.000_000_6,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
             max_input_tokens: Some(32000),
@@ -359,16 +382,17 @@ impl PricingTable {
             supports_vision: false,
             supports_function_calling: true,
         });
+    }
 
-        // Groq models (using their hosted inference)
+    fn add_groq_models(&mut self) {
         self.add_model(ModelPricing {
             model: "llama-3.1-70b-versatile".into(),
             provider: "groq".into(),
-            input_cost_per_token: 0.00000059,
-            output_cost_per_token: 0.00000079,
+            input_cost_per_token: 0.000_000_59,
+            output_cost_per_token: 0.000_000_79,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(131072),
+            max_input_tokens: Some(131_072),
             max_output_tokens: Some(8192),
             supports_vision: false,
             supports_function_calling: true,
@@ -376,17 +400,15 @@ impl PricingTable {
         self.add_model(ModelPricing {
             model: "llama-3.1-8b-instant".into(),
             provider: "groq".into(),
-            input_cost_per_token: 0.00000005,
-            output_cost_per_token: 0.00000008,
+            input_cost_per_token: 0.000_000_05,
+            output_cost_per_token: 0.000_000_08,
             cached_input_cost_per_token: None,
             cache_write_cost_per_token: None,
-            max_input_tokens: Some(131072),
+            max_input_tokens: Some(131_072),
             max_output_tokens: Some(8192),
             supports_vision: false,
             supports_function_calling: true,
         });
-
-        self.last_updated = Some(chrono::Utc::now());
     }
 
     /// Add a model to the pricing table.
@@ -427,11 +449,11 @@ impl PricingTable {
         self.get(model).cloned().unwrap_or_else(|| {
             // Return conservative default pricing based on provider
             let (input, output) = match provider.to_lowercase().as_str() {
-                "openai" => (0.00001, 0.00003),      // GPT-4 level as safe default
-                "anthropic" => (0.000003, 0.000015), // Claude 3 Sonnet level
-                "google" => (0.00000125, 0.000005),  // Gemini Pro level
-                "mistral" => (0.000002, 0.000006),   // Mistral Large level
-                _ => (0.00001, 0.00003),             // Conservative default
+                "anthropic" => (0.000_003, 0.000_015), // Claude 3 Sonnet level
+                "google" => (0.000_001_25, 0.000_005), // Gemini Pro level
+                "mistral" => (0.000_002, 0.000_006),   // Mistral Large level
+                // GPT-4 level safe default for OpenAI and unknown providers
+                _ => (0.00001, 0.00003),
             };
 
             ModelPricing {
@@ -441,7 +463,7 @@ impl PricingTable {
                 output_cost_per_token: output,
                 cached_input_cost_per_token: Some(input * 0.5),
                 cache_write_cost_per_token: None,
-                max_input_tokens: Some(128000),
+                max_input_tokens: Some(128_000),
                 max_output_tokens: Some(8192),
                 supports_vision: false,
                 supports_function_calling: true,
@@ -449,7 +471,7 @@ impl PricingTable {
         })
     }
 
-    /// Update pricing from LiteLLM's GitHub repository.
+    /// Update pricing from `LiteLLM`'s GitHub repository.
     pub async fn update_from_litellm(&mut self) -> Result<usize, PricingUpdateError> {
         let url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -459,16 +481,16 @@ impl PricingTable {
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| PricingUpdateError::NetworkError(e.to_string()))?;
+            .map_err(|e| PricingUpdateError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(PricingUpdateError::HttpError(response.status().as_u16()));
+            return Err(PricingUpdateError::Http(response.status().as_u16()));
         }
 
         let data: HashMap<String, LiteLLMModel> = response
             .json()
             .await
-            .map_err(|e| PricingUpdateError::ParseError(e.to_string()))?;
+            .map_err(|e| PricingUpdateError::Parse(e.to_string()))?;
 
         let mut count = 0;
         for (model_name, model_data) in data {
@@ -514,19 +536,25 @@ impl PricingTable {
     }
 
     /// Check if the pricing table is empty.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Public API helper; retained for external consumers"
+    )]
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
 
     /// Get when the pricing data was last updated.
-    #[allow(dead_code)]
-    pub fn last_updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    #[expect(
+        dead_code,
+        reason = "Public API accessor; retained for external consumers"
+    )]
+    pub const fn last_updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.last_updated
     }
 }
 
-/// LiteLLM model data structure (for parsing their JSON).
+/// `LiteLLM` model data structure (for parsing their JSON).
 #[derive(Debug, Deserialize)]
 struct LiteLLMModel {
     litellm_provider: Option<String>,
@@ -542,19 +570,18 @@ struct LiteLLMModel {
 
 /// Errors that can occur when updating pricing data.
 #[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
 pub enum PricingUpdateError {
-    NetworkError(String),
-    HttpError(u16),
-    ParseError(String),
+    Network(String),
+    Http(u16),
+    Parse(String),
 }
 
 impl std::fmt::Display for PricingUpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NetworkError(e) => write!(f, "Network error: {}", e),
-            Self::HttpError(code) => write!(f, "HTTP error: {}", code),
-            Self::ParseError(e) => write!(f, "Parse error: {}", e),
+            Self::Network(e) => write!(f, "Network error: {e}"),
+            Self::Http(code) => write!(f, "HTTP error: {code}"),
+            Self::Parse(e) => write!(f, "Parse error: {e}"),
         }
     }
 }
@@ -580,7 +607,10 @@ impl SharedPricingTable {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Public API lookup; retained for external consumers"
+    )]
     pub async fn get(&self, model: &str) -> Option<ModelPricing> {
         self.inner.read().await.get(model).cloned()
     }
@@ -680,7 +710,7 @@ mod tests {
             provider: "test".into(),
             input_cost_per_token: 0.00001,
             output_cost_per_token: 0.00003,
-            cached_input_cost_per_token: Some(0.000005),
+            cached_input_cost_per_token: Some(0.000_005),
             cache_write_cost_per_token: None,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -700,7 +730,7 @@ mod tests {
             provider: "test".into(),
             input_cost_per_token: 0.00001,
             output_cost_per_token: 0.00003,
-            cached_input_cost_per_token: Some(0.000002), // 80% discount
+            cached_input_cost_per_token: Some(0.000_002), // 80% discount
             cache_write_cost_per_token: None,
             max_input_tokens: None,
             max_output_tokens: None,

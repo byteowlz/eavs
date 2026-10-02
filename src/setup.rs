@@ -33,7 +33,7 @@ enum TestOutcome {
 // Provider type choices for the interactive menu
 // =============================================================================
 
-/// (display_name, type_string, description)
+/// (`display_name`, `type_string`, description)
 const PROVIDER_CHOICES: &[(&str, &str, &str)] = &[
     ("OpenAI", "openai", "GPT-4o, GPT-4, o1, o3, etc."),
     ("Anthropic", "anthropic", "Claude Opus, Sonnet, Haiku, etc."),
@@ -77,7 +77,7 @@ const PROVIDER_CHOICES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Index in PROVIDER_CHOICES for the Azure AI Foundry entry
+/// Index in `PROVIDER_CHOICES` for the Azure AI Foundry entry
 const AZURE_FOUNDRY_IDX: usize = 8;
 
 /// Azure AI Foundry model family sub-choices (shown after selecting Foundry)
@@ -134,7 +134,7 @@ pub async fn run_setup_add(
                 .with_prompt("Add another provider?")
                 .default(false)
                 .interact()
-                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
             if !add_more {
                 break;
@@ -151,7 +151,7 @@ pub async fn run_setup_add(
 /// Lines starting with # are comments, empty lines are skipped.
 fn load_env_file(path: &str) -> Result<(), CliError> {
     let content = std::fs::read_to_string(path)
-        .map_err(|e| CliError::Other(format!("Cannot read env file {}: {}", path, e)))?;
+        .map_err(|e| CliError::Other(format!("Cannot read env file {path}: {e}")))?;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -173,21 +173,18 @@ fn load_env_file(path: &str) -> Result<(), CliError> {
 /// The TOML file should contain `[providers.<name>]` sections.
 fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Result<(), CliError> {
     let import_content = std::fs::read_to_string(import_path)
-        .map_err(|e| CliError::Other(format!("Cannot read import file {}: {}", import_path, e)))?;
+        .map_err(|e| CliError::Other(format!("Cannot read import file {import_path}: {e}")))?;
 
     // Parse the import file to extract provider sections
     let import_toml: toml::Value = import_content
         .parse()
-        .map_err(|e| CliError::Other(format!("Invalid TOML in {}: {}", import_path, e)))?;
+        .map_err(|e| CliError::Other(format!("Invalid TOML in {import_path}: {e}")))?;
 
     let providers = import_toml
         .get("providers")
         .and_then(|p| p.as_table())
         .ok_or_else(|| {
-            CliError::Other(format!(
-                "No [providers.*] sections found in {}",
-                import_path
-            ))
+            CliError::Other(format!("No [providers.*] sections found in {import_path}"))
         })?;
 
     // Read existing config to check for duplicates
@@ -198,9 +195,9 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
         if name == "default" {
             continue;
         }
-        let section = format!("[providers.{}]", name);
+        let section = format!("[providers.{name}]");
         if existing.contains(&section) {
-            println!("  {} -- already configured, skipping", name);
+            println!("  {name} -- already configured, skipping");
             continue;
         }
 
@@ -220,16 +217,16 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
                 CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
             })?;
         use std::io::Write;
-        writeln!(file, "{}", block).map_err(|e| {
+        writeln!(file, "{block}").map_err(|e| {
             CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
         })?;
 
         appended.push(name.clone());
-        println!("  Imported provider: {}", name);
+        println!("  Imported provider: {name}");
     }
 
     if appended.is_empty() {
-        println!("  No new providers to import from {}", import_path);
+        println!("  No new providers to import from {import_path}");
     } else {
         println!("  Imported {} provider(s)", appended.len());
 
@@ -249,7 +246,7 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
 /// Format a TOML value for writing to config.
 fn format_toml_value(value: &toml::Value) -> String {
     match value {
-        toml::Value::String(s) => format!("\"{}\"", s),
+        toml::Value::String(s) => format!("\"{s}\""),
         toml::Value::Integer(i) => i.to_string(),
         toml::Value::Float(f) => f.to_string(),
         toml::Value::Boolean(b) => b.to_string(),
@@ -289,10 +286,8 @@ fn set_default_from_imported(
         return Ok(());
     }
 
-    let default_block = format!(
-        "\n[providers.default]\ntype = \"{}\"\napi_key = \"{}\"\n",
-        type_, api_key
-    );
+    let default_block =
+        format!("\n[providers.default]\ntype = \"{type_}\"\napi_key = \"{api_key}\"\n");
 
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -301,11 +296,11 @@ fn set_default_from_imported(
             CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
         })?;
     use std::io::Write;
-    write!(file, "{}", default_block).map_err(|e| {
+    write!(file, "{default_block}").map_err(|e| {
         CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
     })?;
 
-    println!("  Set default provider: {}", name);
+    println!("  Set default provider: {name}");
     Ok(())
 }
 
@@ -350,9 +345,9 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
         }
 
         // Skip if already in config
-        let section = format!("[providers.{}]", provider_name);
+        let section = format!("[providers.{provider_name}]");
         if existing.contains(&section) {
-            println!("  {} -- already configured, skipping", display_name);
+            println!("  {display_name} -- already configured, skipping");
             continue;
         }
 
@@ -360,8 +355,7 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
         let should_add = if is_tty {
             Confirm::new()
                 .with_prompt(format!(
-                    "Configure {} ({} found in env)?",
-                    display_name, env_var
+                    "Configure {display_name} ({env_var} found in env)?"
                 ))
                 .default(true)
                 .interact()
@@ -376,7 +370,7 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
 
         let config = SetupProviderConfig {
             type_: provider_type.to_string(),
-            api_key: format!("env:{}", env_var),
+            api_key: format!("env:{env_var}"),
             base_url: None,
             api_version: None,
             deployment: None,
@@ -391,7 +385,7 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
         };
 
         save_provider_to_config(config_file, provider_name, &config)?;
-        println!("  Added {}", display_name);
+        println!("  Added {display_name}");
         added_count += 1;
 
         if first_provider.is_none() {
@@ -407,7 +401,7 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
                 .with_prompt("Add a custom provider?")
                 .default(false)
                 .interact()
-                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
             if !add_custom {
                 break;
@@ -427,9 +421,9 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
         println!("No providers added.");
     } else {
         println!();
-        println!("{} provider(s) configured.", added_count);
+        println!("{added_count} provider(s) configured.");
         if let Some(ref first) = first_provider {
-            println!("Default provider: {}", first);
+            println!("Default provider: {first}");
         }
     }
 
@@ -446,7 +440,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
     // 1. Select provider type
     let items: Vec<String> = PROVIDER_CHOICES
         .iter()
-        .map(|(name, _, desc)| format!("{:<40} {}", name, desc))
+        .map(|(name, _, desc)| format!("{name:<40} {desc}"))
         .collect();
 
     let selection = Select::new()
@@ -454,20 +448,20 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
         .items(&items)
         .default(0)
         .interact()
-        .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Selection cancelled: {e}")))?;
 
     let (display_name, type_str, _) = PROVIDER_CHOICES[selection];
     let is_azure_foundry = selection == AZURE_FOUNDRY_IDX;
 
     println!();
-    println!("Selected: {}", display_name);
+    println!("Selected: {display_name}");
 
     // For Azure AI Foundry, ask which model family to determine the API type
     let (type_str, foundry_model_family) = if is_azure_foundry {
         println!();
         let family_items: Vec<String> = FOUNDRY_MODEL_CHOICES
             .iter()
-            .map(|(name, _, desc)| format!("{:<30} {}", name, desc))
+            .map(|(name, _, desc)| format!("{name:<30} {desc}"))
             .collect();
 
         let family_sel = Select::new()
@@ -475,7 +469,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
             .items(&family_items)
             .default(0)
             .interact()
-            .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Selection cancelled: {e}")))?;
 
         let (_, family_type, _) = FOUNDRY_MODEL_CHOICES[family_sel];
         println!("  Model family: {}", FOUNDRY_MODEL_CHOICES[family_sel].0);
@@ -496,7 +490,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
             .items(&api_choices)
             .default(0)
             .interact()
-            .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Selection cancelled: {e}")))?;
         match api_sel {
             1 => "openai-responses",
             _ => type_str,
@@ -535,7 +529,7 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
         .with_prompt("Test this configuration now?")
         .default(true)
         .interact()
-        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
     if should_test {
         let prov_config = setup_config.to_provider_config();
@@ -548,11 +542,11 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
         .with_prompt("Save this provider to config?")
         .default(true)
         .interact()
-        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
     if should_save {
         save_provider_to_config(config_file, &provider_name, &setup_config)?;
-        println!("Provider '{}' saved.", provider_name);
+        println!("Provider '{provider_name}' saved.");
     } else {
         println!("Skipped.");
     }
@@ -618,7 +612,7 @@ update_pricing_on_startup = true
     Ok(())
 }
 
-/// Set the default provider in the config (copies type + api_key from an existing provider).
+/// Set the default provider in the config (copies type + `api_key` from an existing provider).
 fn set_default_provider(config_file: &PathBuf, provider_name: &str) -> Result<(), CliError> {
     let content = std::fs::read_to_string(config_file).unwrap_or_default();
 
@@ -628,7 +622,7 @@ fn set_default_provider(config_file: &PathBuf, provider_name: &str) -> Result<()
     }
 
     // Find the provider's type and api_key
-    let section = format!("[providers.{}]", provider_name);
+    let section = format!("[providers.{provider_name}]");
     if let Some(start) = content.find(&section) {
         let block = &content[start..];
         let type_val = block
@@ -641,7 +635,7 @@ fn set_default_provider(config_file: &PathBuf, provider_name: &str) -> Result<()
             .unwrap_or("api_key = \"\"");
 
         // Insert default provider before the first [providers.*] section
-        let default_block = format!("\n[providers.default]\n{}\n{}\n", type_val, key_val);
+        let default_block = format!("\n[providers.default]\n{type_val}\n{key_val}\n");
 
         // Find insertion point: just before the first [providers.*]
         if let Some(pos) = content.find("[providers.") {
@@ -678,12 +672,11 @@ pub async fn run_setup_test(
         let available = config
             .provider_names()
             .into_iter()
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect::<Vec<_>>()
             .join(", ");
         CliError::Other(format!(
-            "Provider '{}' not found in config. Available: {}",
-            provider_name, available
+            "Provider '{provider_name}' not found in config. Available: {available}"
         ))
     })?;
 
@@ -813,7 +806,7 @@ pub async fn run_setup_test_all(
     }
 
     if failed > 0 {
-        Err(CliError::Other(format!("{} provider(s) failed", failed)))
+        Err(CliError::Other(format!("{failed} provider(s) failed")))
     } else {
         Ok(())
     }
@@ -835,12 +828,11 @@ pub fn run_setup_show(
         let available = config
             .provider_names()
             .into_iter()
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect::<Vec<_>>()
             .join(", ");
         CliError::Other(format!(
-            "Provider '{}' not found in config. Available: {}",
-            provider_name, available
+            "Provider '{provider_name}' not found in config. Available: {available}"
         ))
     })?;
 
@@ -854,31 +846,29 @@ pub fn run_setup_show(
     println!("  base_url   = {}", prov.resolved_base_url());
 
     let api_key = prov.resolved_api_key();
-    if !api_key.is_empty() {
-        if reveal {
-            println!("  api_key    = {}", api_key);
-        } else {
-            let masked = mask_secret(&api_key);
-            println!("  api_key    = {} (use --reveal to show)", masked);
-        }
-    } else {
+    if api_key.is_empty() {
         println!("  api_key    = (not set)");
+    } else if reveal {
+        println!("  api_key    = {api_key}");
+    } else {
+        let masked = mask_secret(&api_key);
+        println!("  api_key    = {masked} (use --reveal to show)");
     }
 
     if let Some(v) = prov.resolved_api_version() {
-        println!("  api_version = {}", v);
+        println!("  api_version = {v}");
     }
     if let Some(d) = prov.resolved_deployment() {
-        println!("  deployment = {}", d);
+        println!("  deployment = {d}");
     }
     if let Some(r) = prov.resolved_aws_region() {
-        println!("  aws_region = {}", r);
+        println!("  aws_region = {r}");
     }
     if let Some(p) = prov.resolved_gcp_project() {
-        println!("  gcp_project = {}", p);
+        println!("  gcp_project = {p}");
     }
     if let Some(l) = prov.resolved_gcp_location() {
-        println!("  gcp_location = {}", l);
+        println!("  gcp_location = {l}");
     }
 
     // Show provider-type metadata
@@ -895,7 +885,7 @@ pub fn run_setup_show(
         );
     }
     if let Some(default_url) = info.default_base_url {
-        println!("  default_url    = {}", default_url);
+        println!("  default_url    = {default_url}");
     }
 
     Ok(())
@@ -924,32 +914,28 @@ async fn test_provider_direct(
     let base_url = prov_config.resolved_base_url();
     let api_key = prov_config.resolved_api_key();
 
-    let model = match model_override {
-        Some(m) => m.to_string(),
-        None => {
-            let default = resolve_test_model(prov_config);
-            if std::io::stdin().is_terminal() {
-                prompt_input(
-                    &format!("Model to test '{}' with", provider_name),
-                    Some(&default),
-                )?
-            } else {
-                default
-            }
+    let model = if let Some(m) = model_override {
+        m.to_string()
+    } else {
+        let default = resolve_test_model(prov_config);
+        if std::io::stdin().is_terminal() {
+            prompt_input(
+                &format!("Model to test '{provider_name}' with"),
+                Some(&default),
+            )?
+        } else {
+            default
         }
     };
 
     let message = message_override.unwrap_or("Say 'test successful' in exactly those words.");
 
-    println!(
-        "Testing '{}' -> {} (model: {})...",
-        provider_name, base_url, model
-    );
+    println!("Testing '{provider_name}' -> {base_url} (model: {model})...");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| CliError::Other(format!("Failed to create HTTP client: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to create HTTP client: {e}")))?;
 
     let (url, body, headers) = build_test_request(
         provider_type,
@@ -982,8 +968,8 @@ async fn test_provider_direct(
 
                 let content = extract_response_content(&resp_body).unwrap_or("<no content>");
 
-                println!("  PASSED ({:.2?})", elapsed);
-                println!("  Model:    {}", resp_model);
+                println!("  PASSED ({elapsed:.2?})");
+                println!("  Model:    {resp_model}");
                 println!(
                     "  Response: {}",
                     if content.len() > 100 {
@@ -995,7 +981,7 @@ async fn test_provider_direct(
                 Ok(TestOutcome::Passed)
             } else {
                 let body_text = resp.text().await.unwrap_or_default();
-                println!("  FAILED (HTTP {})", status);
+                println!("  FAILED (HTTP {status})");
                 println!(
                     "  Response: {}",
                     if body_text.len() > 300 {
@@ -1011,7 +997,7 @@ async fn test_provider_direct(
                         .with_prompt("Continue anyway?")
                         .default(true)
                         .interact()
-                        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
                     if continue_anyway {
                         Ok(TestOutcome::FailedContinue)
@@ -1030,14 +1016,14 @@ async fn test_provider_direct(
             }
         }
         Err(e) => {
-            println!("  FAILED: {}", e);
+            println!("  FAILED: {e}");
 
             if std::io::stdin().is_terminal() {
                 let continue_anyway = Confirm::new()
                     .with_prompt("Continue anyway?")
                     .default(true)
                     .interact()
-                    .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                    .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
                 if continue_anyway {
                     Ok(TestOutcome::FailedContinue)
@@ -1145,11 +1131,10 @@ fn build_test_request(
                 .resolved_gcp_location()
                 .unwrap_or_else(|| "us-central1".to_string());
             let url = format!(
-                "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
-                location, project, location, model
+                "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent"
             );
             if !api_key.is_empty() {
-                headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
+                headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
             }
             let body = serde_json::json!({
                 "contents": [{"parts": [{"text": message}]}],
@@ -1161,7 +1146,7 @@ fn build_test_request(
             // OpenAI Responses API format
             let url = format!("{}/responses", base_url.trim_end_matches('/'));
             if !api_key.is_empty() {
-                headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
+                headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
             }
             let body = serde_json::json!({
                 "model": model,
@@ -1175,7 +1160,7 @@ fn build_test_request(
             // Mistral, xAI, OpenRouter, Cerebras, Ollama, Foundry, etc.)
             let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
             if !api_key.is_empty() {
-                headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
+                headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
             }
             let body = serde_json::json!({
                 "model": model,
@@ -1191,7 +1176,7 @@ fn ensure_trailing_slash(url: &str) -> String {
     if url.ends_with('/') {
         url.to_string()
     } else {
-        format!("{}/", url)
+        format!("{url}/")
     }
 }
 
@@ -1351,12 +1336,12 @@ fn collect_provider_fields(
             let env_hint = provider_type
                 .info()
                 .env_key_name
-                .map(|e| format!(" (or use env:{})", e))
+                .map(|e| format!(" (or use env:{e})"))
                 .unwrap_or_default();
             let prompt = if is_azure_foundry {
                 "API key (or use env:AZURE_FOUNDRY_API_KEY)".to_string()
             } else {
-                format!("API key{}", env_hint)
+                format!("API key{env_hint}")
             };
             config.api_key = collect_api_key(&prompt, false)?;
         }
@@ -1448,14 +1433,14 @@ fn collect_provider_fields(
             .with_prompt("Configure compatibility settings?")
             .default(false)
             .interact()
-            .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
         if configure_compat {
             let supports_store = Confirm::new()
                 .with_prompt("Supports 'store' parameter?")
                 .default(false)
                 .interact()
-                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
             config.compat_supports_store = Some(supports_store);
 
             let max_tokens_field = prompt_input("Max tokens field name", Some("max_tokens"))?;
@@ -1475,25 +1460,25 @@ fn collect_provider_fields(
             } else {
                 mask_secret(&config.api_key)
             };
-        println!("  api_key  = \"{}\"", display_key);
+        println!("  api_key  = \"{display_key}\"");
     }
     if let Some(ref url) = config.base_url {
-        println!("  base_url = \"{}\"", url);
+        println!("  base_url = \"{url}\"");
     }
     if let Some(ref v) = config.api_version {
-        println!("  api_version = \"{}\"", v);
+        println!("  api_version = \"{v}\"");
     }
     if let Some(ref d) = config.deployment {
-        println!("  deployment = \"{}\"", d);
+        println!("  deployment = \"{d}\"");
     }
     if let Some(ref r) = config.aws_region {
-        println!("  aws_region = \"{}\"", r);
+        println!("  aws_region = \"{r}\"");
     }
     if let Some(ref p) = config.gcp_project {
-        println!("  gcp_project = \"{}\"", p);
+        println!("  gcp_project = \"{p}\"");
     }
     if let Some(ref l) = config.gcp_location {
-        println!("  gcp_location = \"{}\"", l);
+        println!("  gcp_location = \"{l}\"");
     }
 
     Ok(config)
@@ -1531,12 +1516,12 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
         .items(&choices)
         .default(0)
         .interact()
-        .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Selection cancelled: {e}")))?;
 
     match key_method {
         0 => {
             let key = rpassword::prompt_password("API key: ")
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+                .map_err(|e| CliError::Other(format!("Input cancelled: {e}")))?;
             if key.is_empty() && !allow_empty {
                 return Err(CliError::Other("API key cannot be empty".to_string()));
             }
@@ -1545,36 +1530,33 @@ fn collect_api_key(prompt: &str, allow_empty: bool) -> Result<String, CliError> 
         1 => {
             let var_name = prompt_input_required("Environment variable name")?;
             if std::env::var(&var_name).is_err() {
-                println!(
-                    "  Warning: ${} is not currently set in the environment",
-                    var_name
-                );
+                println!("  Warning: ${var_name} is not currently set in the environment");
             } else {
-                println!("  ${} is set", var_name);
+                println!("  ${var_name} is set");
             }
-            Ok(format!("env:{}", var_name))
+            Ok(format!("env:{var_name}"))
         }
         2 => {
             let account = prompt_input_required("Keychain account name")?;
             if crate::config::get_keychain_secret(&account).is_some() {
-                println!("  Keychain entry '{}' found", account);
+                println!("  Keychain entry '{account}' found");
             } else {
-                println!("  Warning: Keychain entry '{}' not found", account);
+                println!("  Warning: Keychain entry '{account}' not found");
                 let store_now = Confirm::new()
                     .with_prompt("Store a secret for this account now?")
                     .default(true)
                     .interact()
-                    .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+                    .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
                 if store_now {
                     let secret = rpassword::prompt_password("Secret value: ")
-                        .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+                        .map_err(|e| CliError::Other(format!("Input cancelled: {e}")))?;
                     crate::config::set_keychain_secret(&account, &secret)
                         .map_err(CliError::Other)?;
                     println!("  Stored secret in keychain");
                 }
             }
-            Ok(format!("keychain:{}", account))
+            Ok(format!("keychain:{account}"))
         }
         3 if allow_empty => Ok(String::new()),
         _ => Err(CliError::Other("Invalid selection".to_string())),
@@ -1593,16 +1575,16 @@ fn collect_api_key_or_env(prompt: &str, default_env: &str) -> Result<String, Cli
         .items(&choices)
         .default(0)
         .interact()
-        .map_err(|e| CliError::Other(format!("Selection cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Selection cancelled: {e}")))?;
 
     match method {
         0 => {
             let var_name = prompt_input("Environment variable name", Some(default_env))?;
-            Ok(format!("env:{}", var_name))
+            Ok(format!("env:{var_name}"))
         }
         1 => {
-            let value = rpassword::prompt_password(format!("{}: ", prompt))
-                .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+            let value = rpassword::prompt_password(format!("{prompt}: "))
+                .map_err(|e| CliError::Other(format!("Input cancelled: {e}")))?;
             Ok(value)
         }
         _ => Err(CliError::Other("Invalid selection".to_string())),
@@ -1616,25 +1598,25 @@ fn collect_azure_foundry_base_url(foundry_model_family: Option<usize>) -> Result
     let base_url = match foundry_model_family {
         Some(0) => {
             // OpenAI models
-            format!("https://{}.services.ai.azure.com/openai/v1", resource)
+            format!("https://{resource}.services.ai.azure.com/openai/v1")
         }
         Some(1) => {
             // Anthropic models
-            format!("https://{}.openai.azure.com/anthropic/v1", resource)
+            format!("https://{resource}.openai.azure.com/anthropic/v1")
         }
         _ => {
             // Other models (DeepSeek, Llama, Phi, etc.)
-            format!("https://{}.services.ai.azure.com/openai/v1", resource)
+            format!("https://{resource}.services.ai.azure.com/openai/v1")
         }
     };
 
-    println!("  Base URL: {}", base_url);
+    println!("  Base URL: {base_url}");
 
     let use_custom = Confirm::new()
         .with_prompt("Use a custom URL instead?")
         .default(false)
         .interact()
-        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Confirmation cancelled: {e}")))?;
 
     if use_custom {
         let custom_url = prompt_input_required("Custom base URL")?;
@@ -1652,9 +1634,9 @@ fn collect_azure_foundry_base_url(foundry_model_family: Option<usize>) -> Result
 fn load_config(config_path: Option<&str>) -> Result<AppConfig, CliError> {
     if let Some(path) = config_path {
         AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config from {}: {}", path, e)))
+            .map_err(|e| CliError::Other(format!("Failed to load config from {path}: {e}")))
     } else {
-        AppConfig::load().map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))
+        AppConfig::load().map_err(|e| CliError::Other(format!("Failed to load config: {e}")))
     }
 }
 
@@ -1688,47 +1670,47 @@ fn save_provider_to_config(
 
     let mut toml_lines = Vec::new();
     toml_lines.push(String::new());
-    toml_lines.push(format!("[providers.{}]", provider_name));
+    toml_lines.push(format!("[providers.{provider_name}]"));
     toml_lines.push(format!("type = \"{}\"", config.type_));
 
     if !config.api_key.is_empty() {
         toml_lines.push(format!("api_key = \"{}\"", config.api_key));
     }
     if let Some(ref url) = config.base_url {
-        toml_lines.push(format!("base_url = \"{}\"", url));
+        toml_lines.push(format!("base_url = \"{url}\""));
     }
     if let Some(ref v) = config.api_version {
-        toml_lines.push(format!("api_version = \"{}\"", v));
+        toml_lines.push(format!("api_version = \"{v}\""));
     }
     if let Some(ref d) = config.deployment {
-        toml_lines.push(format!("deployment = \"{}\"", d));
+        toml_lines.push(format!("deployment = \"{d}\""));
     }
     if let Some(ref r) = config.aws_region {
-        toml_lines.push(format!("aws_region = \"{}\"", r));
+        toml_lines.push(format!("aws_region = \"{r}\""));
     }
     if let Some(ref k) = config.aws_access_key_id {
-        toml_lines.push(format!("aws_access_key_id = \"{}\"", k));
+        toml_lines.push(format!("aws_access_key_id = \"{k}\""));
     }
     if let Some(ref k) = config.aws_secret_access_key {
-        toml_lines.push(format!("aws_secret_access_key = \"{}\"", k));
+        toml_lines.push(format!("aws_secret_access_key = \"{k}\""));
     }
     if let Some(ref t) = config.aws_session_token {
-        toml_lines.push(format!("aws_session_token = \"{}\"", t));
+        toml_lines.push(format!("aws_session_token = \"{t}\""));
     }
     if let Some(ref p) = config.gcp_project {
-        toml_lines.push(format!("gcp_project = \"{}\"", p));
+        toml_lines.push(format!("gcp_project = \"{p}\""));
     }
     if let Some(ref l) = config.gcp_location {
-        toml_lines.push(format!("gcp_location = \"{}\"", l));
+        toml_lines.push(format!("gcp_location = \"{l}\""));
     }
 
     if config.compat_supports_store.is_some() || config.compat_max_tokens_field.is_some() {
-        toml_lines.push(format!("[providers.{}.compat]", provider_name));
+        toml_lines.push(format!("[providers.{provider_name}.compat]"));
         if let Some(supports_store) = config.compat_supports_store {
-            toml_lines.push(format!("supports_store = {}", supports_store));
+            toml_lines.push(format!("supports_store = {supports_store}"));
         }
         if let Some(ref field) = config.compat_max_tokens_field {
-            toml_lines.push(format!("max_tokens_field = \"{}\"", field));
+            toml_lines.push(format!("max_tokens_field = \"{field}\""));
         }
     }
 
@@ -1736,11 +1718,10 @@ fn save_provider_to_config(
 
     let existing = std::fs::read_to_string(config_file).unwrap_or_default();
 
-    let section_header = format!("[providers.{}]", provider_name);
+    let section_header = format!("[providers.{provider_name}]");
     if existing.contains(&section_header) {
         println!(
-            "  Warning: Provider '{}' already exists in config. Appending new entry.",
-            provider_name
+            "  Warning: Provider '{provider_name}' already exists in config. Appending new entry."
         );
         println!(
             "  You may need to manually remove the old entry from {}",
@@ -1778,8 +1759,8 @@ fn save_provider_to_config(
 /// the application as duplicate characters.
 fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String, CliError> {
     match default {
-        Some(d) if !d.is_empty() => eprint!("{} [{}]: ", prompt, d),
-        _ => eprint!("{}: ", prompt),
+        Some(d) if !d.is_empty() => eprint!("{prompt} [{d}]: "),
+        _ => eprint!("{prompt}: "),
     }
     io::stderr()
         .flush()
@@ -1789,12 +1770,12 @@ fn prompt_input(prompt: &str, default: Option<&str>) -> Result<String, CliError>
     // internally. This avoids issues where Select leaves stale bytes in
     // stdin's buffer after switching out of raw terminal mode.
     let tty = std::fs::File::open("/dev/tty")
-        .map_err(|e| CliError::Other(format!("Cannot open /dev/tty: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Cannot open /dev/tty: {e}")))?;
     let mut reader = io::BufReader::new(tty);
     let mut line = String::new();
     reader
         .read_line(&mut line)
-        .map_err(|e| CliError::Other(format!("Input cancelled: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Input cancelled: {e}")))?;
 
     let trimmed = line.trim().to_string();
     if trimmed.is_empty() {
@@ -1812,7 +1793,7 @@ fn prompt_input_required(prompt: &str) -> Result<String, CliError> {
         if !value.is_empty() {
             return Ok(value);
         }
-        eprintln!("  {} cannot be empty, please try again.", prompt);
+        eprintln!("  {prompt} cannot be empty, please try again.");
     }
 }
 

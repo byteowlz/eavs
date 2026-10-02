@@ -26,9 +26,9 @@ const DEFAULT_CHUNK_DELAY_MS: u64 = 30;
 pub enum MockScenario {
     /// Stream realistic word-by-word text response.
     SimpleText,
-    /// Emit a properly formatted tool_call (function name + streamed JSON args).
+    /// Emit a properly formatted `tool_call` (function name + streamed JSON args).
     ToolCall,
-    /// Emit two sequential tool_calls in one response.
+    /// Emit two sequential `tool_calls` in one response.
     MultiTool,
     /// After tool result in follow-up, respond with text completion.
     ToolCallThenText,
@@ -53,7 +53,7 @@ pub enum MockScenario {
 }
 
 impl MockScenario {
-    /// Parse scenario from string (case-insensitive, supports kebab-case and snake_case).
+    /// Parse scenario from string (case-insensitive, supports kebab-case and `snake_case`).
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().replace('-', "_").as_str() {
             "simple_text" | "text" | "default" => Some(Self::SimpleText),
@@ -111,7 +111,7 @@ pub struct MockRequest {
     pub analysis_tx: tokio::sync::broadcast::Sender<AnalysisEvent>,
     /// Optional trigger extracted from user message, e.g. `##success`.
     pub dynamic_trigger: Option<String>,
-    /// Predefined responses loaded from config.toml [mock_responses.*].
+    /// Predefined responses loaded from config.toml [`mock_responses`.*].
     pub predefined_responses: HashMap<String, MockResponse>,
 }
 
@@ -479,7 +479,7 @@ async fn handle_tool_call(req: MockRequest) -> Result<Response, Response> {
             r#"{"loc"#,
             r#"ation":"#,
             r#" "San"#,
-            r#" Fran"#,
+            r" Fran",
             r#"cisco","#,
             r#" "unit"#,
             r#"": "cel"#,
@@ -1936,7 +1936,7 @@ async fn handle_dynamic(req: MockRequest) -> Result<Response, Response> {
             let ts = timestamp();
             let delay = Duration::from_millis(req.delay_ms);
             let content = if def.content.is_empty() {
-                format!("mock response for ##{}", trigger)
+                format!("mock response for ##{trigger}")
             } else {
                 def.content.clone()
             };

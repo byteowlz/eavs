@@ -37,7 +37,7 @@ pub struct ProviderRequest {
     pub enabled: bool,
 }
 
-fn default_enabled() -> bool {
+const fn default_enabled() -> bool {
     true
 }
 
@@ -53,9 +53,9 @@ pub enum ProviderStoreError {
 impl std::fmt::Display for ProviderStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Database(e) => write!(f, "Database error: {}", e),
-            Self::Serialization(e) => write!(f, "Serialization error: {}", e),
-            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Database(e) => write!(f, "Database error: {e}"),
+            Self::Serialization(e) => write!(f, "Serialization error: {e}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
             Self::NotFound => write!(f, "Provider not found"),
         }
     }
@@ -67,7 +67,7 @@ impl std::error::Error for ProviderStoreError {}
 pub struct ProviderStore {
     /// SQLite connection pool
     pool: Pool<Sqlite>,
-    /// In-memory cache for fast lookups (provider name -> ProviderEntry)
+    /// In-memory cache for fast lookups (provider name -> `ProviderEntry`)
     cache: Arc<DashMap<String, ProviderEntry>>,
 }
 
@@ -121,7 +121,7 @@ impl ProviderStore {
 
     async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), ProviderStoreError> {
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS providers (
                 name TEXT PRIMARY KEY,
                 config TEXT NOT NULL,
@@ -131,7 +131,7 @@ impl ProviderStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_providers_enabled ON providers(enabled);
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -139,7 +139,7 @@ impl ProviderStore {
 
         // Model shortlist table
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS provider_models (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider_name TEXT NOT NULL,
@@ -151,7 +151,7 @@ impl ProviderStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider_name);
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -200,15 +200,15 @@ impl ProviderStore {
         if existing > 0 {
             // Update existing provider
             sqlx::query(
-                r#"
+                r"
                 UPDATE providers
                 SET config = ?, updated_at = ?, enabled = ?
                 WHERE name = ?
-                "#,
+                ",
             )
             .bind(&config_json)
             .bind(now.to_rfc3339())
-            .bind(request.enabled as i32)
+            .bind(i32::from(request.enabled))
             .bind(&request.name)
             .execute(&self.pool)
             .await
@@ -216,16 +216,16 @@ impl ProviderStore {
         } else {
             // Insert new provider
             sqlx::query(
-                r#"
+                r"
                 INSERT INTO providers (name, config, created_at, updated_at, enabled)
                 VALUES (?, ?, ?, ?, ?)
-                "#,
+                ",
             )
             .bind(&request.name)
             .bind(&config_json)
             .bind(now.to_rfc3339())
             .bind(now.to_rfc3339())
-            .bind(request.enabled as i32)
+            .bind(i32::from(request.enabled))
             .execute(&self.pool)
             .await
             .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
@@ -313,10 +313,10 @@ impl ProviderStore {
             .map_err(|e| ProviderStoreError::Serialization(e.to_string()))?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT OR REPLACE INTO provider_models (provider_name, model_id, model_data, created_at)
             VALUES (?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(provider_name)
         .bind(&model.id)

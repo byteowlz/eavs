@@ -62,12 +62,6 @@ pub fn state_dir() -> anyhow::Result<PathBuf> {
     base_dir("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")
 }
 
-/// Base cache dir: `$XDG_CACHE_HOME` / `~/.cache` / `%LOCALAPPDATA%`.
-#[allow(dead_code)]
-pub fn cache_dir() -> anyhow::Result<PathBuf> {
-    base_dir("XDG_CACHE_HOME", ".cache", "LOCALAPPDATA")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

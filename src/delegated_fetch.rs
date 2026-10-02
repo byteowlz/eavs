@@ -55,7 +55,7 @@ pub struct StrippedItem {
 
 /// Remove known delegated-fetch capabilities from provider request bodies.
 ///
-/// Covers OpenAI Chat/Responses, Anthropic and Google media content, including
+/// Covers `OpenAI` Chat/Responses, Anthropic and Google media content, including
 /// HTTP and Realtime/Codex envelopes. Hosted-tool handling covers top-level
 /// tools and Realtime session.update. This is not a general URL scanner.
 ///
@@ -72,9 +72,8 @@ pub fn sanitize(body: &mut Value, policy: &DelegatedFetchPolicy) -> Vec<Stripped
     normalize_tool_choice(body, &removed_tool_types, &mut stripped);
 
     // Realtime WebSocket protocol surfaces.
-    match body.get("type").and_then(Value::as_str) {
-        Some("session.update") => sanitize_realtime_session_update(body, policy, &mut stripped),
-        _ => {}
+    if body.get("type").and_then(Value::as_str) == Some("session.update") {
+        sanitize_realtime_session_update(body, policy, &mut stripped)
     }
 
     stripped
@@ -193,7 +192,7 @@ fn sanitize_server_tools(
 
 /// Strip provider-hosted tools from a tools array, recording each one.
 ///
-/// Used for both the top-level `tools` array (OpenAI Responses) and the
+/// Used for both the top-level `tools` array (`OpenAI` Responses) and the
 /// Realtime `session.update` `session.tools` array.
 fn strip_server_tools_from_array(
     tools: &mut Vec<Value>,
@@ -240,11 +239,12 @@ fn sanitize_realtime_session_update(
         return;
     };
 
-    let removed = if let Some(tools) = session.get_mut("tools").and_then(Value::as_array_mut) {
-        strip_server_tools_from_array(tools, policy, stripped, "/session/tools")
-    } else {
-        HashSet::new()
-    };
+    let removed = session
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .map_or_else(HashSet::new, |tools| {
+            strip_server_tools_from_array(tools, policy, stripped, "/session/tools")
+        });
 
     if !removed.is_empty() {
         normalize_tool_choice(session, &removed, stripped);
@@ -253,7 +253,7 @@ fn sanitize_realtime_session_update(
 
 /// Function/custom tools execute client-side. Typed tools outside that set are
 /// provider-hosted and therefore bypass EAVS's egress controls unless allowed.
-fn is_server_side_tool(tool_type: &str) -> bool {
+const fn is_server_side_tool(tool_type: &str) -> bool {
     !tool_type.eq_ignore_ascii_case("function") && !tool_type.eq_ignore_ascii_case("custom")
 }
 
@@ -283,7 +283,7 @@ fn normalize_tool_choice(
         _ => false,
     };
     let requires_missing_tool =
-        remaining_tools == 0 && !matches!(choice.as_str(), Some("auto") | Some("none"));
+        remaining_tools == 0 && !matches!(choice.as_str(), Some("auto" | "none"));
 
     if references_removed || requires_missing_tool {
         body["tool_choice"] = Value::String("auto".to_string());
@@ -379,7 +379,7 @@ mod tests {
                     assert_eq!(entry.capability, capability);
                     assert_eq!(entry.target_host.as_deref(), Some("media.example"));
                 }
-                assert!(body.pointer(prefix).unwrap().as_array().unwrap().is_empty());
+                assert_eq!(body.pointer(prefix), Some(&json!([])));
                 assert!(sanitize(&mut body, &deny_policy()).is_empty());
             }
         }
@@ -414,7 +414,12 @@ mod tests {
     }
 
     #[test]
-    fn nested_tool_result_media_is_stripped_and_invalid_uri_fails_closed() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions fail the test while serialization propagates fixture errors"
+    )]
+    fn nested_tool_result_media_is_stripped_and_invalid_uri_fails_closed(
+    ) -> Result<(), serde_json::Error> {
         let mut body = json!({"messages":[{"content":[{"type":"tool_result","content":[
             {"type":"text","text":"keep"},
             {"type":"image","source":{"type":"url","url":"not a valid URL"}},
@@ -428,11 +433,12 @@ mod tests {
         );
         assert_eq!(audit[0].target_host, None);
         assert_eq!(audit[1].target_host.as_deref(), Some("media.example"));
-        assert!(!serde_json::to_string(&audit).unwrap().contains("secret"));
+        assert!(!serde_json::to_string(&audit)?.contains("secret"));
         assert_eq!(
             body["messages"][0]["content"][0]["content"],
             json!([{"type":"text","text":"keep"}])
         );
+        Ok(())
     }
 
     fn deny_policy() -> DelegatedFetchPolicy {
@@ -454,7 +460,10 @@ mod tests {
 
         let stripped = sanitize(&mut body, &deny_policy());
 
-        assert_eq!(body["input"][0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["input"][0]["content"].as_array().map(Vec::len),
+            Some(1)
+        );
         assert_eq!(stripped.len(), 1);
         assert_eq!(stripped[0].field_path, "/input/0/content/1/file_url");
         assert_eq!(stripped[0].target_host.as_deref(), Some("metadata.example"));
@@ -473,7 +482,7 @@ mod tests {
 
         let stripped = sanitize(&mut body, &deny_policy());
 
-        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(stripped.len(), 3);
@@ -521,7 +530,11 @@ mod tests {
     }
 
     #[test]
-    fn safe_control_body_is_unchanged() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify unchanged wire bytes while serialization errors propagate"
+    )]
+    fn safe_control_body_is_unchanged() -> Result<(), serde_json::Error> {
         let original = json!({
             "model": "gpt-5",
             "input": [{
@@ -531,11 +544,12 @@ mod tests {
             "tools": [{"type": "function", "function": {"name": "local_tool"}}],
             "tool_choice": "auto"
         });
-        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let original_bytes = serde_json::to_vec(&original)?;
         let mut body = original;
 
         assert!(sanitize(&mut body, &deny_policy()).is_empty());
-        assert_eq!(serde_json::to_vec(&body).unwrap(), original_bytes);
+        assert_eq!(serde_json::to_vec(&body)?, original_bytes);
+        Ok(())
     }
 
     #[test]
@@ -556,10 +570,9 @@ mod tests {
 
         let stripped = sanitize(&mut body, &deny_policy());
 
-        let tools = body["session"]["tools"].as_array().unwrap();
         // function tool preserved, all hosted tools stripped
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(body["session"]["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["session"]["tools"][0]["type"], "function");
         // tool_choice referencing a removed tool is normalized
         assert_eq!(body["session"]["tool_choice"], "auto");
         assert!(stripped
@@ -610,16 +623,19 @@ mod tests {
 
         let stripped = sanitize(&mut body, &deny_policy());
 
-        let content = body["item"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(body["item"]["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["item"]["content"][0]["type"], "input_text");
         assert_eq!(stripped.len(), 1);
         assert_eq!(stripped[0].field_path, "/item/content/1/file_url");
         assert_eq!(stripped[0].target_host.as_deref(), Some("realtime.example"));
     }
 
     #[test]
-    fn realtime_safe_control_body_is_unchanged() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify unchanged wire bytes while serialization errors propagate"
+    )]
+    fn realtime_safe_control_body_is_unchanged() -> Result<(), serde_json::Error> {
         let original = json!({
             "type": "session.update",
             "session": {
@@ -628,10 +644,11 @@ mod tests {
                 "tool_choice": "auto"
             }
         });
-        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let original_bytes = serde_json::to_vec(&original)?;
         let mut body = original;
 
         assert!(sanitize(&mut body, &deny_policy()).is_empty());
-        assert_eq!(serde_json::to_vec(&body).unwrap(), original_bytes);
+        assert_eq!(serde_json::to_vec(&body)?, original_bytes);
+        Ok(())
     }
 }

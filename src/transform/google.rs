@@ -1,30 +1,23 @@
 //! Google Generative AI (Gemini) transformer.
 //!
-//! Handles transformation between canonical format and Google's GenerateContent API.
+//! Handles transformation between canonical format and Google's `GenerateContent` API.
 
 use crate::transform::{RequestTransformer, ResponseTransformer, TransformError};
 use crate::types::{
-    ApiType, AssistantMessage, ContentBlock, ContentBlockState, ContentBlockType, Context,
-    ImageContent, Message, StopReason, StreamEvent, StreamState, TextContent, ThinkingContent,
-    Tool, ToolCall, Usage,
+    ApiType, ContentBlock, ContentBlockState, ContentBlockType, Context, Message, StopReason,
+    StreamEvent, StreamState, TextContent, ThinkingContent, Tool, ToolCall, Usage,
 };
+#[cfg(test)]
+use crate::types::{AssistantMessage, ImageContent};
 use serde_json::{json, Value};
 
-/// Google GenerativeAI transformer.
+/// Google `GenerativeAI` transformer.
 #[derive(Debug, Clone, Default)]
-pub struct GoogleTransformer {
-    /// Whether to use API key in query param vs header
-    pub api_key_in_query: bool,
-}
+pub struct GoogleTransformer {}
 
 impl GoogleTransformer {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_api_key_in_query(mut self, in_query: bool) -> Self {
-        self.api_key_in_query = in_query;
-        self
     }
 }
 
@@ -62,11 +55,7 @@ impl RequestTransformer for GoogleTransformer {
             gen_config["stopSequences"] = json!(stop);
         }
 
-        if gen_config
-            .as_object()
-            .map(|o| !o.is_empty())
-            .unwrap_or(false)
-        {
+        if gen_config.as_object().is_some_and(|o| !o.is_empty()) {
             request["generationConfig"] = gen_config;
         }
 
@@ -81,10 +70,11 @@ impl RequestTransformer for GoogleTransformer {
         Ok(request)
     }
 
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)> {
         let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        if !self.api_key_in_query && !api_key.is_empty() {
-            headers.push(("Authorization".to_string(), format!("Bearer {}", api_key)));
+        if !api_key.is_empty() {
+            headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
         }
         headers
     }
@@ -128,7 +118,7 @@ impl ResponseTransformer for GoogleTransformer {
         // Process each chunk in the array
         if let Some(chunks) = parsed.as_array() {
             for chunk_obj in chunks {
-                events.extend(process_google_chunk(chunk_obj, state)?);
+                events.extend(process_google_chunk(chunk_obj, state));
             }
         }
 
@@ -140,7 +130,7 @@ impl ResponseTransformer for GoogleTransformer {
         let mut state = StreamState::default();
 
         // Handle as a single chunk
-        events.extend(process_google_chunk(body, &mut state)?);
+        events.extend(process_google_chunk(body, &mut state));
 
         // Ensure we have a done event
         if !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })) {
@@ -154,7 +144,8 @@ impl ResponseTransformer for GoogleTransformer {
     }
 }
 
-/// Parse a Google GenerateContent request into canonical Context.
+/// Parse a Google `GenerateContent` request into canonical Context.
+#[cfg(test)]
 pub fn parse_google_request(body: &Value) -> Result<Context, TransformError> {
     // Model is typically in the URL path, not the body
     let model = body["model"].as_str().unwrap_or("gemini-pro").to_string();
@@ -180,11 +171,11 @@ pub fn parse_google_request(body: &Value) -> Result<Context, TransformError> {
 
             match role {
                 "user" => {
-                    let user_msg = parse_google_user_content(content)?;
+                    let user_msg = parse_google_user_content(content);
                     context.messages.push(Message::User(user_msg));
                 }
                 "model" => {
-                    let assistant_msg = parse_google_model_content(content)?;
+                    let assistant_msg = parse_google_model_content(content);
                     context.messages.push(Message::Assistant(assistant_msg));
                 }
                 _ => {}
@@ -196,15 +187,15 @@ pub fn parse_google_request(body: &Value) -> Result<Context, TransformError> {
     if let Some(gen_config) = body["generationConfig"].as_object() {
         context.max_tokens = gen_config
             .get("maxOutputTokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
         context.temperature = gen_config
             .get("temperature")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .map(|v| v as f32);
         context.top_p = gen_config
             .get("topP")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .map(|v| v as f32);
 
         if let Some(stop) = gen_config.get("stopSequences").and_then(|v| v.as_array()) {
@@ -237,6 +228,7 @@ pub fn parse_google_request(body: &Value) -> Result<Context, TransformError> {
 }
 
 /// Build Google SSE response from canonical stream events.
+#[cfg(test)]
 pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
     match event {
         StreamEvent::Start { .. } => {
@@ -254,7 +246,7 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                 }],
                 "modelVersion": model
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         StreamEvent::ThinkingDelta { delta, .. } => {
             let data = json!({
@@ -267,7 +259,7 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                 }],
                 "modelVersion": model
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         StreamEvent::ToolCallEnd { tool_call, .. } => {
             let data = json!({
@@ -285,7 +277,7 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                 }],
                 "modelVersion": model
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         StreamEvent::Usage { usage } => {
             let data = json!({
@@ -295,11 +287,10 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                     "totalTokenCount": usage.total_tokens
                 }
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         StreamEvent::Done { reason, message } => {
             let finish_reason = match reason {
-                StopReason::EndTurn => "STOP",
                 StopReason::MaxTokens => "MAX_TOKENS",
                 StopReason::ToolUse => "TOOL_CALLS",
                 StopReason::ContentFilter => "SAFETY",
@@ -318,7 +309,7 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                 },
                 "modelVersion": model
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         StreamEvent::Error { message, .. } => {
             let error_msg = message.error_message.as_deref().unwrap_or("Unknown error");
@@ -329,7 +320,7 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
                     "status": "INTERNAL"
                 }
             });
-            format!("{}\n", data)
+            format!("{data}\n")
         }
         _ => String::new(),
     }
@@ -339,7 +330,8 @@ pub fn build_google_sse(event: &StreamEvent, model: &str) -> String {
 // Internal helpers
 // ============================================================================
 
-fn parse_google_user_content(content: &Value) -> Result<crate::types::UserMessage, TransformError> {
+#[cfg(test)]
+fn parse_google_user_content(content: &Value) -> crate::types::UserMessage {
     let mut blocks = Vec::new();
 
     if let Some(parts) = content["parts"].as_array() {
@@ -371,13 +363,14 @@ fn parse_google_user_content(content: &Value) -> Result<crate::types::UserMessag
         }
     }
 
-    Ok(crate::types::UserMessage {
+    crate::types::UserMessage {
         content: blocks,
         timestamp: 0,
-    })
+    }
 }
 
-fn parse_google_model_content(content: &Value) -> Result<AssistantMessage, TransformError> {
+#[cfg(test)]
+fn parse_google_model_content(content: &Value) -> AssistantMessage {
     let mut blocks = Vec::new();
 
     if let Some(parts) = content["parts"].as_array() {
@@ -414,13 +407,14 @@ fn parse_google_model_content(content: &Value) -> Result<AssistantMessage, Trans
         }
     }
 
-    Ok(AssistantMessage {
+    AssistantMessage {
         content: blocks,
         api: ApiType::GoogleGenerativeAI,
         ..Default::default()
-    })
+    }
 }
 
+#[cfg(test)]
 fn parse_google_tool(decl: &Value) -> Result<Tool, TransformError> {
     let name = decl["name"]
         .as_str()
@@ -470,8 +464,8 @@ fn build_google_contents(context: &Context) -> Result<Vec<Value>, TransformError
                     })
                     .collect();
 
-                let response: Value =
-                    serde_json::from_str(&content_text).unwrap_or(json!({"result": content_text}));
+                let response: Value = serde_json::from_str(&content_text)
+                    .unwrap_or_else(|_| json!({"result": content_text}));
 
                 contents.push(json!({
                     "role": "user",
@@ -512,8 +506,8 @@ fn build_google_parts(blocks: &[ContentBlock]) -> Result<Vec<Value>, TransformEr
                 }));
             }
             ContentBlock::ToolResult(tr) => {
-                let response: Value =
-                    serde_json::from_str(&tr.content).unwrap_or(json!({"result": tr.content}));
+                let response: Value = serde_json::from_str(&tr.content)
+                    .unwrap_or_else(|_| json!({"result": tr.content}));
                 parts.push(json!({
                     "functionResponse": {
                         "name": tr.tool_call_id,
@@ -553,10 +547,7 @@ fn build_google_model_parts(blocks: &[ContentBlock]) -> Vec<Value> {
         .collect()
 }
 
-fn process_google_chunk(
-    chunk: &Value,
-    state: &mut StreamState,
-) -> Result<Vec<StreamEvent>, TransformError> {
+fn process_google_chunk(chunk: &Value, state: &mut StreamState) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     // Handle start
@@ -576,73 +567,7 @@ fn process_google_chunk(
     // Parse candidates
     if let Some(candidates) = chunk["candidates"].as_array() {
         for candidate in candidates {
-            // Check finish reason
-            if let Some(finish_reason) = candidate["finishReason"].as_str() {
-                state.message.stop_reason = parse_finish_reason(finish_reason);
-            }
-
-            // Parse content parts
-            if let Some(content) = candidate.get("content") {
-                if let Some(parts) = content["parts"].as_array() {
-                    for part in parts {
-                        let is_thought = part["thought"].as_bool().unwrap_or(false);
-
-                        // Text/thinking delta
-                        if let Some(text) = part["text"].as_str() {
-                            // Get or create content block
-                            let idx = if is_thought {
-                                get_or_create_block(state, ContentBlockType::Thinking)
-                            } else {
-                                get_or_create_block(state, ContentBlockType::Text)
-                            };
-
-                            state.content_blocks[idx].text.push_str(text);
-
-                            if is_thought {
-                                events.push(StreamEvent::ThinkingDelta {
-                                    content_index: idx,
-                                    delta: text.to_string(),
-                                });
-                            } else {
-                                events.push(StreamEvent::TextDelta {
-                                    content_index: idx,
-                                    delta: text.to_string(),
-                                });
-                            }
-                        }
-
-                        // Function call
-                        if let Some(func_call) = part.get("functionCall") {
-                            let name = func_call["name"].as_str().unwrap_or_default();
-                            let args = func_call["args"].clone();
-
-                            let idx = state.content_blocks.len();
-                            state.content_blocks.push(ContentBlockState {
-                                block_type: ContentBlockType::ToolCall,
-                                text: serde_json::to_string(&args).unwrap_or_default(),
-                                tool_id: Some(name.to_string()),
-                                tool_name: Some(name.to_string()),
-                            });
-
-                            let tool_call = ToolCall::new(name, name, args);
-                            state
-                                .message
-                                .content
-                                .push(ContentBlock::ToolCall(tool_call.clone()));
-
-                            events.push(StreamEvent::ToolCallStart {
-                                content_index: idx,
-                                id: name.to_string(),
-                                name: name.to_string(),
-                            });
-                            events.push(StreamEvent::ToolCallEnd {
-                                content_index: idx,
-                                tool_call,
-                            });
-                        }
-                    }
-                }
-            }
+            handle_google_candidate(candidate, state, &mut events);
         }
     }
 
@@ -666,43 +591,130 @@ fn process_google_chunk(
         .and_then(|c| c["finishReason"].as_str())
         .is_some()
     {
-        // Finalize content blocks
-        for (idx, block) in state.content_blocks.iter().enumerate() {
-            match block.block_type {
-                ContentBlockType::Text => {
-                    state
-                        .message
-                        .content
-                        .push(ContentBlock::Text(TextContent::new(&block.text)));
-                    events.push(StreamEvent::TextEnd {
-                        content_index: idx,
-                        content: block.text.clone(),
-                    });
-                }
-                ContentBlockType::Thinking => {
-                    state
-                        .message
-                        .content
-                        .push(ContentBlock::Thinking(ThinkingContent::new(&block.text)));
-                    events.push(StreamEvent::ThinkingEnd {
-                        content_index: idx,
-                        content: block.text.clone(),
-                        signature: None,
-                    });
-                }
-                ContentBlockType::ToolCall => {
-                    // Already handled above
-                }
-            }
-        }
-
+        finalize_google_content_blocks(state, &mut events);
         events.push(StreamEvent::Done {
             reason: state.message.stop_reason.clone(),
             message: state.message.clone(),
         });
     }
 
-    Ok(events)
+    events
+}
+
+/// Process a single candidate's finish reason and content parts, appending events.
+fn handle_google_candidate(
+    candidate: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    // Check finish reason
+    if let Some(finish_reason) = candidate["finishReason"].as_str() {
+        state.message.stop_reason = parse_finish_reason(finish_reason);
+    }
+
+    // Parse content parts
+    if let Some(content) = candidate.get("content") {
+        if let Some(parts) = content["parts"].as_array() {
+            for part in parts {
+                handle_google_content_part(part, state, events);
+            }
+        }
+    }
+}
+
+/// Handle text/thinking deltas and function calls within a single content part.
+fn handle_google_content_part(
+    part: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let is_thought = part["thought"].as_bool().unwrap_or(false);
+
+    // Text/thinking delta
+    if let Some(text) = part["text"].as_str() {
+        // Get or create content block
+        let idx = if is_thought {
+            get_or_create_block(state, ContentBlockType::Thinking)
+        } else {
+            get_or_create_block(state, ContentBlockType::Text)
+        };
+
+        state.content_blocks[idx].text.push_str(text);
+
+        if is_thought {
+            events.push(StreamEvent::ThinkingDelta {
+                content_index: idx,
+                delta: text.to_string(),
+            });
+        } else {
+            events.push(StreamEvent::TextDelta {
+                content_index: idx,
+                delta: text.to_string(),
+            });
+        }
+    }
+
+    // Function call
+    if let Some(func_call) = part.get("functionCall") {
+        let name = func_call["name"].as_str().unwrap_or_default();
+        let args = func_call["args"].clone();
+
+        let idx = state.content_blocks.len();
+        state.content_blocks.push(ContentBlockState {
+            block_type: ContentBlockType::ToolCall,
+            text: serde_json::to_string(&args).unwrap_or_default(),
+            tool_id: Some(name.to_string()),
+            tool_name: Some(name.to_string()),
+        });
+
+        let tool_call = ToolCall::new(name, name, args);
+        state
+            .message
+            .content
+            .push(ContentBlock::ToolCall(tool_call.clone()));
+
+        events.push(StreamEvent::ToolCallStart {
+            content_index: idx,
+            id: name.to_string(),
+            name: name.to_string(),
+        });
+        events.push(StreamEvent::ToolCallEnd {
+            content_index: idx,
+            tool_call,
+        });
+    }
+}
+
+/// Finalize accumulated content blocks into the message and emit end events.
+fn finalize_google_content_blocks(state: &mut StreamState, events: &mut Vec<StreamEvent>) {
+    for (idx, block) in state.content_blocks.iter().enumerate() {
+        match block.block_type {
+            ContentBlockType::Text => {
+                state
+                    .message
+                    .content
+                    .push(ContentBlock::Text(TextContent::new(&block.text)));
+                events.push(StreamEvent::TextEnd {
+                    content_index: idx,
+                    content: block.text.clone(),
+                });
+            }
+            ContentBlockType::Thinking => {
+                state
+                    .message
+                    .content
+                    .push(ContentBlock::Thinking(ThinkingContent::new(&block.text)));
+                events.push(StreamEvent::ThinkingEnd {
+                    content_index: idx,
+                    content: block.text.clone(),
+                    signature: None,
+                });
+            }
+            ContentBlockType::ToolCall => {
+                // Already handled above
+            }
+        }
+    }
 }
 
 fn get_or_create_block(state: &mut StreamState, block_type: ContentBlockType) -> usize {
@@ -728,8 +740,7 @@ fn parse_finish_reason(reason: &str) -> StopReason {
     match reason {
         "STOP" => StopReason::EndTurn,
         "MAX_TOKENS" => StopReason::MaxTokens,
-        "SAFETY" => StopReason::ContentFilter,
-        "RECITATION" => StopReason::ContentFilter,
+        "SAFETY" | "RECITATION" => StopReason::ContentFilter,
         "TOOL_CALLS" => StopReason::ToolUse,
         _ => StopReason::Other,
     }
@@ -740,8 +751,12 @@ mod tests {
     use super::*;
     use crate::types::ToolResultMessage;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_google_request_simple() {
+    fn test_parse_google_request_simple() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "gemini-pro",
             "systemInstruction": {
@@ -756,15 +771,20 @@ mod tests {
             }
         });
 
-        let ctx = parse_google_request(&body).unwrap();
+        let ctx = parse_google_request(&body)?;
         assert_eq!(ctx.model, "gemini-pro");
         assert_eq!(ctx.system_prompt, Some("You are helpful".to_string()));
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.max_tokens, Some(1024));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_google_request_with_tools() {
+    fn test_parse_google_request_with_tools() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "gemini-pro",
             "contents": [{"role": "user", "parts": [{"text": "Get weather"}]}],
@@ -780,14 +800,19 @@ mod tests {
             }]
         });
 
-        let ctx = parse_google_request(&body).unwrap();
+        let ctx = parse_google_request(&body)?;
         assert!(ctx.tools.is_some());
-        let tools = ctx.tools.unwrap();
+        let tools = ctx.tools.as_ref().ok_or("tools missing")?;
         assert_eq!(tools[0].name, "get_weather");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_google_request_with_thinking() {
+    fn test_parse_google_request_with_thinking() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "gemini-2.0-flash-thinking",
             "contents": [
@@ -802,33 +827,40 @@ mod tests {
             ]
         });
 
-        let ctx = parse_google_request(&body).unwrap();
+        let ctx = parse_google_request(&body)?;
 
-        if let Message::Assistant(assistant) = &ctx.messages[1] {
-            assert_eq!(assistant.content.len(), 2);
-            if let ContentBlock::Thinking(t) = &assistant.content[0] {
-                assert_eq!(t.thinking, "Let me consider...");
-                assert_eq!(t.signature, Some("sig123".to_string()));
-            } else {
-                panic!("Expected thinking block");
-            }
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &ctx.messages[1] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(assistant.content.len(), 2);
+        let ContentBlock::Thinking(t) = &assistant.content[0] else {
+            return Err("Expected thinking block".into());
+        };
+        assert_eq!(t.thinking, "Let me consider...");
+        assert_eq!(t.signature, Some("sig123".to_string()));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_google_transformer_transform_request() {
+    fn test_google_transformer_transform_request() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = GoogleTransformer::new();
         let ctx = Context::new("gemini-pro")
             .with_system("Be helpful")
             .with_messages(vec![Message::user("Hi")])
             .with_max_tokens(1000);
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
-        assert!(request["systemInstruction"]["parts"][0]["text"] == "Be helpful");
+        assert_eq!(
+            request["systemInstruction"]["parts"][0]["text"],
+            "Be helpful"
+        );
         assert_eq!(request["generationConfig"]["maxOutputTokens"], 1000);
+        Ok(())
     }
 
     #[test]
@@ -868,8 +900,12 @@ mod tests {
         assert!(sse.contains("\"finishReason\":\"STOP\""));
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_stream_chunk() {
+    fn test_parse_stream_chunk() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = GoogleTransformer::new();
         let mut state = StreamState::default();
 
@@ -884,9 +920,7 @@ mod tests {
             "modelVersion": "gemini-pro"
         });
 
-        let events = transformer
-            .parse_stream_chunk(&chunk.to_string(), &mut state)
-            .unwrap();
+        let events = transformer.parse_stream_chunk(&chunk.to_string(), &mut state)?;
 
         assert!(events
             .iter()
@@ -894,10 +928,15 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_response_non_streaming() {
+    fn test_parse_response_non_streaming() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = GoogleTransformer::new();
         let body = json!({
             "candidates": [{
@@ -916,7 +955,7 @@ mod tests {
             "modelVersion": "gemini-pro"
         });
 
-        let events = transformer.parse_response(&body).unwrap();
+        let events = transformer.parse_response(&body)?;
 
         assert!(events
             .iter()
@@ -928,6 +967,7 @@ mod tests {
                 ..
             }
         )));
+        Ok(())
     }
 
     #[test]
@@ -943,8 +983,12 @@ mod tests {
         assert!(google_tool["parameters"].is_object());
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_build_google_contents_with_tool_result() {
+    fn test_build_google_contents_with_tool_result() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("gemini-pro").with_messages(vec![
             Message::user("Get weather"),
             Message::Assistant(AssistantMessage {
@@ -962,12 +1006,13 @@ mod tests {
             )),
         ]);
 
-        let contents = build_google_contents(&ctx).unwrap();
+        let contents = build_google_contents(&ctx)?;
 
         assert_eq!(contents.len(), 3);
         // Tool result should be in a user message with functionResponse
         assert_eq!(contents[2]["role"], "user");
         assert!(contents[2]["parts"][0]["functionResponse"].is_object());
+        Ok(())
     }
 
     #[test]

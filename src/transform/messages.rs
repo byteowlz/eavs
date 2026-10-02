@@ -3,7 +3,9 @@
 //! Handles transforming messages when they cross provider boundaries,
 //! including thinking block conversion and orphan tool call filtering.
 
+#[cfg(test)]
 use crate::types::{AssistantMessage, ContentBlock, Message, TextContent, ToolCall};
+#[cfg(test)]
 use std::collections::HashSet;
 
 /// Transform messages for cross-provider compatibility.
@@ -11,6 +13,7 @@ use std::collections::HashSet;
 /// When messages from one provider are sent to a different provider, special handling is needed:
 /// - Thinking blocks are converted to text with `<thinking>` tags
 /// - Orphan tool calls (without results) are filtered out
+#[cfg(test)]
 pub fn transform_messages(
     messages: &[Message],
     target_provider: &str,
@@ -22,7 +25,7 @@ pub fn transform_messages(
             Message::Assistant(assistant) => {
                 // Check if from different provider/API
                 let needs_transform = assistant.provider != target_provider
-                    || !api_matches(&assistant.api, target_api);
+                    || !api_matches(assistant.api, target_api);
 
                 if needs_transform {
                     Message::Assistant(transform_assistant_message(assistant))
@@ -37,8 +40,9 @@ pub fn transform_messages(
     filter_orphan_tool_calls(transformed)
 }
 
-/// Check if an ApiType matches a target string.
-fn api_matches(api: &crate::types::ApiType, target: &str) -> bool {
+/// Check if an `ApiType` matches a target string.
+#[cfg(test)]
+fn api_matches(api: crate::types::ApiType, target: &str) -> bool {
     use crate::types::ApiType;
     let target_lower = target.to_lowercase().replace('_', "");
     match api {
@@ -50,6 +54,7 @@ fn api_matches(api: &crate::types::ApiType, target: &str) -> bool {
 }
 
 /// Transform an assistant message for cross-provider compatibility.
+#[cfg(test)]
 fn transform_assistant_message(assistant: &AssistantMessage) -> AssistantMessage {
     let transformed_content: Vec<ContentBlock> = assistant
         .content
@@ -76,7 +81,8 @@ fn transform_assistant_message(assistant: &AssistantMessage) -> AssistantMessage
 ///
 /// A tool call is considered orphan if:
 /// - It's not in the last message, AND
-/// - There's no tool result message following it with matching tool_call_id
+/// - There's no tool result message following it with matching `tool_call_id`
+#[cfg(test)]
 pub fn filter_orphan_tool_calls(mut messages: Vec<Message>) -> Vec<Message> {
     if messages.is_empty() {
         return messages;
@@ -125,6 +131,7 @@ pub fn filter_orphan_tool_calls(mut messages: Vec<Message>) -> Vec<Message> {
 }
 
 /// Check if messages contain any thinking blocks.
+#[cfg(test)]
 pub fn has_thinking_blocks(messages: &[Message]) -> bool {
     messages.iter().any(|msg| {
         if let Message::Assistant(assistant) = msg {
@@ -139,6 +146,7 @@ pub fn has_thinking_blocks(messages: &[Message]) -> bool {
 }
 
 /// Extract all tool calls from messages.
+#[cfg(test)]
 pub fn extract_tool_calls(messages: &[Message]) -> Vec<&ToolCall> {
     messages
         .iter()
@@ -166,6 +174,7 @@ pub fn extract_tool_calls(messages: &[Message]) -> Vec<&ToolCall> {
 }
 
 /// Count the number of messages by role.
+#[cfg(test)]
 pub fn count_messages_by_role(messages: &[Message]) -> (usize, usize, usize) {
     let mut user = 0;
     let mut assistant = 0;
@@ -184,6 +193,7 @@ pub fn count_messages_by_role(messages: &[Message]) -> (usize, usize, usize) {
 }
 
 /// Convert all thinking blocks to text blocks with tags.
+#[cfg(test)]
 pub fn convert_thinking_to_text(messages: Vec<Message>) -> Vec<Message> {
     messages
         .into_iter()
@@ -207,6 +217,7 @@ pub fn convert_thinking_to_text(messages: Vec<Message>) -> Vec<Message> {
 }
 
 /// Merge consecutive text blocks in messages.
+#[cfg(test)]
 pub fn merge_text_blocks(messages: Vec<Message>) -> Vec<Message> {
     messages
         .into_iter()
@@ -224,6 +235,7 @@ pub fn merge_text_blocks(messages: Vec<Message>) -> Vec<Message> {
         .collect()
 }
 
+#[cfg(test)]
 fn merge_consecutive_text(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     let mut result = Vec::new();
     let mut current_text = String::new();
@@ -281,8 +293,12 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_transform_thinking_blocks() {
+    fn test_transform_thinking_blocks() -> Result<(), Box<dyn std::error::Error>> {
         let messages = vec![
             Message::user("Hello"),
             Message::Assistant(make_assistant_with_thinking()),
@@ -290,22 +306,24 @@ mod tests {
 
         let transformed = transform_messages(&messages, "openai", "openai_completions");
 
-        if let Message::Assistant(assistant) = &transformed[1] {
-            // First content should now be text with tags
-            if let ContentBlock::Text(t) = &assistant.content[0] {
-                assert!(t.text.contains("<thinking>"));
-                assert!(t.text.contains("Let me think..."));
-                assert!(t.text.contains("</thinking>"));
-            } else {
-                panic!("Expected text block");
-            }
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &transformed[1] else {
+            return Err("Expected assistant message".into());
+        };
+        let ContentBlock::Text(t) = &assistant.content[0] else {
+            return Err("Expected text block".into());
+        };
+        assert!(t.text.contains("<thinking>"));
+        assert!(t.text.contains("Let me think..."));
+        assert!(t.text.contains("</thinking>"));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_no_transform_same_provider() {
+    fn test_no_transform_same_provider() -> Result<(), Box<dyn std::error::Error>> {
         let assistant = AssistantMessage {
             content: vec![ContentBlock::Thinking(ThinkingContent::new("Thinking..."))],
             provider: "anthropic".to_string(),
@@ -318,16 +336,20 @@ mod tests {
         // Same provider should not transform
         let transformed = transform_messages(&messages, "anthropic", "anthropic_messages");
 
-        if let Message::Assistant(assistant) = &transformed[0] {
-            // Should still be thinking block
-            assert!(matches!(&assistant.content[0], ContentBlock::Thinking(_)));
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &transformed[0] else {
+            return Err("Expected assistant message".into());
+        };
+        // Should still be thinking block
+        assert!(matches!(&assistant.content[0], ContentBlock::Thinking(_)));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_filter_orphan_tool_calls() {
+    fn test_filter_orphan_tool_calls() -> Result<(), Box<dyn std::error::Error>> {
         let messages = vec![
             Message::user("Get weather"),
             Message::Assistant(make_assistant_with_tool_call("call_123", "get_weather")),
@@ -340,24 +362,27 @@ mod tests {
         let filtered = filter_orphan_tool_calls(messages);
 
         // First assistant should have tool call filtered out
-        if let Message::Assistant(assistant) = &filtered[1] {
-            assert_eq!(assistant.content.len(), 1); // Only text, tool call removed
-            assert!(matches!(&assistant.content[0], ContentBlock::Text(_)));
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(first) = &filtered[1] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(first.content.len(), 1); // Only text, tool call removed
+        assert!(matches!(&first.content[0], ContentBlock::Text(_)));
 
         // Second assistant should keep tool call (has result)
-        if let Message::Assistant(assistant) = &filtered[3] {
-            assert_eq!(assistant.content.len(), 2);
-            assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(second) = &filtered[3] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(second.content.len(), 2);
+        assert!(matches!(&second.content[1], ContentBlock::ToolCall(_)));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_keep_last_message_tool_calls() {
+    fn test_keep_last_message_tool_calls() -> Result<(), Box<dyn std::error::Error>> {
         let messages = vec![
             Message::user("Search for something"),
             Message::Assistant(make_assistant_with_tool_call("call_999", "search")),
@@ -366,13 +391,13 @@ mod tests {
 
         let filtered = filter_orphan_tool_calls(messages);
 
-        if let Message::Assistant(assistant) = &filtered[1] {
-            // Tool call should still be there (last message)
-            assert_eq!(assistant.content.len(), 2);
-            assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &filtered[1] else {
+            return Err("Expected assistant message".into());
+        };
+        // Tool call should still be there (last message)
+        assert_eq!(assistant.content.len(), 2);
+        assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
+        Ok(())
     }
 
     #[test]
@@ -430,8 +455,12 @@ mod tests {
         assert_eq!(tool, 1);
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_convert_thinking_to_text() {
+    fn test_convert_thinking_to_text() -> Result<(), Box<dyn std::error::Error>> {
         let messages = vec![
             Message::user("Think about this"),
             Message::Assistant(AssistantMessage {
@@ -445,18 +474,22 @@ mod tests {
 
         let converted = convert_thinking_to_text(messages);
 
-        if let Message::Assistant(assistant) = &converted[1] {
-            assert_eq!(assistant.content.len(), 2);
-            // Both should be text now
-            assert!(matches!(&assistant.content[0], ContentBlock::Text(_)));
-            assert!(matches!(&assistant.content[1], ContentBlock::Text(_)));
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &converted[1] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(assistant.content.len(), 2);
+        // Both should be text now
+        assert!(matches!(&assistant.content[0], ContentBlock::Text(_)));
+        assert!(matches!(&assistant.content[1], ContentBlock::Text(_)));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_merge_text_blocks() {
+    fn test_merge_text_blocks() -> Result<(), Box<dyn std::error::Error>> {
         let messages = vec![Message::Assistant(AssistantMessage {
             content: vec![
                 ContentBlock::Text(TextContent::new("First")),
@@ -469,29 +502,27 @@ mod tests {
 
         let merged = merge_text_blocks(messages);
 
-        if let Message::Assistant(assistant) = &merged[0] {
-            assert_eq!(assistant.content.len(), 3);
+        let Message::Assistant(assistant) = &merged[0] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(assistant.content.len(), 3);
 
-            // First two texts should be merged
-            if let ContentBlock::Text(t) = &assistant.content[0] {
-                assert!(t.text.contains("First"));
-                assert!(t.text.contains("Second"));
-            } else {
-                panic!("Expected text block");
-            }
+        // First two texts should be merged
+        let ContentBlock::Text(first) = &assistant.content[0] else {
+            return Err("Expected text block".into());
+        };
+        assert!(first.text.contains("First"));
+        assert!(first.text.contains("Second"));
 
-            // Tool call preserved
-            assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
+        // Tool call preserved
+        assert!(matches!(&assistant.content[1], ContentBlock::ToolCall(_)));
 
-            // Last text preserved
-            if let ContentBlock::Text(t) = &assistant.content[2] {
-                assert_eq!(t.text, "Third");
-            } else {
-                panic!("Expected text block");
-            }
-        } else {
-            panic!("Expected assistant message");
-        }
+        // Last text preserved
+        let ContentBlock::Text(last) = &assistant.content[2] else {
+            return Err("Expected text block".into());
+        };
+        assert_eq!(last.text, "Third");
+        Ok(())
     }
 
     #[test]

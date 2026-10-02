@@ -17,21 +17,21 @@ pub enum ProviderType {
     Bedrock,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
-    /// OpenAI Codex CLI (ChatGPT backend via OAuth) - uses Responses API
+    /// `OpenAI` Codex CLI (`ChatGPT` backend via OAuth) - uses Responses API
     OpenAICodex,
-    /// OpenAI Responses API (api.openai.com/v1/responses)
+    /// `OpenAI` Responses API (api.openai.com/v1/responses)
     OpenAIResponses,
-    /// GitHub Copilot - OpenAI completions API with Copilot token exchange and headers
+    /// GitHub Copilot - `OpenAI` completions API with Copilot token exchange and headers
     GithubCopilot,
     /// Google Vertex AI - Google Generative AI via Vertex AI platform (ADC auth)
     GoogleVertex,
-    /// OpenCode Zen - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai)
+    /// `OpenCode` Zen - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai)
     OpenCode,
-    /// OpenCode Go - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai/zen/go)
+    /// `OpenCode` Go - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai/zen/go)
     OpenCodeGo,
-    /// TypeSafe System One typed decisions.
+    /// `TypeSafe` System One typed decisions.
     TypeSafe,
-    /// ElevenLabs speech and audio APIs.
+    /// `ElevenLabs` speech and audio APIs.
     ElevenLabs,
     /// Cohere embeddings and reranking APIs.
     Cohere,
@@ -74,7 +74,7 @@ pub enum AuthStyle {
 impl ProviderType {
     /// Parse provider type from string (case-insensitive).
     ///
-    /// Unknown strings fall back to OpenAI for backward compatibility; use
+    /// Unknown strings fall back to `OpenAI` for backward compatibility; use
     /// [`ProviderType::try_from_str`] when the caller wants to detect typos.
     pub fn from_str(s: &str) -> Self {
         Self::try_from_str(s).unwrap_or(Self::OpenAI)
@@ -115,7 +115,7 @@ impl ProviderType {
     }
 
     /// Get provider metadata including defaults.
-    pub fn info(&self) -> ProviderInfo {
+    pub const fn info(&self) -> ProviderInfo {
         match self {
             Self::OpenAI => ProviderInfo {
                 provider_type: *self,
@@ -265,13 +265,13 @@ impl ProviderType {
     }
 
     /// Check if this provider is a mock provider (handled internally without network).
-    pub fn is_mock(&self) -> bool {
+    pub const fn is_mock(&self) -> bool {
         matches!(self, Self::Mock)
     }
 
     /// Check if this provider uses OpenAI-compatible chat completions API.
     #[allow(dead_code)]
-    pub fn is_openai_compatible(&self) -> bool {
+    pub const fn is_openai_compatible(&self) -> bool {
         matches!(
             self,
             Self::OpenAI
@@ -290,7 +290,7 @@ impl ProviderType {
 
     /// Check if this provider requires request transformation.
     #[allow(dead_code)]
-    pub fn needs_transform(&self) -> bool {
+    pub const fn needs_transform(&self) -> bool {
         matches!(
             self,
             Self::Anthropic
@@ -304,7 +304,7 @@ impl ProviderType {
 
     /// Check if this provider supports the /v1/models endpoint natively.
     /// Providers that don't support it will get a synthetic response.
-    pub fn supports_models_endpoint(&self) -> bool {
+    pub const fn supports_models_endpoint(&self) -> bool {
         matches!(
             self,
             Self::OpenAI
@@ -609,7 +609,7 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
 }
 
 /// Configuration for compatibility settings with OpenAI-compatible APIs.
-/// Some providers have slight differences from the OpenAI API.
+/// Some providers have slight differences from the `OpenAI` API.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct CompatSettings {
@@ -617,7 +617,7 @@ pub struct CompatSettings {
     pub supports_store: Option<bool>,
     /// Whether provider supports `developer` role vs `system` (default: true)
     pub supports_developer_role: Option<bool>,
-    /// Which max tokens field to use: "max_completion_tokens" or "max_tokens"
+    /// Which max tokens field to use: "`max_completion_tokens`" or "`max_tokens`"
     pub max_tokens_field: Option<String>,
     /// Whether provider supports `stream_options: { include_usage: true }` (default: true)
     /// Set to false for providers that reject or ignore this field.
@@ -625,7 +625,7 @@ pub struct CompatSettings {
 }
 
 impl CompatSettings {
-    /// Merge with detected defaults based on base_url.
+    /// Merge with detected defaults based on `base_url`.
     pub fn with_detected_defaults(self, base_url: &str) -> Self {
         let detected = Self::detect_from_url(base_url);
         Self {

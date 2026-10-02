@@ -332,6 +332,13 @@ eavs login openai --user default --account pro-subscription
 eavs auth status
 ```
 
+Eavs-created OAuth credentials are refreshed by eavs. Credentials explicitly
+marked as borrowed from another tool are read-only: an expired token returns an
+owner-specific renewal error without contacting a refresh endpoint or modifying
+the stored token. Malformed stored ownership metadata fails closed. Existing
+legacy eavs records remain eavs-owned. Eavs does not currently import native
+Codex/Claude credential files; the ownership guard does not add such an importer.
+
 Virtual keys can be bound to OAuth users and specific accounts:
 
 ```bash

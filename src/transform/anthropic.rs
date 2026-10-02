@@ -3,10 +3,11 @@
 //! Handles transformation between canonical format and Anthropic's Messages API.
 
 use crate::transform::{RequestTransformer, ResponseTransformer, TransformError};
+#[cfg(test)]
+use crate::types::ImageContent;
 use crate::types::{
-    ApiType, AssistantMessage, ContentBlock, ContentBlockState, ContentBlockType, Context,
-    ImageContent, Message, StopReason, StreamEvent, StreamState, TextContent, ThinkingContent,
-    Tool, ToolCall, Usage,
+    ApiType, AssistantMessage, ContentBlock, ContentBlockState, ContentBlockType, Context, Message,
+    StopReason, StreamEvent, StreamState, TextContent, ThinkingContent, Tool, ToolCall, Usage,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,26 +15,16 @@ use serde_json::{json, Value};
 /// Anthropic Messages API transformer.
 #[derive(Debug, Clone, Default)]
 pub struct AnthropicTransformer {
-    /// API version header
-    pub api_version: String,
     /// Whether to enable caching
     pub enable_cache: bool,
 }
 
 impl AnthropicTransformer {
-    pub fn new() -> Self {
-        Self {
-            api_version: "2023-06-01".to_string(),
-            enable_cache: true,
-        }
+    pub const fn new() -> Self {
+        Self { enable_cache: true }
     }
 
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
-        self.api_version = version.into();
-        self
-    }
-
-    pub fn with_cache(mut self, enable: bool) -> Self {
+    pub const fn with_cache(mut self, enable: bool) -> Self {
         self.enable_cache = enable;
         self
     }
@@ -107,11 +98,12 @@ impl RequestTransformer for AnthropicTransformer {
         Ok(request)
     }
 
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)> {
         vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("x-api-key".to_string(), api_key.to_string()),
-            ("anthropic-version".to_string(), self.api_version.clone()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
         ]
     }
 
@@ -153,7 +145,7 @@ impl ResponseTransformer for AnthropicTransformer {
                 let parsed: Value = serde_json::from_str(data.trim())
                     .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
 
-                events.extend(process_anthropic_event(&event_type, &parsed, state)?);
+                events.extend(process_anthropic_event(&event_type, &parsed, state));
             }
         }
 
@@ -175,7 +167,7 @@ impl ResponseTransformer for AnthropicTransformer {
                 cache_read_input_tokens: response.usage.cache_read_input_tokens,
                 cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
             },
-            stop_reason: parse_stop_reason(&response.stop_reason),
+            stop_reason: parse_stop_reason(response.stop_reason.as_deref()),
             ..Default::default()
         };
 
@@ -195,13 +187,12 @@ impl ResponseTransformer for AnthropicTransformer {
                 "thinking" => {
                     let thinking = content.thinking.as_deref().unwrap_or_default();
                     let signature = content.signature.clone();
-                    message.content.push(ContentBlock::Thinking(
-                        if let Some(sig) = signature.clone() {
-                            ThinkingContent::with_signature(thinking, sig)
-                        } else {
-                            ThinkingContent::new(thinking)
-                        },
-                    ));
+                    message
+                        .content
+                        .push(ContentBlock::Thinking(signature.clone().map_or_else(
+                            || ThinkingContent::new(thinking),
+                            |sig| ThinkingContent::with_signature(thinking, sig),
+                        )));
                     events.push(StreamEvent::ThinkingEnd {
                         content_index: idx,
                         content: thinking.to_string(),
@@ -236,6 +227,7 @@ impl ResponseTransformer for AnthropicTransformer {
 }
 
 /// Parse an Anthropic request body into canonical Context.
+#[cfg(test)]
 pub fn parse_anthropic_request(body: &Value) -> Result<Context, TransformError> {
     let model = body["model"]
         .as_str()
@@ -270,11 +262,11 @@ pub fn parse_anthropic_request(body: &Value) -> Result<Context, TransformError> 
 
         match role {
             "user" => {
-                let msgs = parse_anthropic_user_message_to_messages(msg)?;
+                let msgs = parse_anthropic_user_message_to_messages(msg);
                 context.messages.extend(msgs);
             }
             "assistant" => {
-                let assistant_msg = parse_anthropic_assistant_message(msg)?;
+                let assistant_msg = parse_anthropic_assistant_message(msg);
                 context.messages.push(Message::Assistant(assistant_msg));
             }
             _ => {}
@@ -306,7 +298,8 @@ pub fn parse_anthropic_request(body: &Value) -> Result<Context, TransformError> 
     Ok(context)
 }
 
-fn parse_anthropic_user_message_to_messages(msg: &Value) -> Result<Vec<Message>, TransformError> {
+#[cfg(test)]
+fn parse_anthropic_user_message_to_messages(msg: &Value) -> Vec<Message> {
     let mut out = Vec::new();
 
     match &msg["content"] {
@@ -365,241 +358,215 @@ fn parse_anthropic_user_message_to_messages(msg: &Value) -> Result<Vec<Message>,
         _ => {}
     }
 
-    Ok(out)
+    out
 }
 
 /// Build Anthropic SSE response from canonical stream events.
+#[cfg(test)]
 pub fn build_anthropic_sse(event: &StreamEvent) -> String {
     match event {
-        StreamEvent::Start { partial } => {
-            let data = json!({
-                "type": "message_start",
-                "message": {
-                    "id": format!("msg_{}", uuid::Uuid::new_v4()),
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": partial.model,
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": partial.usage.prompt_tokens,
-                        "output_tokens": 0
-                    }
-                }
-            });
-            format!("event: message_start\ndata: {}\n\n", data)
-        }
+        StreamEvent::Start { partial } => anthropic_sse_message_start(partial),
         StreamEvent::TextStart { content_index } => {
-            let data = json!({
-                "type": "content_block_start",
-                "index": content_index,
-                "content_block": {
-                    "type": "text",
-                    "text": ""
-                }
-            });
-            format!("event: content_block_start\ndata: {}\n\n", data)
+            anthropic_content_block_start(*content_index, "text", "")
+        }
+        StreamEvent::ThinkingStart { content_index } => {
+            anthropic_content_block_start(*content_index, "thinking", "")
         }
         StreamEvent::TextDelta {
             content_index,
             delta,
-        } => {
-            let data = json!({
-                "type": "content_block_delta",
-                "index": content_index,
-                "delta": {
-                    "type": "text_delta",
-                    "text": delta
-                }
-            });
-            format!("event: content_block_delta\ndata: {}\n\n", data)
-        }
-        StreamEvent::TextEnd { content_index, .. } => {
-            let data = json!({
-                "type": "content_block_stop",
-                "index": content_index
-            });
-            format!("event: content_block_stop\ndata: {}\n\n", data)
-        }
-        StreamEvent::ThinkingStart { content_index } => {
-            let data = json!({
-                "type": "content_block_start",
-                "index": content_index,
-                "content_block": {
-                    "type": "thinking",
-                    "thinking": ""
-                }
-            });
-            format!("event: content_block_start\ndata: {}\n\n", data)
-        }
+        } => anthropic_content_block_delta(*content_index, "text_delta", delta),
         StreamEvent::ThinkingDelta {
             content_index,
             delta,
-        } => {
-            let data = json!({
-                "type": "content_block_delta",
-                "index": content_index,
-                "delta": {
-                    "type": "thinking_delta",
-                    "thinking": delta
-                }
-            });
-            format!("event: content_block_delta\ndata: {}\n\n", data)
+        } => anthropic_content_block_delta(*content_index, "thinking_delta", delta),
+        StreamEvent::TextEnd { content_index, .. }
+        | StreamEvent::ToolCallEnd { content_index, .. } => {
+            anthropic_content_block_stop(*content_index)
         }
         StreamEvent::ThinkingEnd {
             content_index,
             signature,
             ..
-        } => {
-            let mut data = json!({
-                "type": "content_block_stop",
-                "index": content_index
-            });
-            if let Some(sig) = signature {
-                data["signature"] = json!(sig);
-            }
-            format!("event: content_block_stop\ndata: {}\n\n", data)
-        }
+        } => anthropic_content_block_stop_with_signature(*content_index, signature.as_deref()),
         StreamEvent::ToolCallStart {
             content_index,
             id,
             name,
-        } => {
-            let data = json!({
-                "type": "content_block_start",
-                "index": content_index,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": id,
-                    "name": name,
-                    "input": {}
-                }
-            });
-            format!("event: content_block_start\ndata: {}\n\n", data)
-        }
+        } => anthropic_sse_tool_call_start(*content_index, id, name),
         StreamEvent::ToolCallDelta {
             content_index,
             delta,
-        } => {
-            let data = json!({
-                "type": "content_block_delta",
-                "index": content_index,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": delta
-                }
-            });
-            format!("event: content_block_delta\ndata: {}\n\n", data)
-        }
-        StreamEvent::ToolCallEnd { content_index, .. } => {
-            let data = json!({
-                "type": "content_block_stop",
-                "index": content_index
-            });
-            format!("event: content_block_stop\ndata: {}\n\n", data)
-        }
-        StreamEvent::Usage { usage } => {
-            let data = json!({
-                "type": "message_delta",
-                "usage": {
-                    "output_tokens": usage.completion_tokens
-                }
-            });
-            format!("event: message_delta\ndata: {}\n\n", data)
-        }
-        StreamEvent::Done { reason, message } => {
-            let stop_reason = match reason {
-                StopReason::EndTurn => "end_turn",
-                StopReason::StopSequence => "stop_sequence",
-                StopReason::MaxTokens => "max_tokens",
-                StopReason::ToolUse => "tool_use",
-                _ => "end_turn",
-            };
-
-            let delta_data = json!({
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": stop_reason,
-                    "stop_sequence": null
-                },
-                "usage": {
-                    "output_tokens": message.usage.completion_tokens
-                }
-            });
-
-            let stop_data = json!({"type": "message_stop"});
-
-            format!(
-                "event: message_delta\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
-                delta_data, stop_data
-            )
-        }
-        StreamEvent::Error { message, .. } => {
-            let error_msg = message.error_message.as_deref().unwrap_or("Unknown error");
-            let data = json!({
-                "type": "error",
-                "error": {
-                    "type": "server_error",
-                    "message": error_msg
-                }
-            });
-            format!("event: error\ndata: {}\n\n", data)
-        }
+        } => anthropic_sse_tool_call_delta(*content_index, delta),
+        StreamEvent::Usage { usage } => anthropic_sse_usage(usage),
+        StreamEvent::Done { reason, message } => anthropic_sse_done(reason, message),
+        StreamEvent::Error { message, .. } => anthropic_sse_error(message),
     }
+}
+
+/// Format a JSON payload as a single SSE `event:`/`data:` frame.
+#[cfg(test)]
+fn anthropic_sse_frame(event: &str, data: &Value) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+#[cfg(test)]
+fn anthropic_sse_message_start(partial: &AssistantMessage) -> String {
+    let data = json!({
+        "type": "message_start",
+        "message": {
+            "id": format!("msg_{}", uuid::Uuid::new_v4()),
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": partial.model,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": partial.usage.prompt_tokens,
+                "output_tokens": 0
+            }
+        }
+    });
+    anthropic_sse_frame("message_start", &data)
+}
+
+#[cfg(test)]
+fn anthropic_content_block_start(content_index: usize, block_type: &str, text: &str) -> String {
+    let data = json!({
+        "type": "content_block_start",
+        "index": content_index,
+        "content_block": {
+            "type": block_type,
+            "text": text
+        }
+    });
+    anthropic_sse_frame("content_block_start", &data)
+}
+
+#[cfg(test)]
+fn anthropic_content_block_delta(content_index: usize, delta_type: &str, value: &str) -> String {
+    let data = json!({
+        "type": "content_block_delta",
+        "index": content_index,
+        "delta": {
+            "type": delta_type,
+            "text": value
+        }
+    });
+    anthropic_sse_frame("content_block_delta", &data)
+}
+
+#[cfg(test)]
+fn anthropic_content_block_stop(content_index: usize) -> String {
+    let data = json!({
+        "type": "content_block_stop",
+        "index": content_index
+    });
+    anthropic_sse_frame("content_block_stop", &data)
+}
+
+#[cfg(test)]
+fn anthropic_content_block_stop_with_signature(
+    content_index: usize,
+    signature: Option<&str>,
+) -> String {
+    let mut data = json!({
+        "type": "content_block_stop",
+        "index": content_index
+    });
+    if let Some(sig) = signature {
+        data["signature"] = json!(sig);
+    }
+    anthropic_sse_frame("content_block_stop", &data)
+}
+
+#[cfg(test)]
+fn anthropic_sse_tool_call_start(content_index: usize, id: &str, name: &str) -> String {
+    let data = json!({
+        "type": "content_block_start",
+        "index": content_index,
+        "content_block": {
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": {}
+        }
+    });
+    anthropic_sse_frame("content_block_start", &data)
+}
+
+#[cfg(test)]
+fn anthropic_sse_tool_call_delta(content_index: usize, delta: &str) -> String {
+    let data = json!({
+        "type": "content_block_delta",
+        "index": content_index,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": delta
+        }
+    });
+    anthropic_sse_frame("content_block_delta", &data)
+}
+
+#[cfg(test)]
+fn anthropic_sse_usage(usage: &Usage) -> String {
+    let data = json!({
+        "type": "message_delta",
+        "usage": {
+            "output_tokens": usage.completion_tokens
+        }
+    });
+    anthropic_sse_frame("message_delta", &data)
+}
+
+#[cfg(test)]
+fn anthropic_sse_done(reason: &StopReason, message: &AssistantMessage) -> String {
+    let stop_reason = match reason {
+        StopReason::EndTurn | StopReason::Other | StopReason::ContentFilter => "end_turn",
+        StopReason::StopSequence => "stop_sequence",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::ToolUse => "tool_use",
+    };
+
+    let delta_data = json!({
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": stop_reason,
+            "stop_sequence": null
+        },
+        "usage": {
+            "output_tokens": message.usage.completion_tokens
+        }
+    });
+
+    let stop_data = json!({"type": "message_stop"});
+
+    format!(
+        "event: message_delta\ndata: {delta_data}\n\nevent: message_stop\ndata: {stop_data}\n\n"
+    )
+}
+
+#[cfg(test)]
+fn anthropic_sse_error(message: &AssistantMessage) -> String {
+    let error_msg = message.error_message.as_deref().unwrap_or("Unknown error");
+    let data = json!({
+        "type": "error",
+        "error": {
+            "type": "server_error",
+            "message": error_msg
+        }
+    });
+    anthropic_sse_frame("error", &data)
 }
 
 // ============================================================================
 // Internal helpers
 // ============================================================================
 
-fn parse_anthropic_user_message(msg: &Value) -> Result<crate::types::UserMessage, TransformError> {
-    let mut content = Vec::new();
-
-    match &msg["content"] {
-        Value::String(s) => {
-            content.push(ContentBlock::Text(TextContent::new(s)));
-        }
-        Value::Array(parts) => {
-            for part in parts {
-                let part_type = part["type"].as_str().unwrap_or("text");
-                match part_type {
-                    "text" => {
-                        let text = part["text"].as_str().unwrap_or_default();
-                        content.push(ContentBlock::Text(TextContent::new(text)));
-                    }
-                    "image" => {
-                        let source = &part["source"];
-                        let media_type = source["media_type"].as_str().unwrap_or("image/png");
-                        let data = source["data"].as_str().unwrap_or_default();
-                        content.push(ContentBlock::Image(ImageContent::base64(data, media_type)));
-                    }
-                    "tool_result" => {
-                        let tool_call_id = part["tool_use_id"].as_str().unwrap_or_default();
-                        let result_content = part["content"].as_str().unwrap_or_default();
-                        let is_error = part["is_error"].as_bool().unwrap_or(false);
-
-                        // Store as inline tool result
-                        content.push(ContentBlock::ToolResult(crate::types::ToolResultContent {
-                            tool_call_id: tool_call_id.to_string(),
-                            content: result_content.to_string(),
-                            is_error,
-                        }));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-
-    Ok(crate::types::UserMessage {
-        content,
-        timestamp: 0,
-    })
-}
-
-fn parse_anthropic_assistant_message(msg: &Value) -> Result<AssistantMessage, TransformError> {
+#[cfg(test)]
+#[cfg(test)]
+fn parse_anthropic_assistant_message(msg: &Value) -> AssistantMessage {
     let mut content = Vec::new();
 
     match &msg["content"] {
@@ -639,13 +606,14 @@ fn parse_anthropic_assistant_message(msg: &Value) -> Result<AssistantMessage, Tr
         _ => {}
     }
 
-    Ok(AssistantMessage {
+    AssistantMessage {
         content,
         api: ApiType::AnthropicMessages,
         ..Default::default()
-    })
+    }
 }
 
+#[cfg(test)]
 fn parse_anthropic_tool(tool: &Value) -> Result<Tool, TransformError> {
     let name = tool["name"]
         .as_str()
@@ -688,8 +656,8 @@ fn build_anthropic_messages(
     for (idx, msg) in context.messages.iter().enumerate() {
         match msg {
             Message::User(user) => {
-                let content = build_anthropic_content(&user.content)?;
-                if content.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                let user_content = build_anthropic_content(&user.content)?;
+                if user_content.as_array().is_none_or(std::vec::Vec::is_empty) {
                     // Anthropic rejects empty content blocks; drop empty messages.
                     continue;
                 }
@@ -697,7 +665,7 @@ fn build_anthropic_messages(
 
                 let mut msg_obj = json!({
                     "role": "user",
-                    "content": content
+                    "content": user_content
                 });
 
                 // Add cache control to last user message
@@ -712,14 +680,17 @@ fn build_anthropic_messages(
                 messages.push(msg_obj);
             }
             Message::Assistant(assistant) => {
-                let content = build_anthropic_assistant_content(&assistant.content);
-                if content.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                let assistant_content = build_anthropic_assistant_content(&assistant.content);
+                if assistant_content
+                    .as_array()
+                    .is_none_or(std::vec::Vec::is_empty)
+                {
                     // Drop empty assistant messages (Anthropic rejects empty blocks).
                     continue;
                 }
                 messages.push(json!({
                     "role": "assistant",
-                    "content": content
+                    "content": assistant_content
                 }));
             }
             Message::Tool(tool_result) => {
@@ -774,7 +745,7 @@ fn build_anthropic_content(blocks: &[ContentBlock]) -> Result<Value, TransformEr
                 parts.push(json!({
                     "type": "text",
                     "text": t.text
-                }))
+                }));
             }
             ContentBlock::Image(img) => {
                 if img.is_url {
@@ -869,20 +840,16 @@ fn anthropic_tool_choice_from_openai(tool_choice: &Value) -> AnthropicToolChoice
                         .get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str());
-                    if let Some(name) = name {
+                    name.map_or(AnthropicToolChoiceDecision::Ignore, |name| {
                         AnthropicToolChoiceDecision::Set(json!({"type": "tool", "name": name}))
-                    } else {
-                        AnthropicToolChoiceDecision::Ignore
-                    }
+                    })
                 }
                 // Allow callers to pass Anthropic-style tool_choice through.
                 "tool" => {
                     let name = obj.get("name").and_then(|n| n.as_str());
-                    if let Some(name) = name {
+                    name.map_or(AnthropicToolChoiceDecision::Ignore, |name| {
                         AnthropicToolChoiceDecision::Set(json!({"type": "tool", "name": name}))
-                    } else {
-                        AnthropicToolChoiceDecision::Ignore
-                    }
+                    })
                 }
                 _ => AnthropicToolChoiceDecision::Ignore,
             }
@@ -894,14 +861,13 @@ fn anthropic_tool_choice_from_openai(tool_choice: &Value) -> AnthropicToolChoice
 fn anthropic_message_has_any_content(blocks: &[ContentBlock]) -> bool {
     blocks.iter().any(|b| match b {
         ContentBlock::Text(t) => !t.text.trim().is_empty(),
-        ContentBlock::Image(_) => true,
-        ContentBlock::ToolResult(_) => true,
+        ContentBlock::Image(_) | ContentBlock::ToolResult(_) => true,
         _ => false,
     })
 }
 
-fn parse_stop_reason(reason: &Option<String>) -> StopReason {
-    match reason.as_deref() {
+fn parse_stop_reason(reason: Option<&str>) -> StopReason {
+    match reason {
         Some("end_turn") => StopReason::EndTurn,
         Some("stop_sequence") => StopReason::StopSequence,
         Some("max_tokens") => StopReason::MaxTokens,
@@ -916,7 +882,7 @@ fn parse_stop_reason(reason: &Option<String>) -> StopReason {
 
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "Deserialized for the upstream wire schema")]
     id: String,
     model: String,
     content: Vec<AnthropicContent>,
@@ -942,6 +908,10 @@ struct AnthropicContent {
     input: Option<Value>,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "Field names mirror the Anthropic token-count schema in the wire format"
+)]
 #[derive(Debug, Default, Deserialize)]
 struct AnthropicUsage {
     #[serde(default)]
@@ -958,186 +928,215 @@ fn process_anthropic_event(
     event_type: &str,
     data: &Value,
     state: &mut StreamState,
-) -> Result<Vec<StreamEvent>, TransformError> {
+) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     match event_type {
-        "message_start" => {
-            let message = &data["message"];
-            state.started = true;
-            state.message.model = message["model"].as_str().unwrap_or_default().to_string();
-            state.message.api = ApiType::AnthropicMessages;
+        "message_start" => handle_anthropic_message_start(data, state, &mut events),
+        "content_block_start" => handle_anthropic_content_block_start(data, state, &mut events),
+        "content_block_delta" => handle_anthropic_content_block_delta(data, state, &mut events),
+        "content_block_stop" => handle_anthropic_content_block_stop(data, state, &mut events),
+        "message_delta" => handle_anthropic_message_delta(data, state, &mut events),
+        "message_stop" => handle_anthropic_message_stop(state, &mut events),
+        "error" => handle_anthropic_error(data, state, &mut events),
+        _ => {}
+    }
 
-            if let Some(usage) = message.get("usage") {
-                state.message.usage.prompt_tokens =
-                    usage["input_tokens"].as_u64().unwrap_or(0) as u32;
-            }
+    events
+}
 
-            events.push(StreamEvent::Start {
-                partial: state.message.clone(),
+fn handle_anthropic_message_start(
+    data: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let message = &data["message"];
+    state.started = true;
+    state.message.model = message["model"].as_str().unwrap_or_default().to_string();
+    state.message.api = ApiType::AnthropicMessages;
+
+    if let Some(usage) = message.get("usage") {
+        state.message.usage.prompt_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+    }
+
+    events.push(StreamEvent::Start {
+        partial: state.message.clone(),
+    });
+}
+
+fn handle_anthropic_content_block_start(
+    data: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let index = data["index"].as_u64().unwrap_or(0) as usize;
+    let content_block = &data["content_block"];
+    let block_type = content_block["type"].as_str().unwrap_or("text");
+
+    while state.content_blocks.len() <= index {
+        state.content_blocks.push(ContentBlockState::default());
+    }
+
+    match block_type {
+        "text" => {
+            state.content_blocks[index].block_type = ContentBlockType::Text;
+            events.push(StreamEvent::TextStart {
+                content_index: index,
             });
         }
-        "content_block_start" => {
-            let index = data["index"].as_u64().unwrap_or(0) as usize;
-            let content_block = &data["content_block"];
-            let block_type = content_block["type"].as_str().unwrap_or("text");
-
-            // Ensure we have enough content blocks
-            while state.content_blocks.len() <= index {
-                state.content_blocks.push(ContentBlockState::default());
-            }
-
-            match block_type {
-                "text" => {
-                    state.content_blocks[index].block_type = ContentBlockType::Text;
-                    events.push(StreamEvent::TextStart {
-                        content_index: index,
-                    });
-                }
-                "thinking" => {
-                    state.content_blocks[index].block_type = ContentBlockType::Thinking;
-                    events.push(StreamEvent::ThinkingStart {
-                        content_index: index,
-                    });
-                }
-                "tool_use" => {
-                    state.content_blocks[index].block_type = ContentBlockType::ToolCall;
-                    let id = content_block["id"].as_str().unwrap_or_default().to_string();
-                    let name =
-                        strip_oauth_tool_prefix(content_block["name"].as_str().unwrap_or_default());
-                    state.content_blocks[index].tool_id = Some(id.clone());
-                    state.content_blocks[index].tool_name = Some(name.clone());
-                    events.push(StreamEvent::ToolCallStart {
-                        content_index: index,
-                        id,
-                        name,
-                    });
-                }
-                _ => {}
-            }
-        }
-        "content_block_delta" => {
-            let index = data["index"].as_u64().unwrap_or(0) as usize;
-            let delta = &data["delta"];
-            let delta_type = delta["type"].as_str().unwrap_or("");
-
-            if index < state.content_blocks.len() {
-                match delta_type {
-                    "text_delta" => {
-                        let text = delta["text"].as_str().unwrap_or_default();
-                        state.content_blocks[index].text.push_str(text);
-                        events.push(StreamEvent::TextDelta {
-                            content_index: index,
-                            delta: text.to_string(),
-                        });
-                    }
-                    "thinking_delta" => {
-                        let thinking = delta["thinking"].as_str().unwrap_or_default();
-                        state.content_blocks[index].text.push_str(thinking);
-                        events.push(StreamEvent::ThinkingDelta {
-                            content_index: index,
-                            delta: thinking.to_string(),
-                        });
-                    }
-                    "input_json_delta" => {
-                        let partial = delta["partial_json"].as_str().unwrap_or_default();
-                        state.content_blocks[index].text.push_str(partial);
-                        events.push(StreamEvent::ToolCallDelta {
-                            content_index: index,
-                            delta: partial.to_string(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "content_block_stop" => {
-            let index = data["index"].as_u64().unwrap_or(0) as usize;
-
-            if index < state.content_blocks.len() {
-                let block = &state.content_blocks[index];
-
-                match block.block_type {
-                    ContentBlockType::Text => {
-                        state
-                            .message
-                            .content
-                            .push(ContentBlock::Text(TextContent::new(&block.text)));
-                        events.push(StreamEvent::TextEnd {
-                            content_index: index,
-                            content: block.text.clone(),
-                        });
-                    }
-                    ContentBlockType::Thinking => {
-                        let signature = data["signature"].as_str().map(String::from);
-                        if let Some(ref sig) = signature {
-                            state.message.content.push(ContentBlock::Thinking(
-                                ThinkingContent::with_signature(&block.text, sig),
-                            ));
-                        } else {
-                            state
-                                .message
-                                .content
-                                .push(ContentBlock::Thinking(ThinkingContent::new(&block.text)));
-                        }
-                        events.push(StreamEvent::ThinkingEnd {
-                            content_index: index,
-                            content: block.text.clone(),
-                            signature,
-                        });
-                    }
-                    ContentBlockType::ToolCall => {
-                        let tool_call = ToolCall::new(
-                            block.tool_id.as_deref().unwrap_or_default(),
-                            block.tool_name.as_deref().unwrap_or_default(),
-                            serde_json::from_str(&block.text).unwrap_or(Value::Null),
-                        );
-                        state
-                            .message
-                            .content
-                            .push(ContentBlock::ToolCall(tool_call.clone()));
-                        events.push(StreamEvent::ToolCallEnd {
-                            content_index: index,
-                            tool_call,
-                        });
-                    }
-                }
-            }
-        }
-        "message_delta" => {
-            if let Some(delta) = data.get("delta") {
-                if let Some(reason) = delta["stop_reason"].as_str() {
-                    state.message.stop_reason = parse_stop_reason(&Some(reason.to_string()));
-                }
-            }
-            if let Some(usage) = data.get("usage") {
-                state.message.usage.completion_tokens =
-                    usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-                state.message.usage.total_tokens =
-                    state.message.usage.prompt_tokens + state.message.usage.completion_tokens;
-                events.push(StreamEvent::Usage {
-                    usage: state.message.usage.clone(),
-                });
-            }
-        }
-        "message_stop" => {
-            events.push(StreamEvent::Done {
-                reason: state.message.stop_reason.clone(),
-                message: state.message.clone(),
+        "thinking" => {
+            state.content_blocks[index].block_type = ContentBlockType::Thinking;
+            events.push(StreamEvent::ThinkingStart {
+                content_index: index,
             });
         }
-        "error" => {
-            let error_msg = data["error"]["message"].as_str().unwrap_or("Unknown error");
-            state.message.error_message = Some(error_msg.to_string());
-            events.push(StreamEvent::Error {
-                reason: StopReason::Other,
-                message: state.message.clone(),
+        "tool_use" => {
+            state.content_blocks[index].block_type = ContentBlockType::ToolCall;
+            let id = content_block["id"].as_str().unwrap_or_default().to_string();
+            let name = strip_oauth_tool_prefix(content_block["name"].as_str().unwrap_or_default());
+            state.content_blocks[index].tool_id = Some(id.clone());
+            state.content_blocks[index].tool_name = Some(name.clone());
+            events.push(StreamEvent::ToolCallStart {
+                content_index: index,
+                id,
+                name,
             });
         }
         _ => {}
     }
+}
 
-    Ok(events)
+fn handle_anthropic_content_block_delta(
+    data: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let index = data["index"].as_u64().unwrap_or(0) as usize;
+    let delta = &data["delta"];
+    let delta_type = delta["type"].as_str().unwrap_or("");
+
+    if index < state.content_blocks.len() {
+        match delta_type {
+            "text_delta" => {
+                let text = delta["text"].as_str().unwrap_or_default();
+                state.content_blocks[index].text.push_str(text);
+                events.push(StreamEvent::TextDelta {
+                    content_index: index,
+                    delta: text.to_string(),
+                });
+            }
+            "thinking_delta" => {
+                let thinking = delta["thinking"].as_str().unwrap_or_default();
+                state.content_blocks[index].text.push_str(thinking);
+                events.push(StreamEvent::ThinkingDelta {
+                    content_index: index,
+                    delta: thinking.to_string(),
+                });
+            }
+            "input_json_delta" => {
+                let partial = delta["partial_json"].as_str().unwrap_or_default();
+                state.content_blocks[index].text.push_str(partial);
+                events.push(StreamEvent::ToolCallDelta {
+                    content_index: index,
+                    delta: partial.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn handle_anthropic_content_block_stop(
+    data: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let index = data["index"].as_u64().unwrap_or(0) as usize;
+
+    if index < state.content_blocks.len() {
+        let block = &state.content_blocks[index];
+        match block.block_type {
+            ContentBlockType::Text => {
+                state
+                    .message
+                    .content
+                    .push(ContentBlock::Text(TextContent::new(&block.text)));
+                events.push(StreamEvent::TextEnd {
+                    content_index: index,
+                    content: block.text.clone(),
+                });
+            }
+            ContentBlockType::Thinking => {
+                let signature = data["signature"].as_str().map(String::from);
+                if let Some(ref sig) = signature {
+                    state.message.content.push(ContentBlock::Thinking(
+                        ThinkingContent::with_signature(&block.text, sig),
+                    ));
+                } else {
+                    state
+                        .message
+                        .content
+                        .push(ContentBlock::Thinking(ThinkingContent::new(&block.text)));
+                }
+                events.push(StreamEvent::ThinkingEnd {
+                    content_index: index,
+                    content: block.text.clone(),
+                    signature,
+                });
+            }
+            ContentBlockType::ToolCall => {
+                let tool_call = ToolCall::new(
+                    block.tool_id.as_deref().unwrap_or_default(),
+                    block.tool_name.as_deref().unwrap_or_default(),
+                    serde_json::from_str(&block.text).unwrap_or(Value::Null),
+                );
+                state
+                    .message
+                    .content
+                    .push(ContentBlock::ToolCall(tool_call.clone()));
+                events.push(StreamEvent::ToolCallEnd {
+                    content_index: index,
+                    tool_call,
+                });
+            }
+        }
+    }
+}
+
+fn handle_anthropic_message_delta(
+    data: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    if let Some(delta) = data.get("delta") {
+        if let Some(reason) = delta["stop_reason"].as_str() {
+            state.message.stop_reason = parse_stop_reason(Some(reason));
+        }
+    }
+    if let Some(usage) = data.get("usage") {
+        state.message.usage.completion_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+        state.message.usage.total_tokens =
+            state.message.usage.prompt_tokens + state.message.usage.completion_tokens;
+        events.push(StreamEvent::Usage {
+            usage: state.message.usage.clone(),
+        });
+    }
+}
+
+fn handle_anthropic_message_stop(state: &StreamState, events: &mut Vec<StreamEvent>) {
+    events.push(StreamEvent::Done {
+        reason: state.message.stop_reason.clone(),
+        message: state.message.clone(),
+    });
+}
+
+fn handle_anthropic_error(data: &Value, state: &mut StreamState, events: &mut Vec<StreamEvent>) {
+    let error_msg = data["error"]["message"].as_str().unwrap_or("Unknown error");
+    state.message.error_message = Some(error_msg.to_string());
+    events.push(StreamEvent::Error {
+        reason: StopReason::Other,
+        message: state.message.clone(),
+    });
 }
 
 #[cfg(test)]
@@ -1146,8 +1145,12 @@ mod request_quirks_tests {
     use crate::transform::openai::parse_openai_request;
     use crate::types::Message;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn anthropic_filters_empty_text_blocks() {
+    fn anthropic_filters_empty_text_blocks() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-3-5-sonnet-20240620",
             "messages": [{
@@ -1160,27 +1163,38 @@ mod request_quirks_tests {
             }],
             "max_tokens": 16
         });
-        let ctx = parse_openai_request(&body).unwrap();
-        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
-        let messages = req["messages"].as_array().unwrap();
-        let content = messages[0]["content"].as_array().unwrap();
+        let ctx = parse_openai_request(&body)?;
+        let req = AnthropicTransformer::new().transform_request(&ctx)?;
+        let messages = req["messages"].as_array().ok_or("messages missing")?;
+        let content = messages[0]["content"].as_array().ok_or("content missing")?;
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "hi");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn anthropic_drops_empty_messages() {
+    fn anthropic_drops_empty_messages() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("claude-3-5-sonnet-20240620")
             .with_messages(vec![Message::user(""), Message::user("ok")]);
-        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
-        let messages = req["messages"].as_array().unwrap();
+        let req = AnthropicTransformer::new().transform_request(&ctx)?;
+        let messages = req["messages"].as_array().ok_or("messages missing")?;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn anthropic_tool_choice_required_translates_to_any() {
+    fn anthropic_tool_choice_required_translates_to_any() -> Result<(), Box<dyn std::error::Error>>
+    {
         let body = json!({
             "model": "claude-3-5-sonnet-20240620",
             "messages": [{"role":"user","content":"Call a tool"}],
@@ -1191,13 +1205,19 @@ mod request_quirks_tests {
             "tool_choice": "required",
             "max_tokens": 16
         });
-        let ctx = parse_openai_request(&body).unwrap();
-        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let ctx = parse_openai_request(&body)?;
+        let req = AnthropicTransformer::new().transform_request(&ctx)?;
         assert_eq!(req["tool_choice"]["type"], "any");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn anthropic_tool_choice_function_translates_to_tool() {
+    fn anthropic_tool_choice_function_translates_to_tool() -> Result<(), Box<dyn std::error::Error>>
+    {
         let body = json!({
             "model": "claude-3-5-sonnet-20240620",
             "messages": [{"role":"user","content":"Call a tool"}],
@@ -1208,14 +1228,19 @@ mod request_quirks_tests {
             "tool_choice": {"type":"function","function":{"name":"noop"}},
             "max_tokens": 16
         });
-        let ctx = parse_openai_request(&body).unwrap();
-        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let ctx = parse_openai_request(&body)?;
+        let req = AnthropicTransformer::new().transform_request(&ctx)?;
         assert_eq!(req["tool_choice"]["type"], "tool");
         assert_eq!(req["tool_choice"]["name"], "noop");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn anthropic_tool_choice_none_omits_tools() {
+    fn anthropic_tool_choice_none_omits_tools() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-3-5-sonnet-20240620",
             "messages": [{"role":"user","content":"Don't call tools"}],
@@ -1226,10 +1251,11 @@ mod request_quirks_tests {
             "tool_choice": "none",
             "max_tokens": 16
         });
-        let ctx = parse_openai_request(&body).unwrap();
-        let req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let ctx = parse_openai_request(&body)?;
+        let req = AnthropicTransformer::new().transform_request(&ctx)?;
         assert!(req.get("tools").is_none());
         assert!(req.get("tool_choice").is_none());
+        Ok(())
     }
 }
 
@@ -1239,8 +1265,12 @@ mod tests {
     use crate::transform::{parse_incoming_request, OpenAITransformer};
     use crate::types::ToolResultMessage;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_anthropic_request_simple() {
+    fn test_parse_anthropic_request_simple() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "system": "You are helpful",
@@ -1250,15 +1280,20 @@ mod tests {
             "max_tokens": 1024
         });
 
-        let ctx = parse_anthropic_request(&body).unwrap();
+        let ctx = parse_anthropic_request(&body)?;
         assert_eq!(ctx.model, "claude-sonnet-4-20250514");
         assert_eq!(ctx.system_prompt, Some("You are helpful".to_string()));
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.max_tokens, Some(1024));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_anthropic_request_with_cache() {
+    fn test_parse_anthropic_request_with_cache() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "system": [{"type": "text", "text": "Be helpful", "cache_control": {"type": "ephemeral"}}],
@@ -1266,12 +1301,17 @@ mod tests {
             "max_tokens": 1024
         });
 
-        let ctx = parse_anthropic_request(&body).unwrap();
+        let ctx = parse_anthropic_request(&body)?;
         assert_eq!(ctx.system_prompt, Some("Be helpful".to_string()));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_anthropic_request_with_tools() {
+    fn test_parse_anthropic_request_with_tools() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [{"role": "user", "content": "Get weather"}],
@@ -1286,14 +1326,19 @@ mod tests {
             }]
         });
 
-        let ctx = parse_anthropic_request(&body).unwrap();
+        let ctx = parse_anthropic_request(&body)?;
         assert!(ctx.tools.is_some());
-        let tools = ctx.tools.unwrap();
+        let tools = ctx.tools.as_ref().ok_or("tools missing")?;
         assert_eq!(tools[0].name, "get_weather");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_anthropic_request_with_thinking() {
+    fn test_parse_anthropic_request_with_thinking() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -1309,34 +1354,38 @@ mod tests {
             "max_tokens": 1024
         });
 
-        let ctx = parse_anthropic_request(&body).unwrap();
+        let ctx = parse_anthropic_request(&body)?;
 
-        if let Message::Assistant(assistant) = &ctx.messages[1] {
-            assert_eq!(assistant.content.len(), 2);
-            if let ContentBlock::Thinking(t) = &assistant.content[0] {
-                assert_eq!(t.thinking, "Let me consider...");
-                assert_eq!(t.signature, Some("sig123".to_string()));
-            } else {
-                panic!("Expected thinking block");
-            }
-        } else {
-            panic!("Expected assistant message");
-        }
+        let Message::Assistant(assistant) = &ctx.messages[1] else {
+            return Err("Expected assistant message".into());
+        };
+        assert_eq!(assistant.content.len(), 2);
+        let ContentBlock::Thinking(t) = &assistant.content[0] else {
+            return Err("Expected thinking block".into());
+        };
+        assert_eq!(t.thinking, "Let me consider...");
+        assert_eq!(t.signature, Some("sig123".to_string()));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_anthropic_transformer_transform_request() {
+    fn test_anthropic_transformer_transform_request() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = AnthropicTransformer::new();
         let ctx = Context::new("claude-sonnet-4-20250514")
             .with_system("Be helpful")
             .with_messages(vec![Message::user("Hi")])
             .with_max_tokens(1000);
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
         assert_eq!(request["model"], "claude-sonnet-4-20250514");
         assert_eq!(request["max_tokens"], 1000);
         assert!(request["system"].is_array()); // With cache control
+        Ok(())
     }
 
     #[test]
@@ -1377,8 +1426,12 @@ mod tests {
         assert!(sse.contains("\"stop_reason\":\"end_turn\""));
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_stream_chunk() {
+    fn test_parse_stream_chunk() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = AnthropicTransformer::new();
         let mut state = StreamState::default();
 
@@ -1393,7 +1446,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
 "#;
 
-        let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
+        let events = transformer.parse_stream_chunk(chunk, &mut state)?;
 
         assert!(events
             .iter()
@@ -1404,10 +1457,15 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         assert!(events
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_response_non_streaming() {
+    fn test_parse_response_non_streaming() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = AnthropicTransformer::new();
         let body = json!({
             "id": "msg_123",
@@ -1424,7 +1482,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
             }
         });
 
-        let events = transformer.parse_response(&body).unwrap();
+        let events = transformer.parse_response(&body)?;
 
         assert!(events
             .iter()
@@ -1436,6 +1494,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
                 ..
             }
         )));
+        Ok(())
     }
 
     #[test]
@@ -1451,8 +1510,12 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         assert!(anthropic_tool["input_schema"].is_object());
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_build_anthropic_messages_with_tool_result() {
+    fn test_build_anthropic_messages_with_tool_result() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("claude-sonnet-4-20250514").with_messages(vec![
             Message::user("Get weather"),
             Message::Assistant(AssistantMessage {
@@ -1470,32 +1533,44 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
             )),
         ]);
 
-        let messages = build_anthropic_messages(&ctx, false).unwrap();
+        let messages = build_anthropic_messages(&ctx, false)?;
 
         assert_eq!(messages.len(), 3);
         // Tool result should be in a user message
         assert_eq!(messages[2]["role"], "user");
-        assert!(messages[2]["content"][0]["type"] == "tool_result");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_build_anthropic_assistant_content_with_thinking() {
+    fn test_build_anthropic_assistant_content_with_thinking(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let blocks = vec![
             ContentBlock::Thinking(ThinkingContent::with_signature("Thinking...", "sig123")),
             ContentBlock::Text(TextContent::new("Answer")),
         ];
 
         let content = build_anthropic_assistant_content(&blocks);
-        let parts = content.as_array().unwrap();
+        let parts = content.as_array().ok_or("content not an array")?;
 
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["type"], "thinking");
         assert_eq!(parts[0]["signature"], "sig123");
         assert_eq!(parts[1]["type"], "text");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_openai_anthropic_openai_round_trip_preserves_image_and_tool_calls() {
+    fn test_openai_anthropic_openai_round_trip_preserves_image_and_tool_calls(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let openai_req = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -1531,19 +1606,21 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         });
 
         // OpenAI -> canonical
-        let ctx = parse_incoming_request(&openai_req).unwrap();
+        let ctx = parse_incoming_request(&openai_req)?;
         assert_eq!(ctx.system_prompt.as_deref(), Some("Be helpful"));
 
         // canonical -> Anthropic
-        let anthropic_req = AnthropicTransformer::new().transform_request(&ctx).unwrap();
+        let anthropic_req = AnthropicTransformer::new().transform_request(&ctx)?;
 
         // Anthropic -> canonical
-        let ctx2 = parse_anthropic_request(&anthropic_req).unwrap();
+        let ctx2 = parse_anthropic_request(&anthropic_req)?;
         assert_eq!(ctx2.system_prompt.as_deref(), Some("Be helpful"));
 
         // canonical -> OpenAI
-        let openai_back = OpenAITransformer::new().transform_request(&ctx2).unwrap();
-        let msgs = openai_back["messages"].as_array().unwrap();
+        let openai_back = OpenAITransformer::new().transform_request(&ctx2)?;
+        let msgs = openai_back["messages"]
+            .as_array()
+            .ok_or("messages missing")?;
 
         // User multimodal content preserved (as data URL)
         assert!(msgs[1]["content"].is_array());
@@ -1555,5 +1632,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
         // Tool call ID preserved
         assert_eq!(msgs[2]["tool_calls"][0]["id"], "call_123");
         assert_eq!(msgs[3]["tool_call_id"], "call_123");
+        Ok(())
     }
 }

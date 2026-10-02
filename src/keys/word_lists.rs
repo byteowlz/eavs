@@ -35,10 +35,10 @@ pub enum WordListError {
 impl std::fmt::Display for WordListError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WordListError::Io(e) => write!(f, "IO error: {}", e),
-            WordListError::Parse(e) => write!(f, "Parse error: {}", e),
-            WordListError::Download(e) => write!(f, "Download error: {}", e),
-            WordListError::Empty(e) => write!(f, "Empty word lists: {}", e),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::Parse(e) => write!(f, "Parse error: {e}"),
+            Self::Download(e) => write!(f, "Download error: {e}"),
+            Self::Empty(e) => write!(f, "Empty word lists: {e}"),
         }
     }
 }
@@ -47,7 +47,7 @@ impl std::error::Error for WordListError {}
 
 impl From<std::io::Error> for WordListError {
     fn from(e: std::io::Error) -> Self {
-        WordListError::Io(e)
+        Self::Io(e)
     }
 }
 
@@ -186,10 +186,10 @@ impl WordLists {
             // Try again with a different noun
             let filtered: Vec<_> = self.nouns.iter().filter(|n| *n != adj).collect();
             let noun = filtered.choose(&mut rng)?;
-            return Some(format!("{}-{}", adj, noun));
+            return Some(format!("{adj}-{noun}"));
         }
 
-        Some(format!("{}-{}", adj, noun))
+        Some(format!("{adj}-{noun}"))
     }
 
     /// Generate multiple unique human-readable IDs.
@@ -216,8 +216,14 @@ impl WordLists {
     /// Get embedded fallback word lists (minimal set compiled into binary).
     pub fn embedded() -> Self {
         Self {
-            adjectives: EMBEDDED_ADJECTIVES.iter().map(|s| s.to_string()).collect(),
-            nouns: EMBEDDED_NOUNS.iter().map(|s| s.to_string()).collect(),
+            adjectives: EMBEDDED_ADJECTIVES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            nouns: EMBEDDED_NOUNS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 }

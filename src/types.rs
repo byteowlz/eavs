@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiType {
-    /// OpenAI /v1/chat/completions
+    /// `OpenAI` /v1/chat/completions
     #[default]
     OpenAICompletions,
-    /// OpenAI /v1/responses (newer API)
+    /// `OpenAI` /v1/responses (newer API)
     OpenAIResponses,
     /// Anthropic /v1/messages
     AnthropicMessages,
@@ -239,7 +239,7 @@ impl Message {
     }
 
     /// Get the role of this message.
-    pub fn role(&self) -> MessageRole {
+    pub const fn role(&self) -> MessageRole {
         match self {
             Self::User(_) => MessageRole::User,
             Self::Assistant(_) => MessageRole::Assistant,
@@ -439,12 +439,12 @@ impl Context {
         self
     }
 
-    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+    pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
         self
     }
 
-    pub fn with_stream(mut self, stream: bool) -> Self {
+    pub const fn with_stream(mut self, stream: bool) -> Self {
         self.stream = stream;
         self
     }
@@ -703,7 +703,7 @@ mod tests {
             }),
         );
         assert_eq!(tool.name, "get_weather");
-        assert!(tool.parameters["properties"]["city"]["type"] == "string");
+        assert_eq!(tool.parameters["properties"]["city"]["type"], "string");
     }
 
     #[test]

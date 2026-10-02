@@ -39,16 +39,16 @@ pub async fn start_device_flow(
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Device code request failed: {}", e))?;
+        .map_err(|e| format!("Device code request failed: {e}"))?;
 
     let status = resp.status();
     let body = resp
         .json::<DeviceCodeResponse>()
         .await
-        .map_err(|e| format!("Device code parse failed: {}", e))?;
+        .map_err(|e| format!("Device code parse failed: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("Device code request failed with status {}", status));
+        return Err(format!("Device code request failed with status {status}"));
     }
 
     Ok(body)
@@ -75,13 +75,13 @@ pub async fn poll_device_flow(
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Token poll failed: {}", e))?;
+        .map_err(|e| format!("Token poll failed: {e}"))?;
 
     let status = resp.status();
     let body = resp
         .json::<DeviceTokenResponse>()
         .await
-        .map_err(|e| format!("Token poll parse failed: {}", e))?;
+        .map_err(|e| format!("Token poll parse failed: {e}"))?;
 
     if status.is_success() {
         return Ok(DevicePollResult::Authorized(token_to_credentials(
@@ -103,11 +103,11 @@ pub async fn poll_device_flow(
                 });
             }
             "expired_token" => return Err("Device code expired".to_string()),
-            _ => return Err(format!("Device flow error: {}", error)),
+            _ => return Err(format!("Device flow error: {error}")),
         }
     }
 
-    Err(format!("Device flow failed with status {}", status))
+    Err(format!("Device flow failed with status {status}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,5 +165,6 @@ fn token_to_credentials(user_id: &str, token: DeviceTokenResponse) -> OAuthCrede
             "scope": token.scope,
             "token_type": token.token_type,
         })),
+        provenance: crate::oauth::types::CredentialProvenance::Owned,
     }
 }

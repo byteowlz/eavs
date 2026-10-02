@@ -93,16 +93,16 @@ async fn exchange_code_at(
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Token request failed: {}", e))?;
+        .map_err(|e| format!("Token request failed: {e}"))?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("Token exchange failed with status {}", status));
+        return Err(format!("Token exchange failed with status {status}"));
     }
     let body = resp
         .json::<TokenResponse>()
         .await
-        .map_err(|e| format!("Token parse failed: {}", e))?;
+        .map_err(|e| format!("Token parse failed: {e}"))?;
 
     Ok(token_to_credentials(user_id, body))
 }
@@ -138,16 +138,16 @@ async fn refresh_token_at(
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Refresh request failed: {}", e))?;
+        .map_err(|e| format!("Refresh request failed: {e}"))?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("Token refresh failed with status {}", status));
+        return Err(format!("Token refresh failed with status {status}"));
     }
     let mut body = resp
         .json::<TokenResponse>()
         .await
-        .map_err(|e| format!("Refresh parse failed: {}", e))?;
+        .map_err(|e| format!("Refresh parse failed: {e}"))?;
     // OAuth refresh responses may omit a replacement refresh token.
     if body.refresh_token.is_none() {
         body.refresh_token = Some(refresh_token.to_string());
@@ -178,6 +178,7 @@ fn token_to_credentials(user_id: &str, token: TokenResponse) -> OAuthCredentials
         refresh_token: token.refresh_token.unwrap_or_default(),
         expires_at,
         extra_data: token.id_token.map(|id| serde_json::json!({"id_token": id})),
+        provenance: crate::oauth::types::CredentialProvenance::Owned,
     }
 }
 

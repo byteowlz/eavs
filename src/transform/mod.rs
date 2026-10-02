@@ -3,8 +3,6 @@
 //! This module handles translation between different LLM provider formats.
 //! All providers translate to/from a canonical format defined in `types.rs`.
 
-#![allow(dead_code)]
-
 pub mod anthropic;
 pub mod azure;
 pub mod bedrock;
@@ -32,6 +30,7 @@ pub trait RequestTransformer {
     fn transform_request(&self, context: &Context) -> Result<serde_json::Value, TransformError>;
 
     /// Get required headers for this provider.
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)>;
 
     /// Get the endpoint path for this provider.
@@ -67,10 +66,10 @@ pub enum TransformError {
 impl std::fmt::Display for TransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidJson(msg) => write!(f, "Invalid JSON: {}", msg),
-            Self::MissingField(field) => write!(f, "Missing required field: {}", field),
-            Self::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
-            Self::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
+            Self::InvalidJson(msg) => write!(f, "Invalid JSON: {msg}"),
+            Self::MissingField(field) => write!(f, "Missing required field: {field}"),
+            Self::InvalidValue(msg) => write!(f, "Invalid value: {msg}"),
+            Self::Unsupported(msg) => write!(f, "Unsupported: {msg}"),
         }
     }
 }
@@ -98,7 +97,8 @@ impl ProviderTransformer {
     /// Create a transformer for the given provider type.
     ///
     /// For OpenAI-compatible providers, pass compat settings to control
-    /// behavior like developer role, max_tokens field name, and stream_options.
+    /// behavior like developer role, `max_tokens` field name, and `stream_options`.
+    #[cfg(test)]
     pub fn for_provider(provider: ProviderType) -> Self {
         Self::for_provider_with_compat(provider, None)
     }
@@ -106,8 +106,8 @@ impl ProviderTransformer {
     /// Create a transformer for the given provider type with optional compat settings.
     ///
     /// When `compat` is `Some`, OpenAI-compatible providers use these settings
-    /// to control request transformation (developer role, max_tokens field,
-    /// stream_options injection, etc.).
+    /// to control request transformation (developer role, `max_tokens` field,
+    /// `stream_options` injection, etc.).
     pub fn for_provider_with_compat(
         provider: ProviderType,
         compat: Option<&CompatSettings>,
@@ -159,10 +159,6 @@ impl ProviderTransformer {
     }
 
     /// Get required headers for this provider.
-    pub fn headers(&self, api_key: &str) -> Vec<(String, String)> {
-        self.inner.headers(api_key)
-    }
-
     /// Get the endpoint path for this provider.
     pub fn endpoint_path(&self, context: &Context) -> String {
         self.inner.endpoint_path(context)
@@ -186,12 +182,12 @@ impl ProviderTransformer {
     }
 }
 
-/// Parse an incoming request (OpenAI format assumed) to canonical Context.
+/// Parse an incoming request (`OpenAI` format assumed) to canonical Context.
 pub fn parse_incoming_request(body: &serde_json::Value) -> Result<Context, TransformError> {
     openai::parse_openai_request(body)
 }
 
-/// Build SSE output in OpenAI format (for responding to OpenAI-format clients).
+/// Build SSE output in `OpenAI` format (for responding to OpenAI-format clients).
 pub fn build_openai_sse_response(event: &StreamEvent, request_id: &str, model: &str) -> String {
     openai::build_openai_sse(event, request_id, model)
 }
@@ -205,42 +201,61 @@ mod tests {
     #[test]
     fn test_transform_error_display() {
         let err = TransformError::MissingField("model".to_string());
-        assert_eq!(format!("{}", err), "Missing required field: model");
+        assert_eq!(format!("{err}"), "Missing required field: model");
 
         let err = TransformError::InvalidJson("unexpected token".to_string());
-        assert_eq!(format!("{}", err), "Invalid JSON: unexpected token");
+        assert_eq!(format!("{err}"), "Invalid JSON: unexpected token");
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_provider_transformer_for_openai() {
+    fn test_provider_transformer_for_openai() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = ProviderTransformer::for_provider(ProviderType::OpenAI);
         let ctx = Context::new("gpt-4").with_messages(vec![Message::user("Hello")]);
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
         assert_eq!(request["model"], "gpt-4");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_provider_transformer_for_anthropic() {
+    fn test_provider_transformer_for_anthropic() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = ProviderTransformer::for_provider(ProviderType::Anthropic);
         let ctx = Context::new("claude-3-opus")
             .with_messages(vec![Message::user("Hello")])
             .with_max_tokens(1000);
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
         assert_eq!(request["model"], "claude-3-opus");
         assert_eq!(request["max_tokens"], 1000);
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_provider_transformer_for_google() {
+    fn test_provider_transformer_for_google() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = ProviderTransformer::for_provider(ProviderType::Google);
         let ctx = Context::new("gemini-pro").with_messages(vec![Message::user("Hello")]);
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
         // Google uses "contents" instead of "messages"
         assert!(request["contents"].is_array());
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_incoming_request() {
+    fn test_parse_incoming_request() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "gpt-4",
             "messages": [
@@ -251,15 +266,20 @@ mod tests {
             "max_tokens": 1000
         });
 
-        let ctx = parse_incoming_request(&body).unwrap();
+        let ctx = parse_incoming_request(&body)?;
         assert_eq!(ctx.model, "gpt-4");
         assert_eq!(ctx.system_prompt, Some("Be helpful".to_string()));
         assert!(ctx.stream);
         assert_eq!(ctx.max_tokens, Some(1000));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_cross_provider_translation() {
+    fn test_cross_provider_translation() -> Result<(), Box<dyn std::error::Error>> {
         // Parse OpenAI format request
         let openai_request = json!({
             "model": "claude-3-opus",
@@ -271,23 +291,28 @@ mod tests {
             "stream": true
         });
 
-        let ctx = parse_incoming_request(&openai_request).unwrap();
+        let ctx = parse_incoming_request(&openai_request)?;
 
         // Transform to Anthropic format
         let anthropic_transformer = ProviderTransformer::for_provider(ProviderType::Anthropic);
-        let anthropic_request = anthropic_transformer.transform_request(&ctx).unwrap();
+        let anthropic_request = anthropic_transformer.transform_request(&ctx)?;
 
         // Verify Anthropic format
         assert_eq!(anthropic_request["model"], "claude-3-opus");
         assert_eq!(anthropic_request["max_tokens"], 100);
         // Anthropic uses structured system format with cache_control
         assert!(anthropic_request["system"].is_array());
-        let system = anthropic_request["system"].as_array().unwrap();
+        let system = anthropic_request["system"]
+            .as_array()
+            .ok_or("missing system array")?;
         assert_eq!(system[0]["text"], "You are helpful");
 
         assert!(anthropic_request["messages"].is_array());
-        let messages = anthropic_request["messages"].as_array().unwrap();
+        let messages = anthropic_request["messages"]
+            .as_array()
+            .ok_or("missing messages array")?;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
+        Ok(())
     }
 }
