@@ -1,6 +1,6 @@
 //! Export configured providers and models via TypeScript adapters.
 //!
-//! Each harness (Pi, OpenCode, etc.) has a TypeScript adapter in
+//! Each harness (Pi, `OpenCode`, etc.) has a TypeScript adapter in
 //! `adapters/<name>/adapter.ts` that transforms eavs provider data
 //! into the correct format. This module discovers and invokes them.
 
@@ -247,7 +247,7 @@ pub fn run_adapter(
     let stdout = String::from_utf8(output.stdout).context("adapter output is not valid UTF-8")?;
 
     serde_json::from_str(&stdout)
-        .with_context(|| format!("adapter '{}' returned invalid JSON", adapter_name))
+        .with_context(|| format!("adapter '{adapter_name}' returned invalid JSON"))
 }
 
 /// Get adapter info (metadata).
@@ -256,7 +256,7 @@ pub fn adapter_info(adapter_name: &str) -> Result<Value> {
     let adapter_path = dir.join(adapter_name).join("adapter.ts");
 
     if !adapter_path.exists() {
-        bail!("Adapter '{}' not found", adapter_name);
+        bail!("Adapter '{adapter_name}' not found");
     }
 
     let request = serde_json::json!({"method": "info"});
@@ -306,6 +306,5 @@ fn which(name: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }

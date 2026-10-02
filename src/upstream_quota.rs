@@ -32,7 +32,7 @@ pub struct UpstreamQuota {
     pub observed_at: Instant,
 }
 
-/// Key for tracking quotas: (provider_config_key, account_label)
+/// Key for tracking quotas: (`provider_config_key`, `account_label`)
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct QuotaKey {
     pub provider: String,
@@ -59,8 +59,7 @@ impl QuotaTracker {
     }
 
     /// Get the latest quota snapshot for a provider/account.
-    // Tracker accessor exercised by unit tests; kept as part of the QuotaTracker API.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn get(&self, key: &QuotaKey) -> Option<UpstreamQuota> {
         let map = self.inner.read().await;
         map.get(key).cloned()
@@ -73,8 +72,7 @@ impl QuotaTracker {
     }
 
     /// Remove stale entries older than the given duration.
-    // Maintenance helper exercised by unit tests; kept as part of the QuotaTracker API.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn cleanup(&self, max_age: Duration) {
         let mut map = self.inner.write().await;
         let now = Instant::now();
@@ -85,7 +83,7 @@ impl QuotaTracker {
 /// Parse rate limit headers from an HTTP response.
 ///
 /// Supports:
-/// - OpenAI: x-ratelimit-limit-requests, x-ratelimit-remaining-requests,
+/// - `OpenAI`: x-ratelimit-limit-requests, x-ratelimit-remaining-requests,
 ///   x-ratelimit-reset-requests, x-ratelimit-limit-tokens,
 ///   x-ratelimit-remaining-tokens, x-ratelimit-reset-tokens
 /// - Anthropic: anthropic-ratelimit-requests-limit, anthropic-ratelimit-requests-remaining,
@@ -246,53 +244,91 @@ mod tests {
     use http::HeaderMap;
 
     #[test]
-    fn test_parse_openai_headers() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify parsed quota values; missing data propagates as a fixture error"
+    )]
+    fn test_parse_openai_headers() -> Result<(), Box<dyn std::error::Error>> {
         let mut headers = HeaderMap::new();
-        headers.insert("x-ratelimit-limit-requests", "500".parse().unwrap());
-        headers.insert("x-ratelimit-remaining-requests", "499".parse().unwrap());
-        headers.insert("x-ratelimit-reset-requests", "6m0s".parse().unwrap());
-        headers.insert("x-ratelimit-limit-tokens", "200000".parse().unwrap());
-        headers.insert("x-ratelimit-remaining-tokens", "199500".parse().unwrap());
-        headers.insert("x-ratelimit-reset-tokens", "2s".parse().unwrap());
+        headers.insert(
+            "x-ratelimit-limit-requests",
+            http::HeaderValue::from_static("500"),
+        );
+        headers.insert(
+            "x-ratelimit-remaining-requests",
+            http::HeaderValue::from_static("499"),
+        );
+        headers.insert(
+            "x-ratelimit-reset-requests",
+            http::HeaderValue::from_static("6m0s"),
+        );
+        headers.insert(
+            "x-ratelimit-limit-tokens",
+            http::HeaderValue::from_static("200000"),
+        );
+        headers.insert(
+            "x-ratelimit-remaining-tokens",
+            http::HeaderValue::from_static("199500"),
+        );
+        headers.insert(
+            "x-ratelimit-reset-tokens",
+            http::HeaderValue::from_static("2s"),
+        );
 
-        let quota = parse_quota_headers(&headers).unwrap();
+        let quota = parse_quota_headers(&headers).ok_or("missing OpenAI quota")?;
         assert_eq!(quota.requests_limit, Some(500));
         assert_eq!(quota.requests_remaining, Some(499));
-        assert!(quota.requests_reset.unwrap() >= Duration::from_secs(300));
-        assert_eq!(quota.tokens_limit, Some(200000));
-        assert_eq!(quota.tokens_remaining, Some(199500));
-        assert!(quota.tokens_reset.unwrap() >= Duration::from_secs(1));
+        assert!(quota
+            .requests_reset
+            .is_some_and(|reset| reset >= Duration::from_secs(300)));
+        assert_eq!(quota.tokens_limit, Some(200_000));
+        assert_eq!(quota.tokens_remaining, Some(199_500));
+        assert!(quota
+            .tokens_reset
+            .is_some_and(|reset| reset >= Duration::from_secs(1)));
+        Ok(())
     }
 
     #[test]
-    fn test_parse_anthropic_headers() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify parsed quota values; missing data propagates as a fixture error"
+    )]
+    fn test_parse_anthropic_headers() -> Result<(), Box<dyn std::error::Error>> {
         let mut headers = HeaderMap::new();
-        headers.insert("anthropic-ratelimit-requests-limit", "100".parse().unwrap());
+        headers.insert(
+            "anthropic-ratelimit-requests-limit",
+            http::HeaderValue::from_static("100"),
+        );
         headers.insert(
             "anthropic-ratelimit-requests-remaining",
-            "95".parse().unwrap(),
+            http::HeaderValue::from_static("95"),
         );
-        headers.insert("anthropic-ratelimit-tokens-limit", "80000".parse().unwrap());
+        headers.insert(
+            "anthropic-ratelimit-tokens-limit",
+            http::HeaderValue::from_static("80000"),
+        );
         headers.insert(
             "anthropic-ratelimit-tokens-remaining",
-            "75000".parse().unwrap(),
+            http::HeaderValue::from_static("75000"),
         );
         // Anthropic uses RFC3339 for resets - use a far-future time for test
         headers.insert(
             "anthropic-ratelimit-requests-reset",
-            "2099-01-01T00:00:00Z".parse().unwrap(),
+            http::HeaderValue::from_static("2099-01-01T00:00:00Z"),
         );
         headers.insert(
             "anthropic-ratelimit-tokens-reset",
-            "2099-01-01T00:00:00Z".parse().unwrap(),
+            http::HeaderValue::from_static("2099-01-01T00:00:00Z"),
         );
 
-        let quota = parse_quota_headers(&headers).unwrap();
+        let quota = parse_quota_headers(&headers).ok_or("missing Anthropic quota")?;
         assert_eq!(quota.requests_limit, Some(100));
         assert_eq!(quota.requests_remaining, Some(95));
         assert_eq!(quota.tokens_limit, Some(80000));
         assert_eq!(quota.tokens_remaining, Some(75000));
         assert!(quota.requests_reset.is_some());
+        Ok(())
     }
 
     #[test]
@@ -313,7 +349,7 @@ mod tests {
         );
         assert_eq!(
             parse_openai_duration("1h30m0s"),
-            Some(Duration::from_millis(5_400_000))
+            Some(Duration::from_mins(90))
         );
         assert_eq!(
             parse_openai_duration("500ms"),
@@ -343,13 +379,23 @@ mod tests {
         };
 
         tracker.update(key.clone(), quota).await;
-        let fetched = tracker.get(&key).await.unwrap();
-        assert_eq!(fetched.requests_limit, Some(500));
-        assert_eq!(fetched.requests_remaining, Some(450));
+        let fetched = tracker.get(&key).await;
+        assert_eq!(
+            fetched.as_ref().and_then(|quota| quota.requests_limit),
+            Some(500)
+        );
+        assert_eq!(
+            fetched.as_ref().and_then(|quota| quota.requests_remaining),
+            Some(450)
+        );
     }
 
     #[tokio::test]
-    async fn test_quota_tracker_cleanup() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify quota expiry; clock fixture construction may fail"
+    )]
+    async fn test_quota_tracker_cleanup() -> Result<(), Box<dyn std::error::Error>> {
         let tracker = QuotaTracker::new();
         let key = QuotaKey {
             provider: "old".to_string(),
@@ -362,7 +408,9 @@ mod tests {
             tokens_limit: None,
             tokens_remaining: None,
             tokens_reset: None,
-            observed_at: Instant::now() - Duration::from_secs(3600),
+            observed_at: Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .ok_or("test clock cannot represent an hour ago")?,
         };
 
         tracker.update(key.clone(), old_quota).await;
@@ -370,5 +418,6 @@ mod tests {
 
         tracker.cleanup(Duration::from_secs(60)).await;
         assert!(tracker.get(&key).await.is_none());
+        Ok(())
     }
 }

@@ -118,11 +118,11 @@ pub async fn assume_role_with_web_identity(
     let mut resp = upstream
         .send(req)
         .await
-        .map_err(|e| format!("STS request failed: {}", e))?;
+        .map_err(|e| format!("STS request failed: {e}"))?;
 
     let mut collected = Vec::new();
     while let Some(chunk) = resp.body.next().await {
-        let chunk = chunk.map_err(|e| format!("STS body read failed: {}", e))?;
+        let chunk = chunk.map_err(|e| format!("STS body read failed: {e}"))?;
         collected.extend_from_slice(&chunk);
         if collected.len() > 1024 * 1024 {
             return Err("STS response exceeded 1MiB limit".to_string());
@@ -157,8 +157,8 @@ pub async fn assume_role_with_web_identity(
 }
 
 fn xml_tag_value(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
     Some(xml[start..end].trim().to_string())
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn parse_shared_credentials_profile() {
-        let contents = r#"
+        let contents = r"
             [default]
             aws_access_key_id = AKIADEFAULT
             aws_secret_access_key = SECRETDEFAULT
@@ -183,7 +183,7 @@ mod tests {
             aws_access_key_id=AKIAWORK
             aws_secret_access_key=SECRETWORK
             aws_session_token=TOKENWORK
-        "#;
+        ";
 
         let creds = super::parse_aws_shared_credentials("work", contents).unwrap();
         assert_eq!(creds.access_key_id, "AKIAWORK");
@@ -206,13 +206,13 @@ mod tests {
         struct TestUpstream;
 
         impl crate::upstream::Upstream for TestUpstream {
-            fn send<'a>(
-                &'a self,
+            fn send(
+                &self,
                 _request: UpstreamRequest,
-            ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>>
+            ) -> futures::future::BoxFuture<'_, Result<UpstreamResponse, std::io::Error>>
             {
                 Box::pin(async move {
-                    let xml = r#"
+                    let xml = r"
                         <AssumeRoleWithWebIdentityResponse>
                           <AssumeRoleWithWebIdentityResult>
                             <Credentials>
@@ -223,7 +223,7 @@ mod tests {
                             </Credentials>
                           </AssumeRoleWithWebIdentityResult>
                         </AssumeRoleWithWebIdentityResponse>
-                    "#;
+                    ";
                     Ok(UpstreamResponse {
                         status: StatusCode::OK,
                         headers: http::HeaderMap::new(),

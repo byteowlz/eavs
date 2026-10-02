@@ -96,7 +96,7 @@ pub enum Commands {
         action: TestCommands,
     },
 
-    /// Authenticate with an OAuth provider (Anthropic, OpenAI, Google, GitHub Copilot)
+    /// Authenticate with an OAuth provider (Anthropic, `OpenAI`, Google, GitHub Copilot)
     Login {
         /// Provider to authenticate with (anthropic, openai, google, github-copilot)
         /// If not specified, shows an interactive selection menu
@@ -178,21 +178,21 @@ pub enum ModelCommands {
     },
     /// Export configured providers and models for an agent harness
     ///
-    /// Uses TypeScript adapters (in adapters/<name>/adapter.ts) to generate
+    /// Uses TypeScript adapters (in `adapters/<name>/adapter.ts`) to generate
     /// config files for different agent harnesses. Run without arguments to
     /// list available adapters.
     ///
     /// Examples:
     ///   eavs models export pi > ~/.pi/agent/models.json
-    ///   eavs models export pi --api-key sk-xxx --base-url http://host:3033
+    ///   eavs models export pi --api-key sk-xxx --base-url <http://host:3033>
     ///   eavs models export pi --merge ~/.pi/agent/models.json
     Export {
         /// Target adapter name (e.g., "pi"). Omit to list available adapters.
         adapter: Option<String>,
-        /// Override eavs base URL (default: http://127.0.0.1:<port> from config)
+        /// Override eavs base URL (default: `http://127.0.0.1:<port>` from config)
         #[arg(long)]
         base_url: Option<String>,
-        /// API key to embed in the output (default: "EAVS_API_KEY" placeholder)
+        /// API key to embed in the output (default: "`EAVS_API_KEY`" placeholder)
         #[arg(long)]
         api_key: Option<String>,
         /// Path to eavs config file (default: auto-detect)
@@ -214,8 +214,8 @@ pub enum SetupCommands {
     /// Add provider(s) interactively
     ///
     /// Without --batch: interactive wizard, loops until you're done.
-    /// With --batch: scans environment for known API keys (OPENAI_API_KEY,
-    /// ANTHROPIC_API_KEY, etc.) and offers to add each one.
+    /// With --batch: scans environment for known API keys (`OPENAI_API_KEY`,
+    /// `ANTHROPIC_API_KEY`, etc.) and offers to add each one.
     Add {
         /// Path to config file to modify
         #[arg(short, long, env = "EAVS_CONFIG")]
@@ -231,7 +231,7 @@ pub enum SetupCommands {
         env_file: Option<String>,
 
         /// Import provider configs from a TOML file (appended to config).
-        /// The file should contain [providers.<name>] sections.
+        /// The file should contain `[providers.<name>]` sections.
         #[arg(long)]
         import: Option<String>,
     },
@@ -324,7 +324,7 @@ pub enum AuthCommands {
 pub enum SecretCommands {
     /// Store a secret in the system keychain
     Set {
-        /// Account name (used as keychain account, referenced in config as "keychain:<account>")
+        /// Account name (used as keychain account, referenced in config as `keychain:<account>`)
         account: String,
 
         /// Secret value (if omitted, reads interactively from terminal)
@@ -482,7 +482,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
+        /// EAVS server URL (default: from config file or <http://127.0.0.1:3033>)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -501,7 +501,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
+        /// EAVS server URL (default: from config file or <http://127.0.0.1:3033>)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -519,7 +519,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
+        /// EAVS server URL (default: from config file or <http://127.0.0.1:3033>)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -537,7 +537,7 @@ pub enum KeyCommands {
         #[arg(short, long)]
         yes: bool,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
+        /// EAVS server URL (default: from config file or <http://127.0.0.1:3033>)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -559,7 +559,7 @@ pub enum KeyCommands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
 
-        /// EAVS server URL (default: from config file or http://127.0.0.1:3033)
+        /// EAVS server URL (default: from config file or <http://127.0.0.1:3033>)
         #[arg(long, env = "EAVS_URL")]
         url: Option<String>,
 
@@ -914,7 +914,7 @@ pub enum TestCommands {
     },
 }
 
-#[derive(Clone, Debug, Default, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum OutputFormat {
     #[default]
     Text,
@@ -936,27 +936,22 @@ impl Default for CliConfig {
 }
 
 impl CliConfig {
-    /// Create a CliConfig by loading settings from config file.
-    /// Priority: EAVS_URL env > config file > default (127.0.0.1:3033)
+    /// Create a `CliConfig` by loading settings from config file.
+    /// Priority: `EAVS_URL` env > config file > default (127.0.0.1:3033)
     pub fn from_config(config_path: Option<&str>) -> Self {
         // Try to load config for port
-        let config = if let Some(path) = config_path {
-            crate::config::AppConfig::load_from(path).ok()
-        } else {
-            crate::config::AppConfig::load().ok()
-        };
+        let config = config_path.map_or_else(
+            || crate::config::AppConfig::load().ok(),
+            |path| crate::config::AppConfig::load_from(path).ok(),
+        );
 
         // EAVS_URL env var takes highest priority for URL
-        let server_url = if let Ok(url) = std::env::var("EAVS_URL") {
-            if !url.trim().is_empty() {
-                url
-            } else {
-                let port = config.as_ref().map(|c| c.server.port).unwrap_or(3033);
-                format!("http://127.0.0.1:{}", port)
-            }
-        } else {
-            let port = config.as_ref().map(|c| c.server.port).unwrap_or(3033);
-            format!("http://127.0.0.1:{}", port)
+        let port = config.as_ref().map_or(3033, |c| c.server.port);
+        let default_url = format!("http://127.0.0.1:{port}");
+        let server_url = match std::env::var("EAVS_URL") {
+            Ok(url) if url.trim().is_empty() => default_url,
+            Ok(url) => url,
+            Err(_) => default_url,
         };
 
         let listener_token = config
@@ -983,16 +978,16 @@ pub struct EavsClient {
 }
 
 impl EavsClient {
-    pub fn new(config: CliConfig) -> Self {
+    pub fn new(config: CliConfig) -> Result<Self, CliError> {
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| CliError::Other(format!("Failed to create HTTP client: {e}")))?;
 
-        Self { client, config }
+        Ok(Self { client, config })
     }
 
-    pub fn with_url(url: String) -> Self {
+    pub fn with_url(url: String) -> Result<Self, CliError> {
         Self::new(CliConfig {
             server_url: url,
             ..Default::default()
@@ -1005,6 +1000,66 @@ impl EavsClient {
         } else {
             request
         }
+    }
+
+    async fn oauth_test_chat_and_revoke(
+        &self,
+        master_key: &str,
+        key: &crate::keys::CreateKeyResponse,
+        request: (&str, &str, &str, bool),
+    ) -> Result<ChatResponse, CliError> {
+        let (message, model, provider, stream) = request;
+        let result = self
+            .chat(message, model, provider, Some(&key.key), stream)
+            .await;
+        let cleanup = self
+            .oauth_test_admin_request(
+                reqwest::Method::DELETE,
+                &format!("/admin/keys/{}", key.key_hash),
+                master_key,
+                None,
+            )
+            .await;
+        if let Err(error) = cleanup {
+            return Err(CliError::Other(format!(
+                "Failed to revoke temporary OAuth key {}: {error}; request outcome: {}. Key expires after five minutes.",
+                key.key_id,
+                match &result { Ok(_) => "received response".to_string(), Err(error) => error.to_string() }
+            )));
+        }
+        result
+    }
+
+    /// Admin mutations must reach the same server/cache used by inference.
+    async fn oauth_test_admin_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        master_key: &str,
+        body: Option<&crate::keys::CreateKeyRequest>,
+    ) -> Result<reqwest::Response, CliError> {
+        let mut request = self
+            .client
+            .request(
+                method,
+                format!("{}{}", self.config.server_url.trim_end_matches('/'), path),
+            )
+            .bearer_auth(master_key);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = self
+            .authenticate_listener(request)
+            .send()
+            .await
+            .map_err(CliError::Request)?;
+        if !response.status().is_success() {
+            return Err(CliError::Api {
+                status: response.status().as_u16(),
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(response)
     }
 
     async fn post_chat_completions(
@@ -1023,7 +1078,7 @@ impl EavsClient {
             .json(body);
 
         if let Some(key) = api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+            req = req.header("Authorization", format!("Bearer {key}"));
         }
         req = self.authenticate_listener(req);
 
@@ -1065,7 +1120,6 @@ impl EavsClient {
 
             Ok(ChatResponse {
                 content,
-                model: model.to_string(),
                 usage: None,
             })
         } else {
@@ -1081,26 +1135,21 @@ impl EavsClient {
                 .to_string();
 
             let usage = json.get("usage").map(|u| ChatUsage {
-                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                prompt_tokens: u
+                    .get("prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
                 completion_tokens: u
                     .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0) as u32,
             });
 
-            Ok(ChatResponse {
-                content,
-                model: json
-                    .get("model")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or(model)
-                    .to_string(),
-                usage,
-            })
+            Ok(ChatResponse { content, usage })
         }
     }
 
-    /// Send a multimodal request (OpenAI vision format).
+    /// Send a multimodal request (`OpenAI` vision format).
     pub async fn chat_with_image(
         &self,
         prompt: &str,
@@ -1118,7 +1167,7 @@ impl EavsClient {
             )
         })?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let data_url = format!("data:{};base64,{}", mime, b64);
+        let data_url = format!("data:{mime};base64,{b64}");
 
         let body = serde_json::json!({
             "model": model,
@@ -1142,7 +1191,6 @@ impl EavsClient {
 
             Ok(ChatResponse {
                 content,
-                model: model.to_string(),
                 usage: None,
             })
         } else {
@@ -1157,22 +1205,17 @@ impl EavsClient {
                 .to_string();
 
             let usage = json.get("usage").map(|u| ChatUsage {
-                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                prompt_tokens: u
+                    .get("prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
                 completion_tokens: u
                     .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0) as u32,
             });
 
-            Ok(ChatResponse {
-                content,
-                model: json
-                    .get("model")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or(model)
-                    .to_string(),
-                usage,
-            })
+            Ok(ChatResponse { content, usage })
         }
     }
 
@@ -1246,7 +1289,7 @@ impl EavsClient {
             })
         } else {
             serde_json::from_str(&text)
-                .map_err(|e| CliError::Other(format!("Failed to parse health response: {}", e)))
+                .map_err(|e| CliError::Other(format!("Failed to parse health response: {e}")))
         }
     }
 
@@ -1276,8 +1319,6 @@ impl EavsClient {
 #[derive(Debug)]
 pub struct ChatResponse {
     pub content: String,
-    #[allow(dead_code)]
-    pub model: String,
     pub usage: Option<ChatUsage>,
 }
 
@@ -1307,10 +1348,10 @@ pub enum CliError {
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Request(e) => write!(f, "Request error: {}", e),
-            Self::Api { status, message } => write!(f, "API error ({}): {}", status, message),
-            Self::Io(e) => write!(f, "IO error: {}", e),
-            Self::Other(msg) => write!(f, "{}", msg),
+            Self::Request(e) => write!(f, "Request error: {e}"),
+            Self::Api { status, message } => write!(f, "API error ({status}): {message}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -1325,7 +1366,7 @@ impl std::error::Error for CliError {}
 use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore};
 use std::collections::HashSet;
 
-/// Parse expiration string to DateTime
+/// Parse expiration string to `DateTime`
 fn parse_expiration_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let s = s.trim().to_lowercase();
     if s.is_empty() || s == "never" || s == "none" {
@@ -1346,28 +1387,40 @@ fn parse_expiration_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     Some(chrono::Utc::now() + duration)
 }
 
-#[allow(dead_code)]
-fn parse_expiration(s: &str) -> Option<String> {
-    parse_expiration_datetime(s).map(|dt| dt.to_rfc3339())
+/// Create a key directly in the database (no server required)
+/// CLI arguments for creating a key, grouped so the entry point stays readable.
+pub struct CreateKeyArgs {
+    pub name: Option<String>,
+    pub owner: Option<String>,
+    pub oauth_user: Option<String>,
+    pub models: Vec<String>,
+    pub blocked_models: Vec<String>,
+    pub providers: Vec<String>,
+    pub rpm: Option<u32>,
+    pub tpm: Option<u32>,
+    pub rpd: Option<u32>,
+    pub budget: Option<f64>,
+    pub expires: String,
 }
 
-/// Create a key directly in the database (no server required)
-#[allow(clippy::too_many_arguments)]
 pub async fn run_key_create_direct(
     store: &KeyStore,
-    name: Option<String>,
-    owner: Option<String>,
-    oauth_user: Option<String>,
-    models: Vec<String>,
-    blocked_models: Vec<String>,
-    providers: Vec<String>,
-    rpm: Option<u32>,
-    tpm: Option<u32>,
-    rpd: Option<u32>,
-    budget: Option<f64>,
-    expires: String,
+    args: CreateKeyArgs,
     format: OutputFormat,
 ) -> Result<(), CliError> {
+    let CreateKeyArgs {
+        name,
+        owner,
+        oauth_user,
+        models,
+        blocked_models,
+        providers,
+        rpm,
+        tpm,
+        rpd,
+        budget,
+        expires,
+    } = args;
     let request = CreateKeyRequest {
         name,
         expires_at: parse_expiration_datetime(&expires),
@@ -1402,11 +1455,11 @@ pub async fn run_key_create_direct(
     let response = store
         .create_key(request)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to create key: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to create key: {e}")))?;
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+            println!("{}", pretty_json(&response)?);
         }
         OutputFormat::Text => {
             println!("Key created successfully!");
@@ -1415,13 +1468,13 @@ pub async fn run_key_create_direct(
             println!("  Key ID:  {}", response.key_id);
             println!("  Hash:    {}", response.key_hash);
             if let Some(expires) = response.expires_at {
-                println!("  Expires: {}", expires);
+                println!("  Expires: {expires}");
             }
             if let Some(owner) = response.owner.as_deref() {
-                println!("  Owner:   {}", owner);
+                println!("  Owner:   {owner}");
             }
             if let Some(ou) = response.oauth_user.as_deref() {
-                println!("  OAuth:   {}", ou);
+                println!("  OAuth:   {ou}");
             }
             println!();
             println!("Save this key securely - it cannot be retrieved later.");
@@ -1440,11 +1493,11 @@ pub async fn run_key_list_direct(
     let keys = store
         .list_keys()
         .await
-        .map_err(|e| CliError::Other(format!("Failed to list keys: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to list keys: {e}")))?;
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&keys).unwrap());
+            println!("{}", pretty_json(&keys)?);
         }
         OutputFormat::Text => {
             if keys.is_empty() {
@@ -1488,13 +1541,13 @@ pub async fn run_key_info_direct(
     let key = store
         .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
-        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+        .ok_or_else(|| CliError::Other(format!("Key not found: {key_id}")))?;
 
     let info = key.to_info();
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&info).unwrap());
+            println!("{}", pretty_json(&info)?);
         }
         OutputFormat::Text => {
             println!("Key Information");
@@ -1513,8 +1566,7 @@ pub async fn run_key_info_direct(
             println!(
                 "Expires:     {}",
                 info.expires_at
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "never".to_string())
+                    .map_or_else(|| "never".to_string(), |d| d.to_string())
             );
             println!(
                 "Status:      {}",
@@ -1522,13 +1574,10 @@ pub async fn run_key_info_direct(
             );
             println!();
             println!("Permissions:");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&info.permissions).unwrap()
-            );
+            println!("{}", pretty_json(&info.permissions)?);
             println!();
             println!("Usage:");
-            println!("{}", serde_json::to_string_pretty(&info.usage).unwrap());
+            println!("{}", pretty_json(&info.usage)?);
         }
     }
 
@@ -1545,7 +1594,7 @@ pub async fn run_key_revoke_direct(
     let key = store
         .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
-        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+        .ok_or_else(|| CliError::Other(format!("Key not found: {key_id}")))?;
 
     if !yes {
         eprint!(
@@ -1553,7 +1602,9 @@ pub async fn run_key_revoke_direct(
             key.key_id
         );
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| CliError::Other(format!("Failed to read input: {e}")))?;
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Cancelled.");
             return Ok(());
@@ -1563,7 +1614,7 @@ pub async fn run_key_revoke_direct(
     store
         .disable_key(&key.key_hash)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to revoke key: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to revoke key: {e}")))?;
 
     println!("Key '{}' has been revoked.", key.key_id);
 
@@ -1581,20 +1632,20 @@ pub async fn run_key_usage_direct(
     let key = store
         .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
-        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+        .ok_or_else(|| CliError::Other(format!("Key not found: {key_id}")))?;
 
     let records = store
         .get_usage_history(&key.key_hash, Some(days))
         .await
-        .map_err(|e| CliError::Other(format!("Failed to get usage history: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to get usage history: {e}")))?;
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&records).unwrap());
+            println!("{}", pretty_json(&records)?);
         }
         OutputFormat::Text => {
             if records.is_empty() {
-                println!("No usage records found for the past {} days.", days);
+                println!("No usage records found for the past {days} days.");
                 return Ok(());
             }
 
@@ -1645,15 +1696,15 @@ pub async fn run_key_bind_direct(
     let key = store
         .get_by_human_id(key_id)
         .or_else(|| store.get_by_hash(key_id))
-        .ok_or_else(|| CliError::Other(format!("Key not found: {}", key_id)))?;
+        .ok_or_else(|| CliError::Other(format!("Key not found: {key_id}")))?;
 
     let updated = store
         .update_oauth_user(&key.key_hash, oauth_user.clone())
         .await
-        .map_err(|e| CliError::Other(format!("Failed to update key: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to update key: {e}")))?;
 
     if !updated {
-        return Err(CliError::Other(format!("Key not found: {}", key_id)));
+        return Err(CliError::Other(format!("Key not found: {key_id}")));
     }
 
     match format {
@@ -1663,7 +1714,7 @@ pub async fn run_key_bind_direct(
                 "key_hash": key.key_hash,
                 "oauth_user": oauth_user,
             });
-            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+            println!("{}", pretty_json(&response)?);
         }
         OutputFormat::Text => {
             if let Some(user) = oauth_user {
@@ -1699,11 +1750,11 @@ pub async fn run_cost_by_owner_direct(
     } else {
         store.get_usage_by_owner(owner, days).await
     }
-    .map_err(|e| CliError::Other(format!("Failed to get owner usage: {}", e)))?;
+    .map_err(|e| CliError::Other(format!("Failed to get owner usage: {e}")))?;
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+            println!("{}", pretty_json(&rows)?);
         }
         OutputFormat::Text => {
             if rows.is_empty() {
@@ -1711,31 +1762,11 @@ pub async fn run_cost_by_owner_direct(
                 return Ok(());
             }
             let (header, width) = owner_table_header(by_model, by_provider);
-            println!("{}", header);
+            println!("{header}");
             println!("{}", "-".repeat(width));
             let mut total_cost = 0.0;
             for r in &rows {
-                let owner = if r.owner.is_empty() {
-                    "(unassigned)"
-                } else {
-                    &r.owner
-                };
-                println!(
-                    "{}",
-                    owner_table_row(
-                        by_model,
-                        by_provider,
-                        owner,
-                        r.model.as_deref().unwrap_or(""),
-                        r.provider.as_deref().unwrap_or(""),
-                        r.requests,
-                        r.input_tokens,
-                        r.output_tokens,
-                        r.cached_tokens,
-                        r.cache_write_tokens,
-                        r.cost_usd,
-                    )
-                );
+                println!("{}", owner_table_row(by_model, by_provider, r));
                 total_cost += r.cost_usd;
             }
             println!("{}", "-".repeat(width));
@@ -1766,52 +1797,52 @@ fn parse_breakdown(value: Option<&str>) -> (bool, bool) {
 
 /// Text-table header for the owner rollup. Returns `(line, total_width)`.
 fn owner_table_header(by_model: bool, by_provider: bool) -> (String, usize) {
+    use std::fmt::Write as _;
     let mut s = format!("{:<20}", "OWNER");
     if by_model {
-        s.push_str(&format!(" {:<22}", "MODEL"));
+        write!(s, " {:<22}", "MODEL").ok();
     }
     if by_provider {
-        s.push_str(&format!(" {:<14}", "PROVIDER"));
+        write!(s, " {:<14}", "PROVIDER").ok();
     }
-    s.push_str(&format!(
+    write!(
+        s,
         " {:>8} {:>12} {:>12} {:>12} {:>12} {:>11}",
         "REQS", "INPUT", "OUTPUT", "CACHE_RD", "CACHE_WR", "COST"
-    ));
+    )
+    .ok();
     let width = s.chars().count();
     (s, width)
 }
 
 /// One text-table row for the owner rollup, matching [`owner_table_header`].
-#[allow(clippy::too_many_arguments)]
-fn owner_table_row(
-    by_model: bool,
-    by_provider: bool,
-    owner: &str,
-    model: &str,
-    provider: &str,
-    requests: u64,
-    input_tokens: u64,
-    output_tokens: u64,
-    cached_tokens: u64,
-    cache_write_tokens: u64,
-    cost_usd: f64,
-) -> String {
+fn owner_table_row(by_model: bool, by_provider: bool, row: &crate::keys::OwnerUsage) -> String {
+    use std::fmt::Write as _;
+    let owner = if row.owner.is_empty() {
+        "(unassigned)"
+    } else {
+        row.owner.as_str()
+    };
+    let model = row.model.as_deref().unwrap_or("");
+    let provider = row.provider.as_deref().unwrap_or("");
     let mut s = format!("{:<20}", truncate(owner, 20));
     if by_model {
-        s.push_str(&format!(" {:<22}", truncate(model, 22)));
+        write!(s, " {:<22}", truncate(model, 22)).ok();
     }
     if by_provider {
-        s.push_str(&format!(" {:<14}", truncate(provider, 14)));
+        write!(s, " {:<14}", truncate(provider, 14)).ok();
     }
-    s.push_str(&format!(
-        " {:>8} {:>12} {:>12} {:>12} {:>12} ${:>10.4}",
-        requests,
-        input_tokens,
-        output_tokens,
-        cached_tokens,
-        cache_write_tokens,
-        cost_usd,
-    ));
+    write!(
+        s,
+        " {requests:>8} {input_tokens:>12} {output_tokens:>12} {cached_tokens:>12} {cache_write_tokens:>12} ${cost_usd:>10.4}",
+        requests = row.requests,
+        input_tokens = row.input_tokens,
+        output_tokens = row.output_tokens,
+        cached_tokens = row.cached_tokens,
+        cache_write_tokens = row.cache_write_tokens,
+        cost_usd = row.cost_usd,
+    )
+    .ok();
     s
 }
 
@@ -1824,11 +1855,11 @@ pub async fn run_cost_by_key_direct(
     let rows = store
         .get_usage_by_key(days)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to get key usage: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to get key usage: {e}")))?;
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+            println!("{}", pretty_json(&rows)?);
         }
         OutputFormat::Text => {
             if rows.is_empty() {
@@ -1879,29 +1910,33 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub fn run_provider_current() -> Result<(), CliError> {
+/// Serialize a value to pretty JSON, mapping serialization failures into a
+/// `CliError` so CLI output helpers can propagate them with `?`.
+fn pretty_json(value: &impl serde::Serialize) -> Result<String, CliError> {
+    serde_json::to_string_pretty(value)
+        .map_err(|e| CliError::Other(format!("Failed to serialize output: {e}")))
+}
+
+pub fn run_provider_current() {
     let state = crate::runtime_state::load_runtime_state().unwrap_or_default();
     if let Some(provider) = state.default_provider {
-        println!("{}", provider);
+        println!("{provider}");
     } else {
         println!("default");
     }
-    Ok(())
 }
 
 pub fn run_provider_use(provider: &str, config_path: Option<&str>) -> Result<(), CliError> {
-    let config = if let Some(path) = config_path {
-        crate::config::AppConfig::load_from(path).ok()
-    } else {
-        crate::config::AppConfig::load().ok()
-    };
+    let config = config_path.map_or_else(
+        || crate::config::AppConfig::load().ok(),
+        |path| crate::config::AppConfig::load_from(path).ok(),
+    );
 
     if let Some(cfg) = config {
         if cfg.resolve_provider(provider).is_none() {
             let available = cfg.provider_names();
             return Err(CliError::Other(format!(
-                "Unknown provider '{}'. Available providers: {:?}",
-                provider, available
+                "Unknown provider '{provider}'. Available providers: {available:?}"
             )));
         }
     }
@@ -1909,7 +1944,7 @@ pub fn run_provider_use(provider: &str, config_path: Option<&str>) -> Result<(),
     let mut state = crate::runtime_state::load_runtime_state().unwrap_or_default();
     state.default_provider = Some(provider.to_string());
     crate::runtime_state::save_runtime_state(&state).map_err(CliError::Other)?;
-    println!("{}", provider);
+    println!("{provider}");
     Ok(())
 }
 
@@ -1924,20 +1959,20 @@ pub fn run_provider_clear() -> Result<(), CliError> {
 pub fn run_provider_list(config_path: Option<&str>) -> Result<(), CliError> {
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config from {}: {}", path, e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config from {path}: {e}")))?
     } else {
         crate::config::AppConfig::load()
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     };
 
     let mut providers = config
         .provider_names()
         .into_iter()
-        .map(|p| p.to_string())
+        .cloned()
         .collect::<Vec<_>>();
     providers.sort();
     for provider in providers {
-        println!("{}", provider);
+        println!("{provider}");
     }
     Ok(())
 }
@@ -1953,9 +1988,9 @@ pub async fn run_test_chat(
     let start = std::time::Instant::now();
 
     println!("Sending request to EAVS...");
-    println!("  Provider: {}", provider);
-    println!("  Model: {}", model);
-    println!("  Stream: {}", stream);
+    println!("  Provider: {provider}");
+    println!("  Model: {model}");
+    println!("  Stream: {stream}");
     println!();
 
     let response = client
@@ -1990,10 +2025,10 @@ pub async fn run_test_image(
     let start = std::time::Instant::now();
 
     println!("Sending image request to EAVS...");
-    println!("  Provider: {}", provider);
-    println!("  Model: {}", model);
-    println!("  Stream: {}", stream);
-    println!("  Image: {}", image);
+    println!("  Provider: {provider}");
+    println!("  Model: {model}");
+    println!("  Stream: {stream}");
+    println!("  Image: {image}");
     println!();
 
     let response = client
@@ -2034,9 +2069,9 @@ pub async fn run_test_tool_call(
     let start = std::time::Instant::now();
 
     println!("Sending tool-call request to EAVS...");
-    println!("  Provider: {}", provider);
-    println!("  Model: {}", model);
-    println!("  Stream: {}", stream);
+    println!("  Provider: {provider}");
+    println!("  Model: {model}");
+    println!("  Stream: {stream}");
     println!();
 
     let response = client
@@ -2060,7 +2095,7 @@ pub async fn run_test_rate_limit(
     count: u32,
     api_key: String,
 ) -> Result<(), CliError> {
-    println!("Testing rate limiting with {} rapid requests...", count);
+    println!("Testing rate limiting with {count} rapid requests...");
     println!();
 
     let mut successes = 0;
@@ -2088,16 +2123,16 @@ pub async fn run_test_rate_limit(
         }
 
         if i % 10 == 0 {
-            println!(" [{}/{}]", i, count);
+            println!(" [{i}/{count}]");
         }
     }
 
     println!();
     println!();
     println!("Results:");
-    println!("  Successful: {}", successes);
-    println!("  Rate limited (429): {}", rate_limited);
-    println!("  Other errors: {}", errors);
+    println!("  Successful: {successes}");
+    println!("  Rate limited (429): {rate_limited}");
+    println!("  Other errors: {errors}");
 
     Ok(())
 }
@@ -2112,22 +2147,22 @@ pub async fn run_test_health(client: &EavsClient, format: OutputFormat) -> Resul
                 "health": health,
                 "providers": providers
             });
-            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            println!("{}", pretty_json(&output)?);
         }
         OutputFormat::Text => {
             println!("EAVS Server Status");
             println!("{}", "=".repeat(40));
             println!("Status: {}", health.status);
             if let Some(version) = health.version {
-                println!("Version: {}", version);
+                println!("Version: {version}");
             }
             if let Some(uptime) = health.uptime_secs {
-                println!("Uptime: {}s", uptime);
+                println!("Uptime: {uptime}s");
             }
             println!();
             println!("Available Providers:");
             for provider in providers {
-                println!("  - {}", provider);
+                println!("  - {provider}");
             }
         }
     }
@@ -2154,6 +2189,80 @@ pub struct RoutingTestResults {
     pub model_auto_detect: Option<RoutingTestResult>,
 }
 
+/// Test 3 of `run_test_routing`: probe the model auto-detection path using a
+/// minimal chat request and report the resolved provider.
+async fn test_model_auto_detection(
+    client: &reqwest::Client,
+    server_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+) -> Option<RoutingTestResult> {
+    // Use provider detection to predict expected provider
+    let expected_provider = crate::provider::detect_provider_from_model(model);
+    println!("3. Testing model auto-detection with model: {model}");
+    if let Some(expected) = expected_provider {
+        println!("   Expected provider from model: {expected}");
+    } else {
+        println!("   No provider auto-detected from model name");
+    }
+
+    // Make a request with the model to see what provider it resolves to
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 1
+    });
+
+    let mut req = client
+        .post(format!("{server_url}/v1/chat/completions"))
+        .header("Content-Type", "application/json");
+    if let Some(k) = api_key {
+        req = req.header("Authorization", format!("Bearer {k}"));
+    }
+    let resp = req.json(&body).send().await;
+
+    let result = match resp {
+        Ok(r) => {
+            let resolved = r
+                .headers()
+                .get("x-eavs-provider")
+                .and_then(|v| v.to_str().ok())
+                .map(std::string::ToString::to_string);
+
+            let code = r.status().as_u16();
+            let (success, note) = if resolved.is_some() || r.status().is_success() {
+                (true, None)
+            } else if code == 401 || code == 403 {
+                (true, Some("routing OK (auth failed)".to_string()))
+            } else {
+                (false, None)
+            };
+
+            RoutingTestResult {
+                method: "model auto-detection".to_string(),
+                success,
+                resolved_provider: resolved,
+                status_code: Some(code),
+                note,
+                error: if success {
+                    None
+                } else {
+                    Some(format!("HTTP {code}"))
+                },
+            }
+        }
+        Err(e) => RoutingTestResult {
+            method: "model auto-detection".to_string(),
+            success: false,
+            resolved_provider: None,
+            status_code: None,
+            note: None,
+            error: Some(format!("Connection failed: {e}")),
+        },
+    };
+    Some(result)
+}
+
 /// Test provider routing mechanisms
 pub async fn run_test_routing(
     server_url: &str,
@@ -2165,22 +2274,22 @@ pub async fn run_test_routing(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .expect("Failed to create HTTP client");
+        .map_err(|e| CliError::Other(format!("Failed to create HTTP client: {e}")))?;
 
     println!("Testing Provider Routing");
     println!("{}", "=".repeat(50));
-    println!("Server: {}", server_url);
-    println!("Provider: {}", provider);
+    println!("Server: {server_url}");
+    println!("Provider: {provider}");
     if let Some(ref m) = model {
-        println!("Model: {}", m);
+        println!("Model: {m}");
     }
     println!();
 
     // Test 1: Provider-prefixed path (e.g., /openai/v1/models)
-    println!("1. Testing provider-prefixed path: /{}/v1/models", provider);
+    println!("1. Testing provider-prefixed path: /{provider}/v1/models");
     let prefix_result = test_routing_method(
         &client,
-        &format!("{}/{}/v1/models", server_url, provider),
+        &format!("{server_url}/{provider}/v1/models"),
         None,
         api_key.as_deref(),
         "provider-prefixed path",
@@ -2188,13 +2297,10 @@ pub async fn run_test_routing(
     .await;
 
     // Test 2: X-Provider header
-    println!(
-        "2. Testing X-Provider header: /v1/models with X-Provider: {}",
-        provider
-    );
+    println!("2. Testing X-Provider header: /v1/models with X-Provider: {provider}");
     let header_result = test_routing_method(
         &client,
-        &format!("{}/v1/models", server_url),
+        &format!("{server_url}/v1/models"),
         Some(provider),
         api_key.as_deref(),
         "X-Provider header",
@@ -2203,71 +2309,7 @@ pub async fn run_test_routing(
 
     // Test 3: Model auto-detection (only if model is provided)
     let auto_detect_result = if let Some(ref m) = model {
-        // Use provider detection to predict expected provider
-        let expected_provider = crate::provider::detect_provider_from_model(m);
-        println!("3. Testing model auto-detection with model: {}", m);
-        if let Some(ref expected) = expected_provider {
-            println!("   Expected provider from model: {}", expected);
-        } else {
-            println!("   No provider auto-detected from model name");
-        }
-
-        // Make a request with the model to see what provider it resolves to
-        // We use chat/completions with a minimal body
-        let body = serde_json::json!({
-            "model": m,
-            "messages": [{"role": "user", "content": "test"}],
-            "max_tokens": 1
-        });
-
-        let mut req = client
-            .post(format!("{}/v1/chat/completions", server_url))
-            .header("Content-Type", "application/json");
-        if let Some(ref k) = api_key {
-            req = req.header("Authorization", format!("Bearer {}", k));
-        }
-        let resp = req.json(&body).send().await;
-
-        let result = match resp {
-            Ok(r) => {
-                let resolved = r
-                    .headers()
-                    .get("x-eavs-provider")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
-
-                let code = r.status().as_u16();
-                let (success, note) = if resolved.is_some() || r.status().is_success() {
-                    (true, None)
-                } else if code == 401 || code == 403 {
-                    (true, Some("routing OK (auth failed)".to_string()))
-                } else {
-                    (false, None)
-                };
-
-                RoutingTestResult {
-                    method: "model auto-detection".to_string(),
-                    success,
-                    resolved_provider: resolved,
-                    status_code: Some(code),
-                    note,
-                    error: if !success {
-                        Some(format!("HTTP {}", code))
-                    } else {
-                        None
-                    },
-                }
-            }
-            Err(e) => RoutingTestResult {
-                method: "model auto-detection".to_string(),
-                success: false,
-                resolved_provider: None,
-                status_code: None,
-                note: None,
-                error: Some(format!("Connection failed: {}", e)),
-            },
-        };
-        Some(result)
+        test_model_auto_detection(&client, server_url, m, api_key.as_deref()).await
     } else {
         println!("3. Model auto-detection: skipped (no --model provided)");
         None
@@ -2285,7 +2327,7 @@ pub async fn run_test_routing(
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&results).unwrap());
+            println!("{}", pretty_json(&results)?);
         }
         OutputFormat::Text => {
             print_routing_result(&results.provider_prefix);
@@ -2313,7 +2355,7 @@ pub async fn run_test_routing(
             } else {
                 2
             };
-            println!("Summary: {}/{} routing methods working", successes, total);
+            println!("Summary: {successes}/{total} routing methods working");
         }
     }
 
@@ -2334,7 +2376,7 @@ async fn test_routing_method(
         req = req.header("X-Provider", provider);
     }
     if let Some(key) = api_key {
-        req = req.header("Authorization", format!("Bearer {}", key));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
 
     match req.send().await {
@@ -2343,18 +2385,18 @@ async fn test_routing_method(
                 .headers()
                 .get("x-eavs-provider")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
 
             let status = resp.status();
             let code = status.as_u16();
 
             // Read body for error details on non-success responses
-            let body_text = if !status.is_success() {
-                resp.text().await.ok()
-            } else {
+            let body_text = if status.is_success() {
                 // Consume body but don't store it
                 let _ = resp.text().await;
                 None
+            } else {
+                resp.text().await.ok()
             };
 
             // Try to extract error message from JSON body
@@ -2386,22 +2428,22 @@ async fn test_routing_method(
                         "no API key provided".to_string()
                     }
                 });
-                (true, Some(format!("routing OK, auth failed: {}", detail)))
+                (true, Some(format!("routing OK, auth failed: {detail}")))
             } else if code == 404 {
                 (false, Some("provider or path not found".to_string()))
             } else {
                 (false, None)
             };
 
-            let error = if !success {
+            let error = if success {
+                None
+            } else {
                 Some(format!(
                     "HTTP {} {}",
                     code,
                     body_error
                         .unwrap_or_else(|| status.canonical_reason().unwrap_or("").to_string())
                 ))
-            } else {
-                None
             };
 
             RoutingTestResult {
@@ -2419,7 +2461,7 @@ async fn test_routing_method(
             resolved_provider: None,
             status_code: None,
             note: None,
-            error: Some(format!("Connection failed: {}", e)),
+            error: Some(format!("Connection failed: {e}")),
         },
     }
 }
@@ -2430,46 +2472,274 @@ fn print_routing_result(result: &RoutingTestResult) {
     print!("  {}: {}", result.method, label);
 
     if let Some(ref provider) = result.resolved_provider {
-        print!(" (resolved to: {})", provider);
+        print!(" (resolved to: {provider})");
     }
 
     if let Some(ref note) = result.note {
-        print!(" - {}", note);
+        print!(" - {note}");
     }
 
     if let Some(ref err) = result.error {
-        print!(" - {}", err);
+        print!(" - {err}");
     }
 
     println!();
+}
+
+/// Resolve only a route with the OAuth provider's actual protocol identity.
+fn select_oauth_test_route(
+    config: &crate::config::AppConfig,
+    provider: OAuthProvider,
+    explicit_model: Option<&str>,
+) -> Result<(String, String), CliError> {
+    use crate::provider::ProviderType;
+    let expected = match provider {
+        OAuthProvider::Anthropic => ProviderType::Anthropic,
+        OAuthProvider::OpenAICodex => ProviderType::OpenAICodex,
+        OAuthProvider::GithubCopilot => ProviderType::GithubCopilot,
+    };
+    let mut routes: Vec<_> = config
+        .providers
+        .iter()
+        .filter(|(_, route)| route.provider_type() == expected)
+        .collect();
+    routes.sort_by_key(|(name, _)| *name);
+    let [(name, route)] = routes.as_slice() else {
+        return Err(CliError::Other(format!(
+            "Expected exactly one configured {expected:?} OAuth route, found {}: {:?}. Configure a single matching provider route.",
+            routes.len(), routes.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        )));
+    };
+    let model = explicit_model.unwrap_or(&route.test_model).trim();
+    if model.is_empty() {
+        return Err(CliError::Other(format!(
+            "Specify --model or providers.{name}.test_model for this OAuth test; no model is guessed"
+        )));
+    }
+    Ok(((*name).clone(), model.to_string()))
+}
+
+#[cfg(test)]
+mod oauth_test_route_tests {
+    use super::*;
+
+    fn config(entries: &[(&str, &str, &str)]) -> crate::config::AppConfig {
+        let mut config = crate::config::AppConfig::with_defaults();
+        config.providers.clear();
+        for (name, kind, model) in entries {
+            let route = crate::config::ProviderConfig {
+                type_: kind.to_string(),
+                test_model: model.to_string(),
+                ..Default::default()
+            };
+            config.providers.insert(name.to_string(), route);
+        }
+        config
+    }
+
+    #[tokio::test]
+    async fn oauth_test_rejects_invalid_config_before_any_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("invalid.toml");
+        std::fs::write(&path, "[not valid TOML")?;
+        let result = run_test_oauth(
+            "fixture",
+            OAuthTestArgs {
+                provider: None,
+                model: None,
+                message: "unused".to_string(),
+                stream: false,
+            },
+            "http://127.0.0.1:1",
+            OutputFormat::Text,
+            path.to_str(),
+        )
+        .await;
+        if !matches!(
+            result,
+            Err(CliError::Other(message)) if message.contains("Failed to load config")
+        ) {
+            return Err("expected config load failure".into());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth_admin_auth_and_failure_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{extract::Request, routing::any, Router};
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let captured = captured.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let headers = request.headers();
+                let token = headers.get("x-eavs-token").and_then(|v| v.to_str().ok());
+                if token != Some("listener-fixture") {
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("unexpected listener token: {token:?}"),
+                    ));
+                }
+                let expected = if path.starts_with("/admin/") {
+                    "Bearer admin-fixture"
+                } else {
+                    "Bearer virtual-fixture"
+                };
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
+                if auth != Some(expected) {
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("unexpected authorization: {auth:?}"),
+                    ));
+                }
+                captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((method, path.clone()));
+                if path == "/v1/chat/completions" {
+                    Ok((axum::http::StatusCode::BAD_GATEWAY, "mock upstream failure"))
+                } else {
+                    Ok((axum::http::StatusCode::OK, "{}"))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = EavsClient {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()?,
+            config: CliConfig {
+                server_url: format!("http://{address}"),
+                timeout: Duration::from_secs(2),
+                listener_token: Some("listener-fixture".to_string()),
+            },
+        };
+        client
+            .oauth_test_admin_request(
+                reqwest::Method::POST,
+                "/admin/keys",
+                "admin-fixture",
+                Some(&crate::keys::CreateKeyRequest::default()),
+            )
+            .await?;
+        let key: crate::keys::CreateKeyResponse = serde_json::from_value(serde_json::json!({
+            "key": "virtual-fixture", "key_id": "fixture", "key_hash": "hash-fixture",
+            "created_at": "2026-01-01T00:00:00Z", "permissions": {}
+        }))?;
+        let result = client
+            .oauth_test_chat_and_revoke(
+                "admin-fixture",
+                &key,
+                ("test", "model", "subscription", false),
+            )
+            .await;
+        server.abort();
+        if !matches!(result, Err(CliError::Api { status: 502, .. })) {
+            return Err("expected a 502 API error for the mocked upstream".into());
+        }
+        let seen_matches = {
+            let seen = seen.lock().map_err(|e| e.to_string())?;
+            *seen
+                == vec![
+                    (reqwest::Method::POST, "/admin/keys".to_string()),
+                    (reqwest::Method::POST, "/v1/chat/completions".to_string()),
+                    (
+                        reqwest::Method::DELETE,
+                        "/admin/keys/hash-fixture".to_string(),
+                    ),
+                ]
+        };
+        if !seen_matches {
+            return Err("unexpected captured request sequence".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_routes_use_protocol_not_name() -> Result<(), CliError> {
+        for (provider, kind) in [
+            (OAuthProvider::Anthropic, "anthropic"),
+            (OAuthProvider::OpenAICodex, "openai-codex"),
+            (OAuthProvider::GithubCopilot, "github-copilot"),
+        ] {
+            let config = config(&[
+                ("openai", "openai", "wrong"),
+                ("subscription", kind, "configured"),
+            ]);
+            let route = select_oauth_test_route(&config, provider, None)?;
+            if route != ("subscription".to_string(), "configured".to_string()) {
+                return Err(CliError::Other(format!("unexpected route: {route:?}")));
+            }
+            if select_oauth_test_route(&config, provider, Some("explicit"))?.1 != "explicit" {
+                return Err(CliError::Other(
+                    "expected explicit model override".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_routes_reject_absent_ambiguous_and_missing_models() {
+        for provider in [OAuthProvider::OpenAICodex, OAuthProvider::GithubCopilot] {
+            assert!(select_oauth_test_route(
+                &config(&[("openai", "openai", "gpt-4o")]),
+                provider,
+                Some("explicit")
+            )
+            .is_err());
+        }
+        let ambiguous = config(&[("a", "openai-codex", "m"), ("b", "openai-codex", "m")]);
+        assert!(
+            select_oauth_test_route(&ambiguous, OAuthProvider::OpenAICodex, Some("m")).is_err()
+        );
+        let missing = config(&[("custom", "openai-codex", "")]);
+        assert!(select_oauth_test_route(&missing, OAuthProvider::OpenAICodex, None).is_err());
+        assert!(select_oauth_test_route(&missing, OAuthProvider::OpenAICodex, Some(" ")).is_err());
+    }
 }
 
 /// Test OAuth authentication end-to-end
 ///
 /// This creates a temporary virtual key bound to the OAuth user,
 /// sends a test request, and validates the response.
-// CLI command entrypoint mapping 1:1 to user-facing flags; grouping into a struct
-// would only obscure the argument set.
-#[allow(clippy::too_many_arguments)]
+/// CLI arguments for the OAuth end-to-end test, grouped so the entry point
+/// stays readable while preserving the 1:1 mapping to user-facing flags.
+pub struct OAuthTestArgs {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub message: String,
+    pub stream: bool,
+}
+
 pub async fn run_test_oauth(
     user_id: &str,
-    provider: Option<String>,
-    model: Option<String>,
-    message: String,
-    stream: bool,
+    args: OAuthTestArgs,
     server_url: &str,
     format: OutputFormat,
     config_path: Option<&str>,
 ) -> Result<(), CliError> {
-    use crate::keys::{CreateKeyRequest, KeyPermissions, KeyStore};
+    let OAuthTestArgs {
+        provider,
+        model,
+        message,
+        stream,
+    } = args;
 
     // Load config
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     } else {
         crate::config::AppConfig::load()
-            .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     };
 
     // Fail fast: OAuth testing requires virtual keys to be enabled on the
@@ -2504,17 +2774,16 @@ pub async fn run_test_oauth(
     // Check OAuth store for authenticated providers
     let oauth_store = OAuthStore::new(&db_path, backend)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {e}")))?;
 
     let authenticated_providers = oauth_store
         .list_providers(user_id)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to list providers: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to list providers: {e}")))?;
 
     if authenticated_providers.is_empty() {
         return Err(CliError::Other(format!(
-            "No OAuth providers authenticated for user '{}'. Run 'eavs login' first.",
-            user_id
+            "No OAuth providers authenticated for user '{user_id}'. Run 'eavs login' first."
         )));
     }
 
@@ -2522,83 +2791,149 @@ pub async fn run_test_oauth(
     let oauth_provider_str = if let Some(ref p) = provider {
         if !authenticated_providers.iter().any(|ap| ap == p) {
             return Err(CliError::Other(format!(
-                "Provider '{}' not authenticated for user '{}'. Authenticated: {:?}",
-                p, user_id, authenticated_providers
+                "Provider '{p}' not authenticated for user '{user_id}'. Authenticated: {authenticated_providers:?}"
             )));
         }
         p.clone()
-    } else {
+    } else if authenticated_providers.len() == 1 {
         authenticated_providers[0].clone()
+    } else {
+        return Err(CliError::Other(
+            "Multiple authenticated OAuth providers; select one with --provider".to_string(),
+        ));
     };
 
     let oauth_provider = OAuthProvider::from_str(&oauth_provider_str)
-        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", oauth_provider_str)))?;
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {oauth_provider_str}")))?;
 
-    // Determine model based on provider if not specified
-    let model = model.unwrap_or_else(|| match oauth_provider {
-        OAuthProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
-        OAuthProvider::OpenAICodex => "gpt-4o".to_string(),
-        OAuthProvider::GithubCopilot => "gpt-4o".to_string(),
-    });
-
-    // Map OAuth provider to EAVS provider name
-    let eavs_provider = match oauth_provider {
-        OAuthProvider::Anthropic => "anthropic",
-        OAuthProvider::OpenAICodex => "openai",
-        OAuthProvider::GithubCopilot => "openai", // GitHub Copilot uses OpenAI-compatible API
-    };
+    let (eavs_provider, model) =
+        select_oauth_test_route(&config, oauth_provider, model.as_deref())?;
+    let listener_token = config.resolved_listener_auth_token().ok_or_else(|| {
+        CliError::Other("OAuth testing requires listener authentication; configure auth_token or EAVS_AUTH_TOKEN".to_string())
+    })?;
 
     println!("Testing OAuth Authentication");
     println!("{}", "=".repeat(50));
-    println!("User:     {}", user_id);
-    println!("Provider: {} ({})", oauth_provider_str, eavs_provider);
-    println!("Model:    {}", model);
-    println!("Stream:   {}", stream);
+    println!("User:     {user_id}");
+    println!("Provider: {oauth_provider_str} ({eavs_provider})");
+    println!("Model:    {model}");
+    println!("Stream:   {stream}");
     println!();
 
-    // Create a temporary virtual key bound to the OAuth user
-    let key_store = KeyStore::new(&db_path)
-        .await
-        .map_err(|e| CliError::Other(format!("Failed to open key store: {}", e)))?;
+    // Mutate the running server's store, not a separate process-local key cache.
+    let master_key = config.keys.resolved_master_key().ok_or_else(|| {
+        CliError::Other(
+            "OAuth testing requires keys.master_key for server-side temporary key creation"
+                .to_string(),
+        )
+    })?;
+    let client = EavsClient::new(CliConfig {
+        server_url: server_url.to_string(),
+        timeout: Duration::from_secs(30),
+        listener_token: Some(listener_token),
+    })?;
+
+    run_oauth_test_request(
+        &client,
+        &master_key,
+        OAuthTestRequestArgs {
+            user_id,
+            oauth_provider_str: &oauth_provider_str,
+            eavs_provider: &eavs_provider,
+            model: &model,
+            message: &message,
+            stream,
+            format,
+        },
+    )
+    .await
+}
+
+/// Perform the temporary key creation and OAuth test chat round-trip, then
+/// print the outcome in the requested format.
+/// Arguments for the OAuth test request round-trip.
+struct OAuthTestRequestArgs<'a> {
+    user_id: &'a str,
+    oauth_provider_str: &'a str,
+    eavs_provider: &'a str,
+    model: &'a str,
+    message: &'a str,
+    stream: bool,
+    format: OutputFormat,
+}
+
+async fn run_oauth_test_request(
+    client: &EavsClient,
+    master_key: &str,
+    args: OAuthTestRequestArgs<'_>,
+) -> Result<(), CliError> {
+    use crate::keys::{CreateKeyRequest, KeyPermissions};
+    let OAuthTestRequestArgs {
+        user_id,
+        oauth_provider_str,
+        eavs_provider,
+        model,
+        message,
+        stream,
+        format,
+    } = args;
 
     let key_request = CreateKeyRequest {
         name: Some(format!("oauth-test-{}", chrono::Utc::now().timestamp())),
         expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
-        permissions: KeyPermissions::default(),
+        permissions: KeyPermissions {
+            allowed_providers: Some(std::iter::once(eavs_provider.to_string()).collect()),
+            allowed_models: Some(std::iter::once(model.to_string()).collect()),
+            ..Default::default()
+        },
         metadata: serde_json::Value::Null,
         owner: None,
         oauth_user: Some(user_id.to_string()),
         oauth_account: None,
     };
 
-    let key_response = key_store
-        .create_key(key_request)
+    let key_response: crate::keys::CreateKeyResponse = client
+        .oauth_test_admin_request(
+            reqwest::Method::POST,
+            "/admin/keys",
+            master_key,
+            Some(&key_request),
+        )
+        .await?
+        .json()
         .await
-        .map_err(|e| CliError::Other(format!("Failed to create test key: {}", e)))?;
+        .map_err(CliError::Request)?;
 
     println!("Created temporary key: {}", key_response.key_id);
     println!();
 
-    // Send test request
     let start = std::time::Instant::now();
     println!("Sending test request...");
 
-    let client = EavsClient::with_url(server_url.to_string());
     let result = client
-        .chat(
-            &message,
-            &model,
-            eavs_provider,
-            Some(&key_response.key),
-            stream,
+        .oauth_test_chat_and_revoke(
+            master_key,
+            &key_response,
+            (message, model, eavs_provider, stream),
         )
         .await;
 
-    // Clean up: disable the temporary key
-    let _ = key_store.disable_key(&key_response.key_hash).await;
-
     let elapsed = start.elapsed();
 
+    print_oauth_test_response(result, format, user_id, oauth_provider_str, model, elapsed)?;
+
+    Ok(())
+}
+
+/// Print the OAuth test round-trip outcome.
+fn print_oauth_test_response(
+    result: Result<ChatResponse, CliError>,
+    format: OutputFormat,
+    user_id: &str,
+    oauth_provider_str: &str,
+    model: &str,
+    elapsed: std::time::Duration,
+) -> Result<(), CliError> {
     match result {
         Ok(response) => {
             println!();
@@ -2619,13 +2954,13 @@ pub async fn run_test_oauth(
                         "response": response.content,
                         "usage": usage_json,
                     });
-                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                    println!("{}", pretty_json(&output)?);
                 }
                 OutputFormat::Text => {
                     println!("Response:");
                     println!("{}", response.content);
                     println!();
-                    println!("Timing: {:.2?}", elapsed);
+                    println!("Timing: {elapsed:.2?}");
                     if let Some(usage) = response.usage {
                         println!(
                             "Usage: {} prompt + {} completion tokens",
@@ -2649,11 +2984,11 @@ pub async fn run_test_oauth(
                         "elapsed_ms": elapsed.as_millis(),
                         "error": e.to_string(),
                     });
-                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                    println!("{}", pretty_json(&output)?);
                 }
                 OutputFormat::Text => {
                     println!();
-                    println!("OAuth test FAILED: {}", e);
+                    println!("OAuth test FAILED: {e}");
                 }
             }
             Err(e)
@@ -2677,7 +3012,7 @@ async fn timed_request(
         .json(body);
 
     if let Some(key) = api_key {
-        req = req.header("Authorization", format!("Bearer {}", key));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
 
     if let Some(prov) = provider {
@@ -2702,17 +3037,16 @@ async fn timed_request(
 }
 
 fn guess_image_mime(path: &str) -> Option<&'static str> {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png")
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        Some("image/jpeg")
-    } else if lower.ends_with(".webp") {
-        Some("image/webp")
-    } else if lower.ends_with(".gif") {
-        Some("image/gif")
-    } else {
-        None
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
     }
 }
 
@@ -2774,13 +3108,13 @@ impl ConcurrentBenchmarkResults {
         target: String,
         concurrency: u32,
         duration_secs: f64,
-        latencies: Vec<f64>,
+        latencies: &[f64],
         failed: u32,
     ) -> Self {
         let successful = latencies.len() as u32;
         let total_requests = successful + failed;
         let requests_per_second = if duration_secs > 0.0 {
-            total_requests as f64 / duration_secs
+            f64::from(total_requests) / duration_secs
         } else {
             0.0
         };
@@ -2805,15 +3139,15 @@ impl ConcurrentBenchmarkResults {
             };
         }
 
-        let mut sorted = latencies.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut sorted = latencies.to_vec();
+        sorted.sort_by(f64::total_cmp);
 
         let min_ms = sorted[0];
         let max_ms = sorted[sorted.len() - 1];
         let mean_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
 
         let median_ms = if sorted.len().is_multiple_of(2) {
-            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+            f64::midpoint(sorted[sorted.len() / 2 - 1], sorted[sorted.len() / 2])
         } else {
             sorted[sorted.len() / 2]
         };
@@ -2867,25 +3201,53 @@ impl ConcurrentBenchmarkResults {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_test_bench(
+/// Parameters for the `test bench` command, grouped so the entry point stays readable.
+pub struct BenchmarkArgs {
+    pub count: u32,
+    pub provider: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub compare_direct: bool,
+    pub direct_url: String,
+    pub direct_key: Option<String>,
+    pub stream: bool,
+    pub concurrent: u32,
+    pub duration: Option<String>,
+    pub eavs_url: String,
+    pub format: OutputFormat,
+}
+
+/// Common settings for a single benchmark target (EAVS proxy or direct).
+struct BenchmarkTarget<'a> {
+    client: &'a reqwest::Client,
+    url: &'a str,
+    body: &'a serde_json::Value,
+    api_key: Option<&'a str>,
+    provider: Option<&'a str>,
     count: u32,
-    provider: String,
-    model: String,
-    api_key: Option<String>,
-    compare_direct: bool,
-    direct_url: String,
-    direct_key: Option<String>,
-    stream: bool,
-    concurrent: u32,
-    duration: Option<String>,
-    eavs_url: String,
-    format: OutputFormat,
-) -> Result<(), CliError> {
+    duration: Option<Duration>,
+    target_name: String,
+}
+
+pub async fn run_test_bench(args: BenchmarkArgs) -> Result<(), CliError> {
+    let BenchmarkArgs {
+        count,
+        provider,
+        model,
+        api_key,
+        compare_direct,
+        direct_url,
+        direct_key,
+        stream,
+        concurrent,
+        duration,
+        eavs_url,
+        format,
+    } = args;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
-        .expect("Failed to create HTTP client");
+        .map_err(|e| CliError::Other(format!("Failed to create HTTP client: {e}")))?;
 
     // Small, fast request for benchmarking
     let body = serde_json::json!({
@@ -2897,25 +3259,24 @@ pub async fn run_test_bench(
 
     // Parse duration if provided
     let test_duration = duration.as_ref().and_then(|d| parse_duration_string(d));
-    let is_duration_test = test_duration.is_some();
     let concurrent = concurrent.max(1);
 
     println!("EAVS Benchmark");
     println!("{}", "=".repeat(50));
-    println!("Model: {}", model);
-    println!("Provider: {}", provider);
-    if is_duration_test {
-        println!("Duration: {:?}", test_duration.unwrap());
+    println!("Model: {model}");
+    println!("Provider: {provider}");
+    if let Some(d) = test_duration {
+        println!("Duration: {d:?}");
     } else {
-        println!("Requests: {}", count);
+        println!("Requests: {count}");
     }
-    println!("Concurrency: {}", concurrent);
-    println!("Streaming: {}", stream);
+    println!("Concurrency: {concurrent}");
+    println!("Streaming: {stream}");
     println!();
 
     // Warm-up request
     println!("Warming up...");
-    let endpoint_url = format!("{}/v1/chat/completions", eavs_url);
+    let endpoint_url = format!("{eavs_url}/v1/chat/completions");
     let _ = timed_request(
         &client,
         &endpoint_url,
@@ -2926,33 +3287,22 @@ pub async fn run_test_bench(
     .await;
 
     // Run benchmark
+    let eavs_target = BenchmarkTarget {
+        client: &client,
+        url: &endpoint_url,
+        body: &body,
+        api_key: api_key.as_deref(),
+        provider: Some(&provider),
+        count,
+        duration: test_duration,
+        target_name: format!("EAVS ({eavs_url})"),
+    };
     let eavs_results = if concurrent == 1 {
         // Sequential benchmark (original behavior)
-        run_sequential_benchmark(
-            &client,
-            &endpoint_url,
-            &body,
-            api_key.as_deref(),
-            Some(&provider),
-            count,
-            test_duration,
-            format!("EAVS ({})", eavs_url),
-        )
-        .await
+        run_sequential_benchmark(&eavs_target).await
     } else {
         // Concurrent benchmark
-        run_concurrent_benchmark(
-            &client,
-            &endpoint_url,
-            &body,
-            api_key.as_deref(),
-            Some(&provider),
-            count,
-            concurrent,
-            test_duration,
-            format!("EAVS ({})", eavs_url),
-        )
-        .await
+        run_concurrent_benchmark(&eavs_target, concurrent).await
     };
 
     // Optionally benchmark direct provider access
@@ -2962,39 +3312,24 @@ pub async fn run_test_bench(
         })?;
 
         println!();
-        println!("Benchmarking direct provider ({})...", direct_url);
+        println!("Benchmarking direct provider ({direct_url})...");
 
-        let direct_endpoint = format!("{}/v1/chat/completions", direct_url);
+        let direct_endpoint = format!("{direct_url}/v1/chat/completions");
 
+        let direct_target = BenchmarkTarget {
+            client: &client,
+            url: &direct_endpoint,
+            body: &body,
+            api_key: Some(&direct_api_key),
+            provider: None,
+            count,
+            duration: test_duration,
+            target_name: format!("Direct ({direct_url})"),
+        };
         if concurrent == 1 {
-            Some(
-                run_sequential_benchmark(
-                    &client,
-                    &direct_endpoint,
-                    &body,
-                    Some(&direct_api_key),
-                    None,
-                    count,
-                    test_duration,
-                    format!("Direct ({})", direct_url),
-                )
-                .await,
-            )
+            Some(run_sequential_benchmark(&direct_target).await)
         } else {
-            Some(
-                run_concurrent_benchmark(
-                    &client,
-                    &direct_endpoint,
-                    &body,
-                    Some(&direct_api_key),
-                    None,
-                    count,
-                    concurrent,
-                    test_duration,
-                    format!("Direct ({})", direct_url),
-                )
-                .await,
-            )
+            Some(run_concurrent_benchmark(&direct_target, concurrent).await)
         }
     } else {
         None
@@ -3002,13 +3337,24 @@ pub async fn run_test_bench(
 
     println!();
 
+    print_benchmark_results(&eavs_results, direct_results.as_ref(), format)?;
+
+    Ok(())
+}
+
+/// Print the benchmark results in the requested output format.
+fn print_benchmark_results(
+    eavs_results: &ConcurrentBenchmarkResults,
+    direct_results: Option<&ConcurrentBenchmarkResults>,
+    format: OutputFormat,
+) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => {
             let output = serde_json::json!({
                 "eavs": eavs_results,
                 "direct": direct_results,
-                "overhead_ms": direct_results.as_ref().map(|d| eavs_results.mean_ms - d.mean_ms),
-                "overhead_pct": direct_results.as_ref().map(|d| {
+                "overhead_ms": direct_results.map(|d| eavs_results.mean_ms - d.mean_ms),
+                "overhead_pct": direct_results.map(|d| {
                     if d.mean_ms > 0.0 {
                         ((eavs_results.mean_ms - d.mean_ms) / d.mean_ms) * 100.0
                     } else {
@@ -3016,7 +3362,7 @@ pub async fn run_test_bench(
                     }
                 }),
             });
-            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            println!("{}", pretty_json(&output)?);
         }
         OutputFormat::Text => {
             println!("Results");
@@ -3025,7 +3371,7 @@ pub async fn run_test_bench(
             println!("EAVS Proxy:");
             eavs_results.print_text();
 
-            if let Some(ref direct) = direct_results {
+            if let Some(direct) = direct_results {
                 println!();
                 println!("Direct Provider:");
                 direct.print_text();
@@ -3038,10 +3384,7 @@ pub async fn run_test_bench(
                 } else {
                     0.0
                 };
-                println!(
-                    "  Mean overhead:   {:.2}ms ({:.1}%)",
-                    overhead_ms, overhead_pct
-                );
+                println!("  Mean overhead:   {overhead_ms:.2}ms ({overhead_pct:.1}%)");
                 println!(
                     "  Median overhead: {:.2}ms",
                     eavs_results.median_ms - direct.median_ms
@@ -3049,23 +3392,22 @@ pub async fn run_test_bench(
             }
         }
     }
-
     Ok(())
 }
 
 /// Run sequential benchmark (original behavior)
-#[allow(clippy::too_many_arguments)]
-async fn run_sequential_benchmark(
-    client: &reqwest::Client,
-    url: &str,
-    body: &serde_json::Value,
-    api_key: Option<&str>,
-    provider: Option<&str>,
-    count: u32,
-    duration: Option<Duration>,
-    target_name: String,
-) -> ConcurrentBenchmarkResults {
-    println!("Benchmarking {} (sequential)...", target_name);
+async fn run_sequential_benchmark(target: &BenchmarkTarget<'_>) -> ConcurrentBenchmarkResults {
+    let BenchmarkTarget {
+        client,
+        url,
+        body,
+        api_key,
+        provider,
+        count,
+        duration,
+        ref target_name,
+    } = *target;
+    println!("Benchmarking {target_name} (sequential)...");
 
     let start_time = std::time::Instant::now();
     let mut latencies = Vec::with_capacity(count as usize);
@@ -3082,15 +3424,12 @@ async fn run_sequential_benchmark(
             break;
         }
 
-        match timed_request(client, url, body, api_key, provider).await {
-            Ok(dur) => {
-                latencies.push(dur.as_secs_f64() * 1000.0);
-                print!(".");
-            }
-            Err(_) => {
-                failed += 1;
-                print!("X");
-            }
+        if let Ok(dur) = timed_request(client, url, body, api_key, provider).await {
+            latencies.push(dur.as_secs_f64() * 1000.0);
+            print!(".");
+        } else {
+            failed += 1;
+            print!("X");
         }
         completed += 1;
 
@@ -3102,7 +3441,7 @@ async fn run_sequential_benchmark(
                     start_time.elapsed().as_secs_f64()
                 );
             } else {
-                println!(" [{}/{}]", completed, count);
+                println!(" [{completed}/{count}]");
             }
         }
         std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -3113,35 +3452,60 @@ async fn run_sequential_benchmark(
     }
 
     ConcurrentBenchmarkResults::from_results(
-        target_name,
+        target_name.clone(),
         1,
         start_time.elapsed().as_secs_f64(),
-        latencies,
+        &latencies,
         failed,
     )
 }
 
 /// Run concurrent benchmark
-#[allow(clippy::too_many_arguments)]
+/// Spawn a background task that periodically prints benchmark progress.
+fn spawn_progress_reporter(
+    completed: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    should_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
+    tokio::spawn(async move {
+        let mut last_count = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if should_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let current = completed.load(Ordering::Relaxed);
+            let fails = failed.load(Ordering::Relaxed);
+            if current > last_count {
+                print!("\r  Progress: {current} requests ({fails} failed)    ");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                last_count = current;
+            }
+        }
+    })
+}
+
 async fn run_concurrent_benchmark(
-    client: &reqwest::Client,
-    url: &str,
-    body: &serde_json::Value,
-    api_key: Option<&str>,
-    provider: Option<&str>,
-    count: u32,
+    target: &BenchmarkTarget<'_>,
     concurrency: u32,
-    duration: Option<Duration>,
-    target_name: String,
 ) -> ConcurrentBenchmarkResults {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    println!(
-        "Benchmarking {} ({} concurrent)...",
-        target_name, concurrency
-    );
+    let BenchmarkTarget {
+        client,
+        url,
+        body,
+        api_key,
+        provider,
+        count,
+        duration,
+        ref target_name,
+    } = *target;
+
+    println!("Benchmarking {target_name} ({concurrency} concurrent)...");
 
     let start_time = std::time::Instant::now();
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(count as usize)));
@@ -3156,8 +3520,8 @@ async fn run_concurrent_benchmark(
         let client = client.clone();
         let url = url.to_string();
         let body = body.clone();
-        let api_key = api_key.map(|s| s.to_string());
-        let provider = provider.map(|s| s.to_string());
+        let api_key = api_key.map(std::string::ToString::to_string);
+        let provider = provider.map(std::string::ToString::to_string);
         let latencies = latencies.clone();
         let failed = failed.clone();
         let completed = completed.clone();
@@ -3211,25 +3575,8 @@ async fn run_concurrent_benchmark(
     }
 
     // Progress reporting task
-    let completed_progress = completed.clone();
-    let failed_progress = failed.clone();
-    let should_stop_progress = should_stop.clone();
-    let progress_handle = tokio::spawn(async move {
-        let mut last_count = 0;
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if should_stop_progress.load(Ordering::Relaxed) {
-                break;
-            }
-            let current = completed_progress.load(Ordering::Relaxed);
-            let fails = failed_progress.load(Ordering::Relaxed);
-            if current > last_count {
-                print!("\r  Progress: {} requests ({} failed)    ", current, fails);
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-                last_count = current;
-            }
-        }
-    });
+    let progress_handle =
+        spawn_progress_reporter(completed.clone(), failed.clone(), should_stop.clone());
 
     // Wait for all workers
     for handle in handles {
@@ -3244,10 +3591,10 @@ async fn run_concurrent_benchmark(
     let final_failed = failed.load(Ordering::Relaxed);
 
     ConcurrentBenchmarkResults::from_results(
-        target_name,
+        target_name.clone(),
         concurrency,
         start_time.elapsed().as_secs_f64(),
-        final_latencies,
+        &final_latencies,
         final_failed,
     )
 }
@@ -3259,10 +3606,6 @@ async fn run_concurrent_benchmark(
 /// Result of checking/starting an EAVS server
 pub struct ServerStatus {
     pub url: String,
-    #[allow(dead_code)]
-    pub port: u16,
-    #[allow(dead_code)]
-    pub was_started: bool,
 }
 
 /// Check if a port is available for binding
@@ -3284,12 +3627,15 @@ pub async fn is_eavs_server_running(url: &str) -> bool {
 }
 
 async fn is_eavs_server_running_with_token(url: &str, token: Option<&str>) -> bool {
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
-        .unwrap();
+    else {
+        // If the client cannot be built the server is not reachable.
+        return false;
+    };
 
-    let health_url = format!("{}/health", url);
+    let health_url = format!("{url}/health");
     let mut request = client.get(&health_url);
     if let Some(token) = token {
         request = request.header("X-Eavs-Token", token);
@@ -3298,13 +3644,10 @@ async fn is_eavs_server_running_with_token(url: &str, token: Option<&str>) -> bo
         Ok(resp) => {
             if resp.status().is_success() {
                 // Check that we don't get HTML (which would indicate a non-EAVS server)
-                if let Ok(text) = resp.text().await {
+                resp.text().await.map_or(true, |text| {
                     // EAVS returns empty body or JSON, never HTML
                     !text.contains("<!DOCTYPE") && !text.contains("<html")
-                } else {
-                    // Empty body is OK for EAVS health endpoint
-                    true
-                }
+                })
             } else {
                 false
             }
@@ -3335,7 +3678,7 @@ pub fn start_server_background(
     config_path: Option<&str>,
 ) -> Result<std::process::Child, CliError> {
     let exe_path = std::env::current_exe()
-        .map_err(|e| CliError::Other(format!("Failed to get current executable path: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to get current executable path: {e}")))?;
 
     let mut cmd = std::process::Command::new(&exe_path);
     cmd.arg("serve")
@@ -3352,71 +3695,70 @@ pub fn start_server_background(
     }
 
     cmd.spawn()
-        .map_err(|e| CliError::Other(format!("Failed to start EAVS server: {}", e)))
+        .map_err(|e| CliError::Other(format!("Failed to start EAVS server: {e}")))
 }
 
 /// Ensure an EAVS server is running, starting one if necessary.
 /// Returns the URL of the running server.
 pub async fn ensure_server_running(
-    preferred_url: &Option<String>,
+    preferred_url: Option<&str>,
     config_path: Option<&str>,
 ) -> Result<ServerStatus, CliError> {
     // Build the URL: use explicit --url if given, otherwise construct from config
     let effective_port = get_effective_port(None, config_path);
-    let default_url = format!("http://127.0.0.1:{}", effective_port);
-    let url_str = preferred_url.as_deref().unwrap_or(&default_url);
+    let default_url = format!("http://127.0.0.1:{effective_port}");
+    let url_str = preferred_url.unwrap_or(&default_url);
 
     // Parse the preferred URL to get host and port
     let url = url::Url::parse(url_str)
-        .map_err(|e| CliError::Other(format!("Invalid URL '{}': {}", url_str, e)))?;
+        .map_err(|e| CliError::Other(format!("Invalid URL '{url_str}': {e}")))?;
 
     let host = url.host_str().unwrap_or("127.0.0.1");
     let preferred_port = url.port().unwrap_or(effective_port);
 
-    let listener_token = if let Some(path) = config_path {
-        crate::config::AppConfig::load_from(path)
-            .ok()
-            .and_then(|config| config.resolved_listener_auth_token())
-    } else {
-        crate::config::AppConfig::load_or_init()
-            .ok()
-            .and_then(|config| config.resolved_listener_auth_token())
-    }
-    .or_else(|| {
-        std::env::var("EAVS_AUTH_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty())
-    });
+    let listener_token = config_path
+        .map_or_else(
+            || {
+                crate::config::AppConfig::load_or_init()
+                    .ok()
+                    .and_then(|config| config.resolved_listener_auth_token())
+            },
+            |path| {
+                crate::config::AppConfig::load_from(path)
+                    .ok()
+                    .and_then(|config| config.resolved_listener_auth_token())
+            },
+        )
+        .or_else(|| {
+            std::env::var("EAVS_AUTH_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+        });
 
     // First, check if EAVS is already running at the preferred URL
     let check_url = format!("{}://{}:{}", url.scheme(), host, preferred_port);
     if is_eavs_server_running_with_token(&check_url, listener_token.as_deref()).await {
-        return Ok(ServerStatus {
-            url: check_url,
-            port: preferred_port,
-            was_started: false,
-        });
+        return Ok(ServerStatus { url: check_url });
     }
 
     // Check if something else is running on that port (non-EAVS)
-    let port = if !is_port_available(preferred_port) {
+    let port = if is_port_available(preferred_port) {
+        preferred_port
+    } else {
         // Port is in use but not by EAVS, find another port
         let new_port = find_available_port(preferred_port + 1);
         eprintln!(
-            "Port {} is in use by another application, using port {} instead",
-            preferred_port, new_port
+            "Port {preferred_port} is in use by another application, using port {new_port} instead"
         );
         new_port
-    } else {
-        preferred_port
     };
 
     // Start the server (don't pass port - let config determine it, unless we had to find a new port)
-    eprintln!("Starting EAVS server on port {}...", port);
-    let cli_port = if port != preferred_port {
-        Some(port)
-    } else {
+    eprintln!("Starting EAVS server on port {port}...");
+    let cli_port = if port == preferred_port {
         None
+    } else {
+        Some(port)
     };
     let _child = start_server_background(cli_port, config_path)?;
 
@@ -3430,18 +3772,13 @@ pub async fn ensure_server_running(
     while start.elapsed() < timeout {
         if is_eavs_server_running_with_token(&new_url, listener_token.as_deref()).await {
             eprintln!("EAVS server started successfully");
-            return Ok(ServerStatus {
-                url: new_url,
-                port,
-                was_started: true,
-            });
+            return Ok(ServerStatus { url: new_url });
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     Err(CliError::Other(format!(
-        "Timed out waiting for EAVS server to start on port {}",
-        port
+        "Timed out waiting for EAVS server to start on port {port}"
     )))
 }
 
@@ -3457,7 +3794,7 @@ fn xdg_state_dir() -> PathBuf {
 fn get_pid_file_path(port: u16) -> std::path::PathBuf {
     xdg_state_dir()
         .join("eavs")
-        .join(format!("eavs-{}.pid", port))
+        .join(format!("eavs-{port}.pid"))
 }
 
 /// Write the PID file
@@ -3465,10 +3802,10 @@ fn write_pid_file(port: u16, pid: u32) -> Result<(), CliError> {
     let pid_path = get_pid_file_path(port);
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| CliError::Other(format!("Failed to create PID directory: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Failed to create PID directory: {e}")))?;
     }
     std::fs::write(&pid_path, pid.to_string())
-        .map_err(|e| CliError::Other(format!("Failed to write PID file: {}", e)))
+        .map_err(|e| CliError::Other(format!("Failed to write PID file: {e}")))
 }
 
 /// Read the PID from file
@@ -3489,8 +3826,24 @@ fn remove_pid_file(port: u16) {
 fn is_process_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // Use kill -0 to check if process exists
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        // Use kill -0 to check if process exists. Convert from u32 and reject
+        // non-positive values so the call targets a single process (never the
+        // calling process group or pid 0).
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: `kill(pid, 0)` is an existence probe; it takes integer values
+        // only, uses no pointers, and `pid` is a validated positive process id.
+        #[expect(
+            unsafe_code,
+            reason = "std has no signal-by-pid existence probe; this FFI takes integer values only"
+        )]
+        unsafe {
+            libc::kill(pid, 0) == 0
+        }
     }
     #[cfg(not(unix))]
     {
@@ -3508,7 +3861,22 @@ fn kill_process(pid: u32, force: bool) -> Result<(), CliError> {
     #[cfg(unix)]
     {
         let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-        let result = unsafe { libc::kill(pid as i32, signal) };
+        // Convert from u32 and reject non-positive values so the signal targets
+        // a single process, never the calling process group or pid 0.
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return Err(CliError::Other(format!("Invalid process id: {pid}")));
+        };
+        if pid <= 0 {
+            return Err(CliError::Other(format!("Invalid process id: {pid}")));
+        }
+        // SAFETY: `kill(pid, signal)` sends a signal to a single process; it
+        // takes integer values only, uses no pointers, and `pid` is a validated
+        // positive process id.
+        #[expect(
+            unsafe_code,
+            reason = "std has no signal-by-pid kill API; this FFI takes integer values only"
+        )]
+        let result = unsafe { libc::kill(pid, signal) };
         if result == 0 {
             Ok(())
         } else {
@@ -3540,7 +3908,7 @@ fn find_eavs_pid_by_port(port: u16) -> Option<u32> {
     {
         // Use lsof to find the process using the port
         let output = std::process::Command::new("lsof")
-            .args(["-ti", &format!(":{}", port)])
+            .args(["-ti", &format!(":{port}")])
             .output()
             .ok()?;
 
@@ -3589,13 +3957,12 @@ pub fn get_effective_port(cli_port: Option<u16>, config_path: Option<&str>) -> u
     }
 
     // Try to load from config file
-    let config = if let Some(path) = config_path {
-        crate::config::AppConfig::load_from(path).ok()
-    } else {
-        crate::config::AppConfig::load().ok()
-    };
+    let config = config_path.map_or_else(
+        || crate::config::AppConfig::load().ok(),
+        |path| crate::config::AppConfig::load_from(path).ok(),
+    );
 
-    config.map(|c| c.server.port).unwrap_or(3033)
+    config.map_or(3033, |c| c.server.port)
 }
 
 /// Start the EAVS service in the background
@@ -3605,33 +3972,31 @@ pub async fn run_service_start(
     wait: bool,
 ) -> Result<(), CliError> {
     // Load config to check capture settings
-    let config = if let Some(ref path) = config_path {
-        crate::config::AppConfig::load_from(path).ok()
-    } else {
-        crate::config::AppConfig::load().ok()
-    };
-    let capture_enabled = config.as_ref().map(|c| c.capture.enabled).unwrap_or(false);
+    let config = config_path.as_deref().map_or_else(
+        || crate::config::AppConfig::load().ok(),
+        |path| crate::config::AppConfig::load_from(path).ok(),
+    );
+    let capture_enabled = config.as_ref().is_some_and(|c| c.capture.enabled);
 
     // Determine the effective port (from CLI, env, or config)
     let effective_port = get_effective_port(port, config_path.as_deref());
-    let url = format!("http://127.0.0.1:{}", effective_port);
+    let url = format!("http://127.0.0.1:{effective_port}");
 
     // Check if already running
     if is_eavs_server_running(&url).await {
-        println!("EAVS server is already running on port {}", effective_port);
+        println!("EAVS server is already running on port {effective_port}");
         return Ok(());
     }
 
     // Check if port is in use by something else
     if !is_port_available(effective_port) {
         return Err(CliError::Other(format!(
-            "Port {} is already in use by another application",
-            effective_port
+            "Port {effective_port} is already in use by another application"
         )));
     }
 
     // Start the server (pass the CLI port only if explicitly set)
-    println!("Starting EAVS server on port {}...", effective_port);
+    println!("Starting EAVS server on port {effective_port}...");
     if capture_enabled {
         println!("  Transparent capture: enabled (mitmproxy will be started)");
     }
@@ -3648,7 +4013,7 @@ pub async fn run_service_start(
         while start.elapsed() < timeout {
             if is_eavs_server_running(&url).await {
                 println!("EAVS server started successfully (PID: {})", child.id());
-                println!("  URL: {}", url);
+                println!("  URL: {url}");
                 if capture_enabled {
                     println!("  Capture: mitmproxy running (intercepts LLM traffic)");
                 }
@@ -3660,14 +4025,12 @@ pub async fn run_service_start(
         // Cleanup on failure
         remove_pid_file(effective_port);
         return Err(CliError::Other(format!(
-            "Timed out waiting for EAVS server to start on port {}",
-            effective_port
+            "Timed out waiting for EAVS server to start on port {effective_port}"
         )));
-    } else {
-        println!("EAVS server starting in background (PID: {})", child.id());
-        if capture_enabled {
-            println!("  Capture: mitmproxy will intercept LLM traffic");
-        }
+    }
+    println!("EAVS server starting in background (PID: {})", child.id());
+    if capture_enabled {
+        println!("  Capture: mitmproxy will intercept LLM traffic");
     }
 
     Ok(())
@@ -3676,71 +4039,65 @@ pub async fn run_service_start(
 /// Stop the EAVS service
 pub async fn run_service_stop(port: Option<u16>, force: bool) -> Result<(), CliError> {
     let effective_port = get_effective_port(port, None);
-    let url = format!("http://127.0.0.1:{}", effective_port);
+    let url = format!("http://127.0.0.1:{effective_port}");
 
     // Try to find PID from file first, then by port
     let pid = read_pid_file(effective_port).or_else(|| find_eavs_pid_by_port(effective_port));
 
-    match pid {
-        Some(pid) => {
+    if let Some(pid) = pid {
+        if !is_process_running(pid) {
+            println!("EAVS server is not running (stale PID file)");
+            remove_pid_file(effective_port);
+            return Ok(());
+        }
+
+        println!("Stopping EAVS server (PID: {pid})...");
+
+        // Send SIGTERM (graceful) or SIGKILL (force)
+        kill_process(pid, force)?;
+
+        // Wait for process to exit
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(if force { 2 } else { 10 });
+
+        while start.elapsed() < timeout {
             if !is_process_running(pid) {
-                println!("EAVS server is not running (stale PID file)");
                 remove_pid_file(effective_port);
+                println!("EAVS server stopped successfully");
                 return Ok(());
             }
-
-            println!("Stopping EAVS server (PID: {})...", pid);
-
-            // Send SIGTERM (graceful) or SIGKILL (force)
-            kill_process(pid, force)?;
-
-            // Wait for process to exit
-            let start = std::time::Instant::now();
-            let timeout = Duration::from_secs(if force { 2 } else { 10 });
-
-            while start.elapsed() < timeout {
-                if !is_process_running(pid) {
-                    remove_pid_file(effective_port);
-                    println!("EAVS server stopped successfully");
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            // If graceful shutdown failed, try force kill
-            if !force {
-                println!("Graceful shutdown timed out, forcing...");
-                kill_process(pid, true)?;
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-
-            remove_pid_file(effective_port);
-
-            if is_process_running(pid) {
-                return Err(CliError::Other(format!(
-                    "Failed to stop EAVS server (PID: {})",
-                    pid
-                )));
-            }
-
-            println!("EAVS server stopped successfully");
-            Ok(())
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        None => {
-            // Check if something is responding on the port
-            if is_eavs_server_running(&url).await {
-                println!(
-                    "EAVS server is running but PID unknown. Try: kill $(lsof -ti:{})",
-                    effective_port
-                );
-                return Err(CliError::Other(
-                    "Could not determine EAVS server PID".to_string(),
-                ));
-            }
-            println!("EAVS server is not running on port {}", effective_port);
-            Ok(())
+
+        // If graceful shutdown failed, try force kill
+        if !force {
+            println!("Graceful shutdown timed out, forcing...");
+            kill_process(pid, true)?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
+
+        remove_pid_file(effective_port);
+
+        if is_process_running(pid) {
+            return Err(CliError::Other(format!(
+                "Failed to stop EAVS server (PID: {pid})"
+            )));
+        }
+
+        println!("EAVS server stopped successfully");
+    } else {
+        // Check if something is responding on the port
+        if is_eavs_server_running(&url).await {
+            println!(
+                "EAVS server is running but PID unknown. Try: kill $(lsof -ti:{effective_port})"
+            );
+            return Err(CliError::Other(
+                "Could not determine EAVS server PID".to_string(),
+            ));
+        }
+        println!("EAVS server is not running on port {effective_port}");
     }
+    Ok(())
 }
 
 /// Restart the EAVS service
@@ -3763,18 +4120,18 @@ pub async fn run_service_restart(
 /// Get the status of the EAVS service
 pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Result<(), CliError> {
     let effective_port = get_effective_port(port, None);
-    let url = format!("http://127.0.0.1:{}", effective_port);
+    let url = format!("http://127.0.0.1:{effective_port}");
     let pid = read_pid_file(effective_port).or_else(|| find_eavs_pid_by_port(effective_port));
 
     let running = is_eavs_server_running(&url).await;
 
     // Load config to check capture settings
     let config = crate::config::AppConfig::load().ok();
-    let capture_enabled = config.as_ref().map(|c| c.capture.enabled).unwrap_or(false);
+    let capture_enabled = config.as_ref().is_some_and(|c| c.capture.enabled);
 
     // Get additional info if running
     let (uptime, providers) = if running {
-        let client = EavsClient::with_url(url.clone());
+        let client = EavsClient::with_url(url.clone())?;
         let health = client.health().await.ok();
         let providers = client.providers().await.unwrap_or_default();
         (health.and_then(|h| h.uptime_secs), providers)
@@ -3788,28 +4145,28 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
         port: effective_port,
         url: url.clone(),
         uptime_secs: uptime,
-        providers: providers.clone(),
+        providers,
         capture_enabled,
     };
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&status).unwrap());
+            println!("{}", pretty_json(&status)?);
         }
         OutputFormat::Text => {
             if running {
                 println!("EAVS Server Status: RUNNING");
                 println!("{}", "=".repeat(40));
                 if let Some(pid) = status.pid {
-                    println!("  PID:       {}", pid);
+                    println!("  PID:       {pid}");
                 }
-                println!("  Port:      {}", effective_port);
-                println!("  URL:       {}", url);
+                println!("  Port:      {effective_port}");
+                println!("  URL:       {url}");
                 if let Some(uptime) = uptime {
                     let hours = uptime / 3600;
                     let minutes = (uptime % 3600) / 60;
                     let seconds = uptime % 60;
-                    println!("  Uptime:    {}h {}m {}s", hours, minutes, seconds);
+                    println!("  Uptime:    {hours}h {minutes}m {seconds}s");
                 }
                 if !status.providers.is_empty() {
                     println!("  Providers: {}", status.providers.join(", "));
@@ -3820,17 +4177,14 @@ pub async fn run_service_status(port: Option<u16>, format: OutputFormat) -> Resu
             } else {
                 println!("EAVS Server Status: STOPPED");
                 println!("{}", "=".repeat(40));
-                println!("  Port:      {}", effective_port);
+                println!("  Port:      {effective_port}");
                 if capture_enabled {
                     println!("  Capture:   enabled in config (will start with server)");
                 }
 
                 // Check if port is in use by something else
                 if !is_port_available(effective_port) {
-                    println!(
-                        "  Note:      Port {} is in use by another application",
-                        effective_port
-                    );
+                    println!("  Note:      Port {effective_port} is in use by another application");
                 }
             }
         }
@@ -3845,7 +4199,7 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
     let log_file = xdg_state_dir().join("eavs").join("eavs.log");
 
     if !log_file.exists() {
-        println!("No log file found at {:?}", log_file);
+        println!("No log file found at {}", log_file.display());
         println!();
         println!("To enable file logging, add to your config.toml:");
         println!();
@@ -3862,17 +4216,17 @@ pub async fn run_service_logs(lines: usize, follow: bool) -> Result<(), CliError
             .args(["-f", "-n", &lines.to_string()])
             .arg(&log_file)
             .spawn()
-            .map_err(|e| CliError::Other(format!("Failed to tail logs: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Failed to tail logs: {e}")))?;
 
         cmd.wait()
-            .map_err(|e| CliError::Other(format!("Failed to wait for tail: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Failed to wait for tail: {e}")))?;
     } else {
         // Use tail
         let output = std::process::Command::new("tail")
             .args(["-n", &lines.to_string()])
             .arg(&log_file)
             .output()
-            .map_err(|e| CliError::Other(format!("Failed to read logs: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Failed to read logs: {e}")))?;
 
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }
@@ -3931,7 +4285,7 @@ fn select_provider_interactive() -> Result<OAuthProvider, CliError> {
 
     let (provider_str, _) = OAUTH_PROVIDERS[selection - 1];
     OAuthProvider::from_str(provider_str)
-        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", provider_str)))
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {provider_str}")))
 }
 
 /// Open a URL in the default browser
@@ -3948,7 +4302,7 @@ fn open_browser(url: &str) -> Result<(), CliError> {
         std::process::Command::new("xdg-open")
             .arg(url)
             .spawn()
-            .map_err(|e| CliError::Other(format!("Failed to open browser: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("Failed to open browser: {e}")))?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -3970,7 +4324,7 @@ pub async fn run_login(
     // Determine provider
     let provider = if let Some(p) = provider {
         OAuthProvider::from_str(&p)
-            .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", p)))?
+            .ok_or_else(|| CliError::Other(format!("Unknown provider: {p}")))?
     } else {
         select_provider_interactive()?
     };
@@ -3981,7 +4335,7 @@ pub async fn run_login(
     // Load config to get database path
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     } else {
         crate::config::AppConfig::load()
             .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
@@ -3991,7 +4345,7 @@ pub async fn run_login(
     let backend = resolve_oauth_backend(&config);
     let store = OAuthStore::new(&db_path, backend)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {e}")))?;
 
     let client = reqwest::Client::new();
 
@@ -4010,7 +4364,7 @@ pub async fn run_login(
     store
         .upsert_credentials(&credentials)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to store credentials: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to store credentials: {e}")))?;
 
     println!();
     println!("Successfully authenticated with {}!", provider.as_str());
@@ -4029,11 +4383,11 @@ async fn run_device_code_flow(
     user_id: &str,
 ) -> Result<OAuthCredentials, CliError> {
     let config = github_copilot::config_from_env()
-        .map_err(|e| CliError::Other(format!("GitHub Copilot config error: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("GitHub Copilot config error: {e}")))?;
 
     let device = github_copilot::start_device_flow(client, &config)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to start device flow: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to start device flow: {e}")))?;
 
     println!();
     println!("To authenticate, open: {}", device.verification_uri);
@@ -4073,7 +4427,7 @@ async fn run_device_code_flow(
                 }
             }
             Err(e) => {
-                return Err(CliError::Other(format!("Device flow error: {}", e)));
+                return Err(CliError::Other(format!("Device flow error: {e}")));
             }
         }
     }
@@ -4085,22 +4439,24 @@ async fn run_pkce_flow_anthropic(
     user_id: &str,
     _callback_port: u16,
 ) -> Result<OAuthCredentials, CliError> {
+    use std::io::Write;
+
     // Use the default redirect URI for code-paste flow (no local server needed)
     let config = anthropic::config_from_env(anthropic::default_redirect_uri())
-        .map_err(|e| CliError::Other(format!("Anthropic config error: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Anthropic config error: {e}")))?;
 
     let (code_verifier, _) = pkce::generate_pkce_pair();
     // The opencode plugin sets state = code_verifier
     let state = code_verifier.clone();
 
     let auth_url = anthropic::build_authorize_url(&config, &state, &code_verifier)
-        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {e}")))?;
 
     println!();
     println!("Opening browser for authentication...");
     println!();
     println!("If the browser doesn't open, visit:");
-    println!("{}", auth_url);
+    println!("{auth_url}");
     println!();
 
     let _ = open_browser(&auth_url);
@@ -4108,15 +4464,14 @@ async fn run_pkce_flow_anthropic(
     // Prompt user to paste the authorization code from the browser
     println!("After authorizing, paste the code shown in your browser below.");
     print!("Authorization code: ");
-    use std::io::Write;
     std::io::stdout()
         .flush()
-        .map_err(|e| CliError::Other(format!("Failed to flush stdout: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to flush stdout: {e}")))?;
 
     let mut pasted = String::new();
     std::io::stdin()
         .read_line(&mut pasted)
-        .map_err(|e| CliError::Other(format!("Failed to read input: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to read input: {e}")))?;
     let pasted = pasted.trim();
 
     if pasted.is_empty() {
@@ -4127,12 +4482,13 @@ async fn run_pkce_flow_anthropic(
 
     // The pasted value is "code#state" - split on '#'
     // First part is the authorization code, second part is the state
-    let (auth_code, pasted_state) = if let Some(idx) = pasted.find('#') {
-        (&pasted[..idx], &pasted[idx + 1..])
-    } else {
-        // If no '#' separator, treat the entire value as the code
-        (pasted, "")
-    };
+    let (auth_code, pasted_state) = pasted.find('#').map_or_else(
+        || {
+            // If no '#' separator, treat the entire value as the code
+            (pasted, "")
+        },
+        |idx| (&pasted[..idx], &pasted[idx + 1..]),
+    );
 
     let effective_state = if pasted_state.is_empty() {
         &state
@@ -4151,32 +4507,32 @@ async fn run_pkce_flow_anthropic(
         &code_verifier,
     )
     .await
-    .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+    .map_err(|e| CliError::Other(format!("Failed to exchange code: {e}")))?;
 
     Ok(credentials)
 }
 
-/// Run OpenAI PKCE flow with local callback server
+/// Run `OpenAI` PKCE flow with local callback server
 async fn run_pkce_flow_openai(
     client: &reqwest::Client,
     user_id: &str,
     callback_port: u16,
 ) -> Result<OAuthCredentials, CliError> {
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", callback_port);
+    let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
     let config = openai_codex::config_from_env(redirect_uri.clone())
-        .map_err(|e| CliError::Other(format!("OpenAI config error: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("OpenAI config error: {e}")))?;
 
     let (code_verifier, _) = pkce::generate_pkce_pair();
     let state = uuid::Uuid::new_v4().to_string();
 
     let auth_url = openai_codex::build_authorize_url(&config, &state, &code_verifier)
-        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to build auth URL: {e}")))?;
 
     println!();
     println!("Opening browser for authentication...");
     println!();
     println!("If the browser doesn't open, visit:");
-    println!("{}", auth_url);
+    println!("{auth_url}");
     println!();
 
     let _ = open_browser(&auth_url);
@@ -4188,7 +4544,7 @@ async fn run_pkce_flow_openai(
 
     let credentials = openai_codex::exchange_code(client, &config, user_id, &code, &code_verifier)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to exchange code: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to exchange code: {e}")))?;
 
     Ok(credentials)
 }
@@ -4198,34 +4554,33 @@ async fn wait_for_oauth_callback(port: u16) -> Result<String, CliError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .map_err(|e| {
             CliError::Other(format!(
-                "Failed to bind callback server on port {}: {}",
-                port, e
+                "Failed to bind callback server on port {port}: {e}"
             ))
         })?;
 
-    println!("Waiting for OAuth callback on http://127.0.0.1:{}...", port);
+    println!("Waiting for OAuth callback on http://127.0.0.1:{port}...");
 
     let (mut socket, _) = listener
         .accept()
         .await
-        .map_err(|e| CliError::Other(format!("Failed to accept connection: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to accept connection: {e}")))?;
 
     let mut reader = BufReader::new(&mut socket);
     let mut request_line = String::new();
     reader
         .read_line(&mut request_line)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to read request: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to read request: {e}")))?;
 
     // Parse the request line: GET /callback?code=xxx&state=yyy HTTP/1.1
     let code = request_line
         .split_whitespace()
         .nth(1)
-        .and_then(|path| url::Url::parse(&format!("http://localhost{}", path)).ok())
+        .and_then(|path| url::Url::parse(&format!("http://localhost{path}")).ok())
         .and_then(|url| {
             url.query_pairs()
                 .find(|(k, _)| k == "code")
@@ -4252,7 +4607,7 @@ Connection: close
     socket
         .write_all(response.as_bytes())
         .await
-        .map_err(|e| CliError::Other(format!("Failed to send response: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to send response: {e}")))?;
 
     Ok(code)
 }
@@ -4261,7 +4616,7 @@ Connection: close
 pub async fn run_auth_status(user_id: &str, config_path: Option<&str>) -> Result<(), CliError> {
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     } else {
         crate::config::AppConfig::load()
             .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
@@ -4271,24 +4626,24 @@ pub async fn run_auth_status(user_id: &str, config_path: Option<&str>) -> Result
     let backend = resolve_oauth_backend(&config);
     let store = OAuthStore::new(&db_path, backend)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {e}")))?;
 
     let providers = store
         .list_providers(user_id)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to list providers: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to list providers: {e}")))?;
 
     println!("Storage backend: {}", store.backend_name());
     println!();
 
     if providers.is_empty() {
-        println!("No OAuth providers authenticated for user '{}'.", user_id);
+        println!("No OAuth providers authenticated for user '{user_id}'.");
         println!();
         println!("Run 'eavs login' to authenticate with a provider.");
     } else {
-        println!("Authenticated providers for user '{}':", user_id);
+        println!("Authenticated providers for user '{user_id}':");
         for provider in providers {
-            println!("  - {}", provider);
+            println!("  - {provider}");
         }
     }
 
@@ -4303,14 +4658,11 @@ pub async fn run_auth_logout(
     config_path: Option<&str>,
 ) -> Result<(), CliError> {
     let oauth_provider = OAuthProvider::from_str(provider)
-        .ok_or_else(|| CliError::Other(format!("Unknown provider: {}", provider)))?;
+        .ok_or_else(|| CliError::Other(format!("Unknown provider: {provider}")))?;
 
     if !yes {
         use std::io::{self, Write};
-        eprint!(
-            "Are you sure you want to logout from {} for user '{}'? [y/N] ",
-            provider, user_id
-        );
+        eprint!("Are you sure you want to logout from {provider} for user '{user_id}'? [y/N] ");
         io::stdout().flush().map_err(CliError::Io)?;
 
         let mut input = String::new();
@@ -4323,7 +4675,7 @@ pub async fn run_auth_logout(
 
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     } else {
         crate::config::AppConfig::load()
             .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
@@ -4333,23 +4685,17 @@ pub async fn run_auth_logout(
     let backend = resolve_oauth_backend(&config);
     let store = OAuthStore::new(&db_path, backend)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to open OAuth store: {e}")))?;
 
     let deleted = store
         .delete_credentials(user_id, oauth_provider)
         .await
-        .map_err(|e| CliError::Other(format!("Failed to delete credentials: {}", e)))?;
+        .map_err(|e| CliError::Other(format!("Failed to delete credentials: {e}")))?;
 
     if deleted {
-        println!(
-            "Successfully logged out from {} for user '{}'.",
-            provider, user_id
-        );
+        println!("Successfully logged out from {provider} for user '{user_id}'.");
     } else {
-        println!(
-            "No credentials found for {} (user '{}').",
-            provider, user_id
-        );
+        println!("No credentials found for {provider} (user '{user_id}').");
     }
 
     Ok(())
@@ -4365,11 +4711,10 @@ pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError
         v.to_string()
     } else {
         // Read interactively
-        eprint!("Enter secret for '{}': ", account);
+        eprint!("Enter secret for '{account}': ");
         let secret = rpassword::read_password().map_err(|e| {
             CliError::Other(format!(
-                "Failed to read secret from terminal: {}. Use --value instead.",
-                e
+                "Failed to read secret from terminal: {e}. Use --value instead."
             ))
         })?;
         if secret.is_empty() {
@@ -4380,14 +4725,8 @@ pub fn run_secret_set(account: &str, value: Option<&str>) -> Result<(), CliError
 
     crate::config::set_keychain_secret(account, &secret).map_err(CliError::Other)?;
     register_secret_account(account);
-    println!(
-        "Stored secret for account '{}' in system keychain.",
-        account
-    );
-    println!(
-        "Reference it in config.toml as: api_key = \"keychain:{}\"",
-        account
-    );
+    println!("Stored secret for account '{account}' in system keychain.");
+    println!("Reference it in config.toml as: api_key = \"keychain:{account}\"");
     Ok(())
 }
 
@@ -4402,7 +4741,7 @@ pub fn run_secret_get(account: &str, reveal: bool) -> Result<(), CliError> {
     })?;
 
     if reveal {
-        println!("{}", secret);
+        println!("{secret}");
     } else {
         // Show masked version: first 4 chars + asterisks
         let masked = if secret.len() > 4 {
@@ -4410,7 +4749,7 @@ pub fn run_secret_get(account: &str, reveal: bool) -> Result<(), CliError> {
         } else {
             "****".to_string()
         };
-        println!("{} (use --reveal to show full value)", masked);
+        println!("{masked} (use --reveal to show full value)");
     }
     Ok(())
 }
@@ -4419,7 +4758,7 @@ pub fn run_secret_get(account: &str, reveal: bool) -> Result<(), CliError> {
 pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
     if !yes {
         use std::io::{self, Write};
-        eprint!("Delete keychain entry for account '{}'? [y/N] ", account);
+        eprint!("Delete keychain entry for account '{account}'? [y/N] ");
         io::stdout().flush().map_err(CliError::Io)?;
 
         let mut input = String::new();
@@ -4433,9 +4772,9 @@ pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
     match crate::config::delete_keychain_secret(account) {
         Ok(true) => {
             unregister_secret_account(account);
-            println!("Deleted keychain entry for account '{}'.", account);
+            println!("Deleted keychain entry for account '{account}'.");
         }
-        Ok(false) => println!("No keychain entry found for account '{}'.", account),
+        Ok(false) => println!("No keychain entry found for account '{account}'."),
         Err(e) => return Err(CliError::Other(e)),
     }
     Ok(())
@@ -4445,91 +4784,111 @@ pub fn run_secret_delete(account: &str, yes: bool) -> Result<(), CliError> {
 pub fn run_secret_list(config_path: Option<&str>, check: bool, all: bool) -> Result<(), CliError> {
     let config = if let Some(path) = config_path {
         crate::config::AppConfig::load_from(path)
-            .map_err(|e| CliError::Other(format!("Failed to load config: {}", e)))?
+            .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))?
     } else {
         crate::config::AppConfig::load()
             .unwrap_or_else(|_| crate::config::AppConfig::with_defaults())
     };
 
     // Collect all fields that could use keychain: prefix
-    let mut entries: Vec<(String, String, String)> = Vec::new(); // (provider, field, account)
+    let mut entries: Vec<(String, String, String)> = Vec::new();
 
     for (name, prov) in &config.providers {
-        collect_keychain_ref(&mut entries, name, "api_key", &prov.api_key);
-        collect_keychain_ref(&mut entries, name, "base_url", &prov.base_url);
-        collect_keychain_ref(
-            &mut entries,
-            name,
-            "aws_access_key_id",
-            &prov.aws_access_key_id,
-        );
-        collect_keychain_ref(
-            &mut entries,
-            name,
-            "aws_secret_access_key",
-            &prov.aws_secret_access_key,
-        );
-        collect_keychain_ref(
-            &mut entries,
-            name,
-            "aws_session_token",
-            &prov.aws_session_token,
-        );
-        if let Some(ref v) = prov.api_version {
-            collect_keychain_ref(&mut entries, name, "api_version", v);
-        }
-        collect_keychain_ref(&mut entries, name, "deployment", &prov.deployment);
-        collect_keychain_ref(&mut entries, name, "gcp_project", &prov.gcp_project);
-        collect_keychain_ref(&mut entries, name, "gcp_location", &prov.gcp_location);
+        collect_provider_keychain_refs(&mut entries, name, prov);
     }
 
-    if let Some(ref mk) = config.keys.master_key {
+    if let Some(mk) = config.keys.master_key.as_deref() {
         collect_keychain_ref(&mut entries, "keys", "master_key", mk);
     }
 
-    // Collect all known accounts from the registry (for --all)
     if all {
-        let mut registry_accounts = load_secret_account_registry();
-
-        // Migration: if registry is empty but config has keychain refs,
-        // probe the keychain and seed the registry for future use.
-        if registry_accounts.is_empty() && !entries.is_empty() {
-            for (_, _, account) in &entries {
-                if crate::config::get_keychain_secret(account).is_some() {
-                    registry_accounts.push(account.clone());
-                }
-            }
-            if !registry_accounts.is_empty() {
-                save_secret_account_registry(&registry_accounts);
-            }
-        }
-
-        // Add registry accounts not already referenced in config
-        let config_accounts: std::collections::HashSet<String> =
-            entries.iter().map(|(_, _, a)| a.clone()).collect();
-        for account in &registry_accounts {
-            if !config_accounts.contains(account) {
-                entries.push(("(stored)".to_string(), "-".to_string(), account.clone()));
-            }
-        }
+        collect_stored_accounts(&mut entries);
     }
 
     if entries.is_empty() {
-        println!("No keychain: references found in config.");
-        if !all {
-            println!();
-            println!("Tip: use --all to list ALL stored secrets (not just config references).");
-        }
-        println!();
-        println!("To use keychain storage, set a provider API key like:");
-        println!("  [providers.openai]");
-        println!("  api_key = \"keychain:openai\"");
-        println!();
-        println!("Then store the secret:");
-        println!("  eavs secret set openai");
+        print_no_keychain_refs(all);
         return Ok(());
     }
 
+    print_secret_table(&entries, check);
+
+    if !all {
+        print_extra_stored_note(&entries);
+    }
+
+    Ok(())
+}
+
+/// Collect every `keychain:` reference in one provider block.
+fn collect_provider_keychain_refs(
+    entries: &mut Vec<(String, String, String)>,
+    name: &str,
+    prov: &crate::config::ProviderConfig,
+) {
+    collect_keychain_ref(entries, name, "api_key", &prov.api_key);
+    collect_keychain_ref(entries, name, "base_url", &prov.base_url);
+    collect_keychain_ref(entries, name, "aws_access_key_id", &prov.aws_access_key_id);
+    collect_keychain_ref(
+        entries,
+        name,
+        "aws_secret_access_key",
+        &prov.aws_secret_access_key,
+    );
+    collect_keychain_ref(entries, name, "aws_session_token", &prov.aws_session_token);
+    if let Some(v) = prov.api_version.as_deref() {
+        collect_keychain_ref(entries, name, "api_version", v);
+    }
+    collect_keychain_ref(entries, name, "deployment", &prov.deployment);
+    collect_keychain_ref(entries, name, "gcp_project", &prov.gcp_project);
+    collect_keychain_ref(entries, name, "gcp_location", &prov.gcp_location);
+}
+
+/// Seed the secret registry from config references and append any stored
+/// accounts that are not already referenced in the config (the `--all` case).
+fn collect_stored_accounts(entries: &mut Vec<(String, String, String)>) {
+    let mut registry_accounts = load_secret_account_registry();
+
+    // Migration: if registry is empty but config has keychain refs, probe the
+    // keychain and seed the registry for future use.
+    if registry_accounts.is_empty() && !entries.is_empty() {
+        for (_, _, account) in entries.iter() {
+            if crate::config::get_keychain_secret(account).is_some() {
+                registry_accounts.push(account.clone());
+            }
+        }
+        if !registry_accounts.is_empty() {
+            save_secret_account_registry(&registry_accounts);
+        }
+    }
+
+    // Add registry accounts not already referenced in config
+    let config_accounts: std::collections::HashSet<String> =
+        entries.iter().map(|(_, _, a)| a.clone()).collect();
+    for account in &registry_accounts {
+        if !config_accounts.contains(account) {
+            entries.push(("(stored)".to_string(), "-".to_string(), account.clone()));
+        }
+    }
+}
+
+/// Print the "no references found" guidance.
+fn print_no_keychain_refs(all: bool) {
+    println!("No keychain: references found in config.");
+    if !all {
+        println!();
+        println!("Tip: use --all to list ALL stored secrets (not just config references).");
+    }
+    println!();
+    println!("To use keychain storage, set a provider API key like:");
+    println!("  [providers.openai]");
+    println!("  api_key = \"keychain:openai\"");
+    println!();
+    println!("Then store the secret:");
+    println!("  eavs secret set openai");
+}
+
+/// Print the collected references as a text table.
+fn print_secret_table(entries: &[(String, String, String)], check: bool) {
     println!(
         "{:<20} {:<25} {:<25} {}",
         "SECTION",
@@ -4539,7 +4898,7 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool, all: bool) -> Res
     );
     println!("{}", "-".repeat(if check { 80 } else { 70 }));
 
-    for (section, field, account) in &entries {
+    for (section, field, account) in entries {
         let status = if check {
             match crate::config::get_keychain_secret(account) {
                 Some(_) => "ok",
@@ -4548,28 +4907,27 @@ pub fn run_secret_list(config_path: Option<&str>, check: bool, all: bool) -> Res
         } else {
             ""
         };
-        println!("{:<20} {:<25} {:<25} {}", section, field, account, status);
+        println!("{section:<20} {field:<25} {account:<25} {status}");
     }
+}
 
-    if !all {
-        let registry = load_secret_account_registry();
-        let config_accounts: std::collections::HashSet<String> =
-            entries.iter().map(|(_, _, a)| a.clone()).collect();
-        let extra = registry
-            .iter()
-            .filter(|a| !config_accounts.contains(*a))
-            .count();
-        if extra > 0 {
-            println!();
-            println!(
-                "({} additional stored secret{} not in config — use --all to show)",
-                extra,
-                if extra == 1 { "" } else { "s" }
-            );
-        }
+/// Print the count of stored accounts not referenced in the config.
+fn print_extra_stored_note(entries: &[(String, String, String)]) {
+    let registry = load_secret_account_registry();
+    let config_accounts: std::collections::HashSet<String> =
+        entries.iter().map(|(_, _, a)| a.clone()).collect();
+    let extra = registry
+        .iter()
+        .filter(|a| !config_accounts.contains(*a))
+        .count();
+    if extra > 0 {
+        println!();
+        println!(
+            "({} additional stored secret{} not in config — use --all to show)",
+            extra,
+            if extra == 1 { "" } else { "s" }
+        );
     }
-
-    Ok(())
 }
 
 /// Helper: if a value starts with `keychain:`, add it to the list.
@@ -4641,6 +4999,12 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    /// Convert a human-readable expiry into the same RFC3339 form used when
+    /// creating a key, so tests can assert the parsed value.
+    fn parse_expiration(s: &str) -> Option<String> {
+        parse_expiration_datetime(s).map(|dt| dt.to_rfc3339())
+    }
+
     #[test]
     fn test_get_effective_port_cli_takes_precedence() {
         // CLI port should always win
@@ -4649,21 +5013,26 @@ mod tests {
     }
 
     #[test]
-    fn test_get_effective_port_from_config_file() {
+    fn test_get_effective_port_from_config_file() -> Result<(), Box<dyn std::error::Error>> {
         // Create a temp config file with a custom port
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let config_path = dir.path().join("test-config.toml");
         fs::write(
             &config_path,
-            r#"
+            r"
             [server]
             port = 4242
-        "#,
-        )
-        .unwrap();
+        ",
+        )?;
 
-        let port = get_effective_port(None, Some(config_path.to_str().unwrap()));
-        assert_eq!(port, 4242);
+        let port = get_effective_port(
+            None,
+            Some(config_path.to_str().ok_or("path is not valid UTF-8")?),
+        );
+        if port != 4242 {
+            return Err(format!("expected port 4242, got {port}").into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -4675,22 +5044,27 @@ mod tests {
     }
 
     #[test]
-    fn test_get_effective_port_cli_overrides_config() {
+    fn test_get_effective_port_cli_overrides_config() -> Result<(), Box<dyn std::error::Error>> {
         // Create a temp config file with a custom port
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let config_path = dir.path().join("test-config.toml");
         fs::write(
             &config_path,
-            r#"
+            r"
             [server]
             port = 4242
-        "#,
-        )
-        .unwrap();
+        ",
+        )?;
 
         // CLI port should override config file port
-        let port = get_effective_port(Some(9999), Some(config_path.to_str().unwrap()));
-        assert_eq!(port, 9999);
+        let port = get_effective_port(
+            Some(9999),
+            Some(config_path.to_str().ok_or("path is not valid UTF-8")?),
+        );
+        if port != 9999 {
+            return Err(format!("expected port 9999, got {port}").into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -4703,28 +5077,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expiration_days() {
-        let result = parse_expiration("30d");
-        assert!(result.is_some());
+    fn test_parse_expiration_days() -> Result<(), Box<dyn std::error::Error>> {
         // Should be a valid RFC3339 timestamp
-        let timestamp = result.unwrap();
-        assert!(timestamp.contains("T"));
+        let timestamp = parse_expiration("30d").ok_or("expected parse to succeed")?;
+        if !timestamp.contains('T') {
+            return Err("expected RFC3339 timestamp".into());
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_parse_expiration_hours() {
-        let result = parse_expiration("24h");
-        assert!(result.is_some());
-        let timestamp = result.unwrap();
-        assert!(timestamp.contains("T"));
+    fn test_parse_expiration_hours() -> Result<(), Box<dyn std::error::Error>> {
+        let timestamp = parse_expiration("24h").ok_or("expected parse to succeed")?;
+        if !timestamp.contains('T') {
+            return Err("expected RFC3339 timestamp".into());
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_parse_expiration_minutes() {
-        let result = parse_expiration("60m");
-        assert!(result.is_some());
-        let timestamp = result.unwrap();
-        assert!(timestamp.contains("T"));
+    fn test_parse_expiration_minutes() -> Result<(), Box<dyn std::error::Error>> {
+        let timestamp = parse_expiration("60m").ok_or("expected parse to succeed")?;
+        if !timestamp.contains('T') {
+            return Err("expected RFC3339 timestamp".into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -4759,8 +5136,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_results_from_empty_latencies() {
-        let results =
-            ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, vec![], 5);
+        let results = ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, &[], 5);
         assert_eq!(results.successful, 0);
         assert_eq!(results.failed, 5);
         assert_eq!(results.total_requests, 5);
@@ -4772,7 +5148,7 @@ mod tests {
     fn test_benchmark_results_statistics() {
         let latencies = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let results =
-            ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, latencies, 0);
+            ConcurrentBenchmarkResults::from_results("test".to_string(), 1, 1.0, &latencies, 0);
 
         assert_eq!(results.successful, 5);
         assert_eq!(results.failed, 0);
@@ -4793,7 +5169,7 @@ mod tests {
         assert_eq!(parse_duration_string("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(
             parse_duration_string("1h30m"),
-            Some(Duration::from_secs(5400))
+            Some(Duration::from_mins(90))
         );
         assert_eq!(parse_duration_string("invalid"), None);
         assert_eq!(parse_duration_string(""), None);
@@ -4803,7 +5179,7 @@ mod tests {
     fn test_concurrent_benchmark_throughput() {
         let latencies = vec![100.0, 100.0, 100.0, 100.0, 100.0]; // 5 requests at 100ms each
         let results =
-            ConcurrentBenchmarkResults::from_results("test".to_string(), 5, 1.0, latencies, 0);
+            ConcurrentBenchmarkResults::from_results("test".to_string(), 5, 1.0, &latencies, 0);
 
         assert_eq!(results.total_requests, 5);
         assert_eq!(results.requests_per_second, 5.0); // 5 requests in 1 second

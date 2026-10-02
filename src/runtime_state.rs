@@ -20,7 +20,7 @@ pub fn save_runtime_state(state: &RuntimeState) -> Result<(), String> {
             .map_err(|e| format!("Failed to create state dir {}: {}", parent.display(), e))?;
     }
     let contents =
-        toml::to_string_pretty(state).map_err(|e| format!("Failed to serialize state: {}", e))?;
+        toml::to_string_pretty(state).map_err(|e| format!("Failed to serialize state: {e}"))?;
     std::fs::write(&path, contents)
         .map_err(|e| format!("Failed to write state file {}: {}", path.display(), e))?;
     Ok(())

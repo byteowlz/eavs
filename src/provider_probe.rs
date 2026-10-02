@@ -13,7 +13,7 @@
 //! - Requests are bounded by [`PROBE_TIMEOUT`] and response bodies by
 //!   [`MAX_RESPONSE_BYTES`]; excerpts are capped at [`BODY_EXCERPT_CHARS`].
 //! - Unknown provider types fail closed (rejected) instead of silently becoming
-//!   OpenAI.
+//!   `OpenAI`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -207,7 +207,7 @@ pub async fn run_probe(
     let prompt = prompt.unwrap_or_else(|| PROBE_DEFAULT_PROMPT.to_string());
 
     let mut response = ProbeResponse {
-        provider_type: format!("{:?}", provider_type),
+        provider_type: format!("{provider_type:?}"),
         base_url: base_url.clone(),
         model: model.clone(),
         ok: false,
@@ -486,7 +486,7 @@ fn is_model_failure(status: StatusCode, body: &str) -> bool {
 }
 
 /// A 4xx whose body references the `developer` role indicates the endpoint does
-/// not accept OpenAI's `developer` message role.
+/// not accept `OpenAI`'s `developer` message role.
 fn is_developer_role_rejection(status: StatusCode, body: &str) -> bool {
     status.is_client_error() && body.to_lowercase().contains("developer")
 }
@@ -698,10 +698,10 @@ mod tests {
     }
 
     impl Upstream for ScriptedUpstream {
-        fn send<'a>(
-            &'a self,
+        fn send(
+            &self,
             request: UpstreamRequest,
-        ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+        ) -> futures::future::BoxFuture<'_, Result<UpstreamResponse, std::io::Error>> {
             Box::pin(async move {
                 self.requests.lock().unwrap().push(request);
                 let next = self.responses.lock().unwrap().remove(0);
@@ -739,10 +739,10 @@ mod tests {
         scripted
     }
 
-    /// Default ACL: block_private_ips on, empty allow/deny lists.
+    /// Default ACL: `block_private_ips` on, empty allow/deny lists.
     ///
     /// `NetworkConfig::default()` has `block_private_ips = false` (the
-    /// serde default_true only applies during deserialization), so build the
+    /// serde `default_true` only applies during deserialization), so build the
     /// operator-facing default explicitly.
     fn net() -> NetworkConfig {
         NetworkConfig {

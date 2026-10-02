@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 pub struct BedrockTransformer;
 
 impl BedrockTransformer {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -104,7 +104,7 @@ impl RequestTransformer for BedrockTransformer {
             let mut req = json!({
                 "inputText": input.trim_end(),
             });
-            if cfg.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            if cfg.as_object().is_some_and(|o| !o.is_empty()) {
                 req["textGenerationConfig"] = cfg;
             }
             return Ok(req);
@@ -116,6 +116,7 @@ impl RequestTransformer for BedrockTransformer {
         )))
     }
 
+    #[cfg(test)]
     fn headers(&self, _api_key: &str) -> Vec<(String, String)> {
         // SigV4 is applied at the HTTP layer.
         vec![("Content-Type".to_string(), "application/json".to_string())]
@@ -184,46 +185,67 @@ mod tests {
     use super::*;
     use crate::types::Message;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn bedrock_anthropic_request_contains_anthropic_version() {
+    fn bedrock_anthropic_request_contains_anthropic_version(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("anthropic.claude-3-opus-20240229-v1:0")
             .with_messages(vec![Message::user("hi")])
             .with_max_tokens(16);
-        let req = BedrockTransformer::new().transform_request(&ctx).unwrap();
+        let req = BedrockTransformer::new().transform_request(&ctx)?;
         assert_eq!(req["anthropic_version"], "bedrock-2023-05-31");
         assert!(req.get("model").is_none());
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn bedrock_regional_anthropic_model_is_supported() {
+    fn bedrock_regional_anthropic_model_is_supported() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("us.anthropic.claude-3-opus-20240229-v1:0")
             .with_messages(vec![Message::user("hi")])
             .with_max_tokens(16);
-        let req = BedrockTransformer::new().transform_request(&ctx).unwrap();
+        let req = BedrockTransformer::new().transform_request(&ctx)?;
         assert_eq!(req["anthropic_version"], "bedrock-2023-05-31");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn bedrock_titan_request_uses_input_text() {
+    fn bedrock_titan_request_uses_input_text() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new("amazon.titan-text-express-v1")
             .with_messages(vec![Message::user("hi")])
             .with_max_tokens(16);
-        let req = BedrockTransformer::new().transform_request(&ctx).unwrap();
+        let req = BedrockTransformer::new().transform_request(&ctx)?;
         assert!(req.get("inputText").is_some());
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn bedrock_titan_response_parses_text() {
+    fn bedrock_titan_response_parses_text() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "results": [
                 { "outputText": "ok" }
             ]
         });
 
-        let events = BedrockTransformer::new().parse_response(&body).unwrap();
+        let events = BedrockTransformer::new().parse_response(&body)?;
         assert!(events
             .iter()
             .any(|e| matches!(e, StreamEvent::TextEnd { content, .. } if content == "ok")));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+        Ok(())
     }
 }

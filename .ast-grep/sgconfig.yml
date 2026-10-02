@@ -1,0 +1,6 @@
+ruleDirs:
+  - rules
+
+languageGlobs:
+  Rust:
+    - "**/*.rs"

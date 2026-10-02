@@ -1,7 +1,7 @@
 //! Capture module for transparent traffic interception via mitmproxy.
 //!
 //! This module provides functionality to automatically start and manage
-//! mitmproxy with the eavs_capture.py addon for transparent LLM API
+//! mitmproxy with the `eavs_capture.py` addon for transparent LLM API
 //! traffic interception.
 
 use crate::config::CaptureConfig;
@@ -16,13 +16,27 @@ pub struct CaptureHandle {
 
 impl CaptureHandle {
     /// Stop the mitmproxy process gracefully.
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "Tracing macro expansions inflate this linear signal/wait lifecycle; keep shutdown ordering visible"
+    )]
     pub fn stop(mut self) {
         tracing::info!("Stopping mitmproxy capture...");
 
         // Try graceful shutdown first (SIGTERM on Unix)
         #[cfg(unix)]
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGTERM);
+        if let Ok(pid) = libc::pid_t::try_from(self.child.id()) {
+            // SAFETY: kill takes integer values only; the positive child PID
+            // targets this process rather than a process group. SIGTERM is valid.
+            #[expect(
+                unsafe_code,
+                reason = "std Child has no graceful Unix signal API; this FFI uses no pointers"
+            )]
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        } else {
+            let _ = self.child.kill();
         }
 
         #[cfg(not(unix))]
@@ -57,11 +71,10 @@ pub fn check_mitmproxy_available(path: &str) -> Result<String, String> {
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "mitmproxy not found at '{}'. Install with: brew install mitmproxy (macOS) or pip install mitmproxy",
-                    path
+                    "mitmproxy not found at '{path}'. Install with: brew install mitmproxy (macOS) or pip install mitmproxy"
                 )
             } else {
-                format!("Failed to run mitmproxy: {}", e)
+                format!("Failed to run mitmproxy: {e}")
             }
         })?;
 
@@ -70,14 +83,18 @@ pub fn check_mitmproxy_available(path: &str) -> Result<String, String> {
         Ok(version)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("mitmproxy check failed: {}", stderr))
+        Err(format!("mitmproxy check failed: {stderr}"))
     }
 }
 
-/// Start mitmproxy with the eavs_capture.py addon.
+/// Start mitmproxy with the `eavs_capture.py` addon.
 ///
 /// Returns a handle that can be used to stop the process, or an error
 /// if mitmproxy couldn't be started.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "Tracing macro expansions inflate the linear validation/spawn sequence; errors already propagate"
+)]
 pub fn start_capture(config: &CaptureConfig, eavs_port: u16) -> Result<CaptureHandle, String> {
     // Check if mitmproxy is available
     let version = check_mitmproxy_available(&config.mitmproxy_path)?;
@@ -103,7 +120,7 @@ pub fn start_capture(config: &CaptureConfig, eavs_port: u16) -> Result<CaptureHa
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start mitmproxy: {}", e))?;
+        .map_err(|e| format!("Failed to start mitmproxy: {e}"))?;
 
     let pid = child.id();
     tracing::info!(
@@ -129,7 +146,7 @@ pub async fn start_capture_async(
     // Run the blocking check/start in a blocking task
     tokio::task::spawn_blocking(move || start_capture(&config, eavs_port))
         .await
-        .map_err(|e| format!("Task join error: {}", e))?
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[cfg(test)]
@@ -139,8 +156,7 @@ mod tests {
     #[test]
     fn test_check_mitmproxy_not_found() {
         let result = check_mitmproxy_available("/nonexistent/mitmproxy");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not found"));
+        assert!(matches!(result, Err(message) if message.contains("not found")));
     }
 
     #[test]

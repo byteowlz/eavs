@@ -19,7 +19,7 @@ pub struct KeyValidator {
 }
 
 impl KeyValidator {
-    pub fn new(store: Arc<KeyStore>, rate_limiter: Arc<RateLimiter>) -> Self {
+    pub const fn new(store: Arc<KeyStore>, rate_limiter: Arc<RateLimiter>) -> Self {
         Self {
             store,
             rate_limiter,
@@ -36,6 +36,33 @@ impl KeyValidator {
         model: &str,
         provider: &str,
         estimated_tokens: Option<u32>,
+    ) -> Result<ValidatedKey, KeyValidationError> {
+        self.validate_inner(api_key, model, provider, estimated_tokens, true)
+            .await
+    }
+
+    /// Like [`validate`](Self::validate) but skips the budget enforcement. Used
+    /// for job lifecycle routing (status/result/cancel) where the job was
+    /// already accepted and cost-reserved: the handle is MAC-authenticated and
+    /// no new spend is incurred, so a key at its cap must still be able to
+    /// retrieve its own in-flight jobs (eavs-avm8).
+    pub async fn validate_skip_budget(
+        &self,
+        api_key: &str,
+        model: &str,
+        provider: &str,
+    ) -> Result<ValidatedKey, KeyValidationError> {
+        self.validate_inner(api_key, model, provider, Some(0), false)
+            .await
+    }
+
+    async fn validate_inner(
+        &self,
+        api_key: &str,
+        model: &str,
+        provider: &str,
+        estimated_tokens: Option<u32>,
+        enforce_budget: bool,
     ) -> Result<ValidatedKey, KeyValidationError> {
         // Check if it's a virtual key
         if !is_virtual_key(api_key) {
@@ -76,7 +103,7 @@ impl KeyValidator {
         }
 
         // Check budget
-        if key.is_over_budget() {
+        if enforce_budget && key.is_over_budget() {
             return Err(KeyValidationError::BudgetExceeded {
                 limit: key.permissions.max_budget_usd.unwrap_or(0.0),
                 used: key.usage.window_spend_usd,
@@ -153,7 +180,7 @@ impl KeyValidator {
 
     /// Record a request without usage data (for providers that don't return usage).
     ///
-    /// This updates last_request_at even when we don't have token counts.
+    /// This updates `last_request_at` even when we don't have token counts.
     pub async fn record_request(&self, key_hash: &str, model: &str, provider: &str) {
         if let Err(e) = self
             .store
@@ -215,19 +242,15 @@ impl std::fmt::Display for KeyValidationError {
             Self::KeyDisabled => write!(f, "API key has been disabled"),
             Self::KeyExpired => write!(f, "API key has expired"),
             Self::ModelNotAllowed { model } => {
-                write!(f, "Model '{}' is not allowed for this key", model)
+                write!(f, "Model '{model}' is not allowed for this key")
             }
             Self::ProviderNotAllowed { provider } => {
-                write!(f, "Provider '{}' is not allowed for this key", provider)
+                write!(f, "Provider '{provider}' is not allowed for this key")
             }
             Self::BudgetExceeded { limit, used } => {
-                write!(
-                    f,
-                    "Budget exceeded: ${:.4} used of ${:.4} limit",
-                    used, limit
-                )
+                write!(f, "Budget exceeded: ${used:.4} used of ${limit:.4} limit")
             }
-            Self::RateLimited(e) => write!(f, "{}", e),
+            Self::RateLimited(e) => write!(f, "{e}"),
         }
     }
 }
@@ -236,7 +259,7 @@ impl std::error::Error for KeyValidationError {}
 
 impl KeyValidationError {
     /// Get the HTTP status code for this error.
-    pub fn status_code(&self) -> u16 {
+    pub const fn status_code(&self) -> u16 {
         match self {
             Self::NotVirtualKey => 401,
             Self::InvalidKey => 401,
@@ -250,7 +273,7 @@ impl KeyValidationError {
     }
 
     /// Get a machine-readable error code.
-    pub fn error_code(&self) -> &'static str {
+    pub const fn error_code(&self) -> &'static str {
         match self {
             Self::NotVirtualKey => "invalid_api_key",
             Self::InvalidKey => "invalid_api_key",

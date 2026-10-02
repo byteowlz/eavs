@@ -29,15 +29,8 @@ async fn serve(app: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
 fn base_config(providers: HashMap<String, ProviderConfig>) -> AppConfig {
     AppConfig {
-        server: Default::default(),
         providers,
-        upstream: HashMap::new(),
-        logging: Default::default(),
-        analysis: Default::default(),
-        policy: Default::default(),
-        state: Default::default(),
-        keys: Default::default(),
-        capture: Default::default(),
+        ..AppConfig::with_defaults()
     }
 }
 
@@ -73,7 +66,7 @@ async fn integration_openai_chat() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Say 'ok'"}],
@@ -115,7 +108,7 @@ async fn integration_openai_streaming() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Say 'ok'"}],
@@ -158,7 +151,7 @@ async fn integration_anthropic_via_provider_header() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Say 'ok'"}],
@@ -206,7 +199,7 @@ async fn integration_anthropic_streaming() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Say 'ok'"}],
@@ -254,7 +247,7 @@ async fn integration_ollama_if_available() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Say 'ok'"}],
@@ -299,7 +292,7 @@ async fn integration_openai_models_endpoint() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/models", addr);
+    let url = format!("http://{addr}/v1/models");
     let resp = client.get(url).send().await.unwrap();
     assert!(resp.status().is_success());
     let json: serde_json::Value = resp.json().await.unwrap();
@@ -333,7 +326,7 @@ async fn integration_anthropic_models_endpoint() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/models", addr);
+    let url = format!("http://{addr}/v1/models");
     let resp = client
         .get(url)
         .header("X-Provider", "default")
@@ -373,7 +366,7 @@ async fn integration_mistral_chat_and_streaming() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
 
     // Non-streaming
     let body = json!({
@@ -439,7 +432,7 @@ async fn integration_tool_calls_mistral_required_translates_to_any() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/chat/completions", addr);
+    let url = format!("http://{addr}/v1/chat/completions");
     let body = json!({
         "model": model,
         "messages": [{"role":"user","content":"Call the noop tool with an empty JSON object. Do not answer normally."}],
@@ -490,7 +483,7 @@ async fn integration_models_endpoint_synthetic_bedrock() {
     let (addr, _handle) = serve(app).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/models", addr);
+    let url = format!("http://{addr}/v1/models");
     let resp = client.get(url).send().await.unwrap();
     assert!(resp.status().is_success());
     let json: serde_json::Value = resp.json().await.unwrap();

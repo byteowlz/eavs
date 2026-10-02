@@ -86,7 +86,10 @@ pub struct TransformOutput {
 /// Returns the modified headers and body, or the original if no plugins match
 /// or all plugins fail.
 // Part of the transform-plugin API pair with run_response_transforms; kept symmetric.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Kept symmetric with the transform-plugin API pair; reserved for callers"
+)]
 pub async fn run_request_transforms(
     plugins: &[TransformPluginConfig],
     provider: &str,
@@ -109,7 +112,10 @@ pub async fn run_request_transforms(
 ///
 /// Returns the modified headers and body, or the original if no plugins match
 /// or all plugins fail.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Kept symmetric with the transform-plugin API pair; reserved for callers"
+)]
 pub async fn run_response_transforms(
     plugins: &[TransformPluginConfig],
     provider: &str,
@@ -137,48 +143,75 @@ async fn run_transforms(
     mut body: Value,
 ) -> (HashMap<String, String>, Value) {
     for plugin in plugins {
-        // Check provider filter
-        if !plugin.providers.is_empty()
-            && !plugin
-                .providers
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(provider))
-        {
+        if !plugin_matches(plugin, provider, is_oauth) {
             continue;
         }
 
-        // Check OAuth filter
-        if plugin.oauth_only && !is_oauth {
-            continue;
-        }
-
-        match run_single_plugin(plugin, &input).await {
-            Ok(output) => {
-                // Apply modifications
-                if let Some(new_headers) = output.headers {
-                    headers = new_headers;
-                    input.headers = headers.clone();
-                }
-                if let Some(new_body) = output.body {
-                    body = new_body;
-                    input.body = body.clone();
-                }
-                tracing::debug!(
-                    plugin = %plugin.name,
-                    "Transform plugin applied successfully"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    plugin = %plugin.name,
-                    error = %e,
-                    "Transform plugin failed, continuing with original data"
-                );
-            }
-        }
+        (headers, body, input) = run_plugin(plugin, input, headers, body).await;
     }
 
     (headers, body)
+}
+
+/// Run a single plugin and merge its output into the current header/body state.
+async fn run_plugin(
+    plugin: &TransformPluginConfig,
+    input: TransformInput,
+    headers: HashMap<String, String>,
+    body: Value,
+) -> (HashMap<String, String>, Value, TransformInput) {
+    match run_single_plugin(plugin, &input).await {
+        Ok(output) => apply_plugin_output_with_log(plugin, output, headers, body, input),
+        Err(e) => {
+            tracing::warn!(
+                "Transform plugin '{}' failed: '{}', continuing with original data",
+                plugin.name,
+                e
+            );
+            (headers, body, input)
+        }
+    }
+}
+
+/// Apply a plugin's output and record a success trace, returning the merged state.
+fn apply_plugin_output_with_log(
+    plugin: &TransformPluginConfig,
+    output: TransformOutput,
+    headers: HashMap<String, String>,
+    body: Value,
+    input: TransformInput,
+) -> (HashMap<String, String>, Value, TransformInput) {
+    tracing::debug!("Transform plugin '{}' applied successfully", plugin.name);
+    apply_plugin_output(output, headers, body, input)
+}
+
+/// Whether a plugin should be applied based on its provider and OAuth filters.
+fn plugin_matches(plugin: &TransformPluginConfig, provider: &str, is_oauth: bool) -> bool {
+    let provider_ok = plugin.providers.is_empty()
+        || plugin
+            .providers
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(provider));
+    let oauth_ok = !plugin.oauth_only || is_oauth;
+    provider_ok && oauth_ok
+}
+
+/// Merge a plugin's output modifications back into the current header/body state.
+fn apply_plugin_output(
+    output: TransformOutput,
+    mut headers: HashMap<String, String>,
+    mut body: Value,
+    mut input: TransformInput,
+) -> (HashMap<String, String>, Value, TransformInput) {
+    if let Some(new_headers) = output.headers {
+        headers = new_headers;
+        input.headers.clone_from(&headers);
+    }
+    if let Some(new_body) = output.body {
+        body = new_body;
+        input.body.clone_from(&body);
+    }
+    (headers, body, input)
 }
 
 async fn run_single_plugin(
@@ -199,23 +232,23 @@ async fn run_single_plugin(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn plugin: {}", e))?;
+        .map_err(|e| format!("Failed to spawn plugin: {e}"))?;
 
     // Write input to stdin
     let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
     let input_json =
-        serde_json::to_string(input).map_err(|e| format!("Failed to serialize input: {}", e))?;
+        serde_json::to_string(input).map_err(|e| format!("Failed to serialize input: {e}"))?;
 
     let write_task = async move {
         let mut stdin = stdin;
         stdin
             .write_all(input_json.as_bytes())
             .await
-            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
         stdin
             .shutdown()
             .await
-            .map_err(|e| format!("Failed to close stdin: {}", e))?;
+            .map_err(|e| format!("Failed to close stdin: {e}"))?;
         Ok::<_, String>(())
     };
 
@@ -240,10 +273,10 @@ async fn run_single_plugin(
 
         write_result?;
         let output = read_result?;
-        let status = wait_result.map_err(|e| format!("Failed to wait for process: {}", e))?;
+        let status = wait_result.map_err(|e| format!("Failed to wait for process: {e}"))?;
 
         if !status.success() {
-            return Err(format!("Plugin exited with status: {}", status));
+            return Err(format!("Plugin exited with status: {status}"));
         }
 
         Ok(output)
@@ -256,23 +289,26 @@ async fn run_single_plugin(
         return Ok(TransformOutput::default());
     }
 
-    serde_json::from_str(&result).map_err(|e| format!("Failed to parse plugin output: {}", e))
+    serde_json::from_str(&result).map_err(|e| format!("Failed to parse plugin output: {e}"))
 }
 
 fn resolve_env_value(value: &str) -> String {
-    if let Some(var) = value.strip_prefix("env:") {
-        std::env::var(var).unwrap_or_default()
-    } else {
-        value.to_string()
-    }
+    value.strip_prefix("env:").map_or_else(
+        || value.to_string(),
+        |var| std::env::var(var).unwrap_or_default(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_transform_input_serialization() {
+    fn test_transform_input_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let input = TransformInput {
             transform_type: "request".to_string(),
             provider: "anthropic".to_string(),
@@ -281,26 +317,37 @@ mod tests {
             body: serde_json::json!({"model": "claude-3-5-sonnet-20241022"}),
         };
 
-        let json = serde_json::to_string(&input).unwrap();
+        let json = serde_json::to_string(&input)?;
         assert!(json.contains("\"type\":\"request\""));
         assert!(json.contains("\"provider\":\"anthropic\""));
         assert!(json.contains("\"is_oauth\":true"));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_transform_output_deserialization() {
+    fn test_transform_output_deserialization() -> Result<(), Box<dyn std::error::Error>> {
         let json = r#"{"headers":{"X-Custom":"value"},"body":{"modified":true}}"#;
-        let output: TransformOutput = serde_json::from_str(json).unwrap();
+        let output: TransformOutput = serde_json::from_str(json)?;
         assert!(output.headers.is_some());
         assert!(output.body.is_some());
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_transform_output_empty() {
+    fn test_transform_output_empty() -> Result<(), Box<dyn std::error::Error>> {
         let json = "{}";
-        let output: TransformOutput = serde_json::from_str(json).unwrap();
+        let output: TransformOutput = serde_json::from_str(json)?;
         assert!(output.headers.is_none());
         assert!(output.body.is_none());
+        Ok(())
     }
 
     #[test]

@@ -159,10 +159,10 @@ mod tests {
     struct NoopUpstream;
 
     impl Upstream for NoopUpstream {
-        fn send<'a>(
-            &'a self,
+        fn send(
+            &self,
             _request: UpstreamRequest,
-        ) -> futures::future::BoxFuture<'a, Result<crate::upstream::UpstreamResponse, std::io::Error>>
+        ) -> futures::future::BoxFuture<'_, Result<crate::upstream::UpstreamResponse, std::io::Error>>
         {
             Box::pin(async move {
                 Ok(crate::upstream::UpstreamResponse {
@@ -200,6 +200,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         }
     }
 

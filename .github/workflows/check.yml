@@ -1,0 +1,52 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Separate jobs expose all debt even when formatting or linting fails.
+  # Intentionally no continue-on-error: staged Cargo warning levels are not a
+  # green baseline. Source remediation must make these strict gates pass.
+  rust:
+    name: ${{ matrix.recipe }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: [fmt-check, check-all-features, clippy, doc-check, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - run: just ${{ matrix.recipe }}
+
+  tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: astral-sh/setup-uv@v6
+      - run: just test-tooling
+      - run: just validate-config
+
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global @ast-grep/cli@0.42.1
+      - run: just lint-rust-ai-guardrails

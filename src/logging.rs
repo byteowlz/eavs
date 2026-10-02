@@ -465,10 +465,10 @@ pub fn start_logging_task(
 
 fn format_timestamp(ts: i64) -> String {
     use chrono::TimeZone;
-    Utc.timestamp_millis_opt(ts)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
-        .unwrap_or_else(|| ts.to_string())
+    Utc.timestamp_millis_opt(ts).single().map_or_else(
+        || ts.to_string(),
+        |dt| dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+    )
 }
 
 #[cfg(test)]

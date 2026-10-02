@@ -13,23 +13,39 @@
           "type": "string",
           "description": "Host address to bind to",
           "default": "127.0.0.1",
-          "examples": ["127.0.0.1", "0.0.0.0", "localhost"]
+          "examples": [
+            "127.0.0.1",
+            "0.0.0.0",
+            "localhost"
+          ]
         },
         "port": {
           "type": "integer",
           "description": "Port number to listen on",
           "default": 3033,
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 65535
         },
         "auth_token": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Required capability token for every HTTP listener endpoint. Supports env:, keychain:, and literal secret references. EAVS_AUTH_TOKEN takes precedence.",
-          "minLength": 1,
-          "examples": ["env:EAVS_AUTH_TOKEN", "keychain:eavs-listener"]
+          "examples": [
+            "env:EAVS_AUTH_TOKEN",
+            "keychain:eavs-listener"
+          ]
+        },
+        "max_body_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "log_redact": {
+          "type": "boolean"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "providers": {
       "type": "object",
@@ -53,7 +69,6 @@
         "default": {
           "type": "string",
           "description": "Default logging backend. Use 'pretty' for human-readable debug output.",
-          "enum": ["stdout", "pretty", "none"],
           "default": "stdout"
         },
         "sink": {
@@ -67,9 +82,11 @@
           "items": {
             "$ref": "#/$defs/logBackend"
           }
+        },
+        "log_bodies": {
+          "type": "boolean"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "analysis": {
       "type": "object",
@@ -84,7 +101,8 @@
           "type": "integer",
           "description": "Size of the broadcast channel buffer",
           "default": 1024,
-          "minimum": 1
+          "minimum": 0,
+          "maximum": 18446744073709551615
         },
         "plugins": {
           "type": "array",
@@ -94,8 +112,7 @@
             "$ref": "#/$defs/analysisPlugin"
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "policy": {
       "type": "object",
@@ -114,8 +131,7 @@
             "$ref": "#/$defs/policyRule"
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "delegated_fetch": {
       "type": "object",
@@ -130,11 +146,11 @@
           "type": "array",
           "description": "Explicitly allowed provider-hosted tool types, such as web_search or web_fetch",
           "default": [],
-          "items": { "type": "string", "minLength": 1 },
-          "uniqueItems": true
+          "items": {
+            "type": "string"
+          }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "state": {
       "type": "object",
@@ -154,22 +170,24 @@
           "type": "integer",
           "description": "TTL for conversation state in seconds (0 = no expiration)",
           "default": 3600,
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 18446744073709551615
         },
         "cleanup_interval_secs": {
           "type": "integer",
           "description": "How often to run cleanup in seconds",
           "default": 60,
-          "minimum": 1
+          "minimum": 0,
+          "maximum": 18446744073709551615
         },
         "max_conversations": {
           "type": "integer",
           "description": "Maximum number of conversations to store (0 = unlimited)",
           "default": 10000,
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 18446744073709551615
         }
-      },
-      "additionalProperties": false
+      }
     },
     "keys": {
       "type": "object",
@@ -189,12 +207,22 @@
           "type": "string",
           "description": "Path to the SQLite database file. Supports ~ expansion.",
           "default": "~/.eavs/keys.db",
-          "examples": ["~/.eavs/keys.db", "/var/lib/eavs/keys.db"]
+          "examples": [
+            "~/.eavs/keys.db",
+            "/var/lib/eavs/keys.db"
+          ]
         },
         "master_key": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Master key for admin API. Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
-          "examples": ["env:EAVS_MASTER_KEY", "keychain:eavs-master-key", "sk-admin-secret"]
+          "examples": [
+            "env:EAVS_MASTER_KEY",
+            "keychain:eavs-master-key",
+            "sk-admin-secret"
+          ]
         },
         "allow_self_provisioning": {
           "type": "boolean",
@@ -202,16 +230,30 @@
           "default": false
         },
         "default_rpm_limit": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "description": "Default rate limit for new keys (requests per minute, null = unlimited)",
           "minimum": 0,
-          "examples": [60, 100, null]
+          "examples": [
+            60,
+            100,
+            null
+          ],
+          "maximum": 4294967295
         },
         "default_budget_usd": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Default budget for new keys in USD (null = unlimited)",
-          "minimum": 0,
-          "examples": [10.0, 100.0, null]
+          "examples": [
+            10.0,
+            100.0,
+            null
+          ]
         },
         "update_pricing_on_startup": {
           "type": "boolean",
@@ -219,18 +261,25 @@
           "default": false
         },
         "word_lists_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Path to word lists TOML file for human-readable key IDs. If not specified, downloads to XDG data directory.",
-          "examples": ["~/.config/eavs/word_lists.toml", null]
+          "examples": [
+            "~/.config/eavs/word_lists.toml",
+            null
+          ]
         },
         "oauth_backend": {
           "type": "string",
-          "description": "OAuth credential storage backend. 'keychain' uses the system keychain (macOS Keychain, Linux kernel keyutils for headless support, Windows Credential Manager) with automatic fallback to SQLite if unavailable. 'sqlite' stores tokens in plaintext in the same database as virtual API keys.",
-          "default": "keychain",
-          "enum": ["keychain", "sqlite"]
+          "description": "OAuth credential storage backend. 'keychain' uses the system keychain (macOS Keychain, Linux kernel keyutils for headless support, Windows Credential Manager) with automatic fallback to SQLite if unavailable. 'sqlite' stores tokens in plaintext in the same database as virtual API keys. Default is keychain on macOS/Windows, sqlite elsewhere."
+        },
+        "oauth_default_user": {
+          "type": "string",
+          "default": "default"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "capture": {
       "type": "object",
@@ -255,7 +304,12 @@
           "type": "string",
           "description": "Capture mode: 'local' for all traffic, 'local:AppName' for specific app",
           "default": "local",
-          "examples": ["local", "local:ChatGPT", "local:Claude", "local:curl"]
+          "examples": [
+            "local",
+            "local:ChatGPT",
+            "local:Claude",
+            "local:curl"
+          ]
         },
         "verbose": {
           "type": "boolean",
@@ -268,9 +322,15 @@
           "default": false
         },
         "addon_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Custom path to eavs_capture.py addon script. Auto-detected if not specified.",
-          "examples": ["/path/to/eavs_capture.py", null]
+          "examples": [
+            "/path/to/eavs_capture.py",
+            null
+          ]
         },
         "extra_args": {
           "type": "array",
@@ -279,10 +339,138 @@
           "items": {
             "type": "string"
           },
-          "examples": [["--quiet"], ["--listen-port", "8080"]]
+          "examples": [
+            [
+              "--quiet"
+            ],
+            [
+              "--listen-port",
+              "8080"
+            ]
+          ]
         }
-      },
-      "additionalProperties": false
+      }
+    },
+    "network": {
+      "type": "object",
+      "description": "Network access control for upstream connections",
+      "properties": {
+        "allow_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Allowed upstream domains (glob patterns). Empty = allow all. Examples: ['api.openai.com', '*.anthropic.com']"
+        },
+        "deny_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Denied upstream domains (glob patterns). Checked before allow list. Examples: ['*.internal.corp', 'evil.com']"
+        },
+        "trusted_private_endpoints": {
+          "type": "array",
+          "description": "Operator-controlled private destinations. Host, address, and port must all match; deny rules still take precedence.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "Exact TLS SNI or HTTP Host identity"
+              },
+              "address": {
+                "type": "string",
+                "description": "Exact destination IP address",
+                "anyOf": [
+                  {
+                    "format": "ipv4"
+                  },
+                  {
+                    "format": "ipv6"
+                  }
+                ]
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "description": "Exact destination TCP port"
+              }
+            },
+            "required": [
+              "host",
+              "address",
+              "port"
+            ]
+          }
+        },
+        "block_private_ips": {
+          "type": "boolean",
+          "default": true,
+          "description": "Block private/internal, loopback, link-local, CGNAT, and unique-local IP ranges. Default: true"
+        }
+      }
+    },
+    "egress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "enforce": {
+          "type": "boolean"
+        },
+        "dns_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "dns_upstream": {
+          "type": "string"
+        }
+      }
+    },
+    "native_pricing": {
+      "type": "object",
+      "description": "Ignored legacy configuration retained for compatibility only. Does not establish authoritative actual billing or enable budgeted native jobs; capped native jobs remain disabled (fail-closed).",
+      "properties": {
+        "jobs": {
+          "type": "object",
+          "description": "Ignored legacy per-model job prices. Accepted for compatibility, not actual billing evidence, and never enables capped jobs.",
+          "additionalProperties": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "mock_responses": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/mockResponse"
+      }
+    },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/transformPlugin"
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -292,91 +480,157 @@
         {
           "type": "object",
           "properties": {
-            "action": { "const": "deny" },
+            "action": {
+              "const": "deny"
+            },
             "provider": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against provider name"
             },
             "model": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against requested model"
             },
             "path": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against request path (e.g. /v1/chat/completions)"
             },
             "reason": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "User-facing denial reason"
             }
           },
-          "required": ["action"],
-          "additionalProperties": false
+          "required": [
+            "action"
+          ]
         },
         {
           "type": "object",
           "properties": {
-            "action": { "const": "rewrite_model" },
+            "action": {
+              "const": "rewrite_model"
+            },
             "provider": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against provider name"
             },
             "model": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against requested model"
             },
-            "to": { "type": "string", "description": "Replacement model name" }
+            "to": {
+              "type": "string",
+              "description": "Replacement model name"
+            }
           },
-          "required": ["action", "to"],
-          "additionalProperties": false
+          "required": [
+            "action",
+            "to"
+          ]
         },
         {
           "type": "object",
           "properties": {
-            "action": { "const": "filter_tools" },
+            "action": {
+              "const": "filter_tools"
+            },
             "provider": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against provider name"
             },
             "model": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against requested model"
             },
             "allow": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Allow-list tool name globs",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "deny": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Deny-list tool name globs",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             }
           },
-          "required": ["action"],
-          "additionalProperties": false
+          "required": [
+            "action"
+          ]
         },
         {
           "type": "object",
           "properties": {
-            "action": { "const": "set_field" },
+            "action": {
+              "const": "set_field"
+            },
             "provider": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against provider name"
             },
             "model": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against requested model"
             },
             "path": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Glob match against request path (e.g. */responses)"
             },
-            "field": { "type": "string", "description": "Top-level field name to set" },
-            "value": { "description": "Value to set (any JSON type)" }
+            "field": {
+              "type": "string",
+              "description": "Top-level field name to set"
+            },
+            "value": {
+              "description": "Value to set (any JSON type)"
+            }
           },
-          "required": ["action", "field", "value"],
-          "additionalProperties": false
+          "required": [
+            "action",
+            "field",
+            "value"
+          ]
         }
       ]
     },
@@ -410,9 +664,7 @@
             "type": "string"
           }
         }
-      },
-      "required": ["name", "command"],
-      "additionalProperties": false
+      }
     },
     "provider": {
       "type": "object",
@@ -420,38 +672,20 @@
       "properties": {
         "type": {
           "type": "string",
-          "description": "Provider type",
-          "enum": [
-            "openai",
-            "anthropic",
-            "google",
-            "azure",
-            "mistral",
-            "groq",
-            "cerebras",
-            "xai",
-            "openrouter",
-            "bedrock",
-            "aws-bedrock",
-            "ollama",
-            "vllm",
-            "openai-compatible",
-            "openai-codex",
-            "openai-responses",
-            "github-copilot",
-            "google-vertex"
-          ],
-          "default": "openai"
+          "description": "Provider type"
         },
         "api_key": {
           "type": "string",
           "description": "API key. Supports three syntaxes: 'env:VAR_NAME' to read from environment variable, 'keychain:account' to read from the system keychain (macOS Keychain / libsecret / Windows Credential Manager), or a literal value. Store keychain secrets with 'eavs secret set <account>'.",
-          "examples": ["env:OPENAI_API_KEY", "keychain:openai", "sk-..."]
+          "examples": [
+            "env:OPENAI_API_KEY",
+            "keychain:openai",
+            "sk-..."
+          ]
         },
         "base_url": {
           "type": "string",
           "description": "Base URL for the API. Defaults based on provider type if not specified. Supports 'env:VAR_NAME' syntax to read from environment.",
-          "format": "uri",
           "examples": [
             "https://api.openai.com/v1",
             "https://api.anthropic.com/v1",
@@ -459,14 +693,23 @@
           ]
         },
         "api_version": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "API version (primarily for Azure OpenAI). Supports 'env:VAR_NAME' syntax.",
-          "examples": ["2024-02-15-preview", "env:AZURE_OPENAI_API_VERSION"]
+          "examples": [
+            "2024-02-15-preview",
+            "env:AZURE_OPENAI_API_VERSION"
+          ]
         },
         "deployment": {
           "type": "string",
           "description": "Azure deployment name (Azure only). If not set, uses model name as deployment. Supports 'env:VAR_NAME' syntax.",
-          "examples": ["my-gpt4-deployment", "env:AZURE_DEPLOYMENT"]
+          "examples": [
+            "my-gpt4-deployment",
+            "env:AZURE_DEPLOYMENT"
+          ]
         },
         "compat": {
           "$ref": "#/$defs/compatSettings"
@@ -481,43 +724,68 @@
         "aws_region": {
           "type": "string",
           "description": "AWS region (Bedrock only). Supports 'env:VAR_NAME' syntax.",
-          "examples": ["us-east-1", "env:AWS_REGION"]
+          "examples": [
+            "us-east-1",
+            "env:AWS_REGION"
+          ]
         },
         "aws_access_key_id": {
           "type": "string",
           "description": "AWS access key id (Bedrock only). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
-          "examples": ["env:AWS_ACCESS_KEY_ID", "keychain:aws-access-key-id"]
+          "examples": [
+            "env:AWS_ACCESS_KEY_ID",
+            "keychain:aws-access-key-id"
+          ]
         },
         "aws_secret_access_key": {
           "type": "string",
           "description": "AWS secret access key (Bedrock only). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
-          "examples": ["env:AWS_SECRET_ACCESS_KEY", "keychain:aws-secret-access-key"]
+          "examples": [
+            "env:AWS_SECRET_ACCESS_KEY",
+            "keychain:aws-secret-access-key"
+          ]
         },
         "aws_session_token": {
           "type": "string",
           "description": "AWS session token (Bedrock only, optional). Supports 'env:VAR_NAME' and 'keychain:account' syntax.",
-          "examples": ["env:AWS_SESSION_TOKEN", "keychain:aws-session-token"]
+          "examples": [
+            "env:AWS_SESSION_TOKEN",
+            "keychain:aws-session-token"
+          ]
         },
         "aws_service": {
           "type": "string",
           "description": "AWS service name for SigV4 (Bedrock only).",
-          "default": "bedrock",
-          "examples": ["bedrock"]
+          "examples": [
+            "bedrock"
+          ]
         },
         "gcp_project": {
           "type": "string",
           "description": "Google Cloud project ID (Vertex AI only). Supports 'env:VAR_NAME' and 'keychain:account' syntax. Falls back to GOOGLE_CLOUD_PROJECT or GCLOUD_PROJECT env vars.",
-          "examples": ["env:GOOGLE_CLOUD_PROJECT", "my-gcp-project"]
+          "examples": [
+            "env:GOOGLE_CLOUD_PROJECT",
+            "my-gcp-project"
+          ]
         },
         "gcp_location": {
           "type": "string",
           "description": "Google Cloud location/region (Vertex AI only). Supports 'env:VAR_NAME' syntax. Falls back to GOOGLE_CLOUD_LOCATION env var.",
-          "examples": ["env:GOOGLE_CLOUD_LOCATION", "us-central1", "europe-west1"]
+          "examples": [
+            "env:GOOGLE_CLOUD_LOCATION",
+            "us-central1",
+            "europe-west1"
+          ]
         },
         "test_model": {
           "type": "string",
           "description": "Model name to use for 'eavs setup test' and 'eavs setup test-all'. Overrides auto-detection from ~/.pi/agent/models.json and built-in defaults.",
-          "examples": ["gpt-4o-mini", "claude-sonnet-4-20250514", "gemini-2.0-flash", "llama-3.3-70b-versatile"]
+          "examples": [
+            "gpt-4o-mini",
+            "claude-sonnet-4-20250514",
+            "gemini-2.0-flash",
+            "llama-3.3-70b-versatile"
+          ]
         },
         "models": {
           "type": "array",
@@ -525,87 +793,110 @@
           "items": {
             "type": "object",
             "properties": {
-              "id": { "type": "string", "description": "Model ID as sent to the API" },
-              "name": { "type": "string", "description": "Human-readable display name" },
-              "reasoning": { "type": "boolean", "description": "Supports extended thinking", "default": false },
+              "id": {
+                "type": "string",
+                "description": "Model ID as sent to the API"
+              },
+              "name": {
+                "type": "string",
+                "description": "Human-readable display name"
+              },
+              "reasoning": {
+                "type": "boolean",
+                "description": "Supports extended thinking",
+                "default": false
+              },
               "input": {
                 "type": "array",
                 "description": "Input modalities",
-                "items": { "type": "string", "enum": ["text", "image"] },
-                "default": ["text"]
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "text"
+                ]
               },
-              "context_window": { "type": "integer", "description": "Context window in tokens", "default": 128000 },
-              "max_tokens": { "type": "integer", "description": "Max output tokens", "default": 16384 },
+              "context_window": {
+                "type": "integer",
+                "description": "Context window in tokens",
+                "default": 128000,
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "max_tokens": {
+                "type": "integer",
+                "description": "Max output tokens",
+                "default": 16384,
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
               "cost": {
                 "type": "object",
                 "description": "Cost per million tokens",
                 "properties": {
-                  "input": { "type": "number", "default": 0 },
-                  "output": { "type": "number", "default": 0 },
-                  "cache_read": { "type": "number", "default": 0 }
-                },
-                "additionalProperties": false
+                  "input": {
+                    "type": "number",
+                    "default": 0
+                  },
+                  "output": {
+                    "type": "number",
+                    "default": 0
+                  },
+                  "cache_read": {
+                    "type": "number",
+                    "default": 0
+                  },
+                  "cache_write": {
+                    "type": "number",
+                    "default": 0
+                  }
+                }
+              },
+              "compat": {
+                "type": "object",
+                "additionalProperties": {}
               }
             },
-            "required": ["id"],
-            "additionalProperties": false
-          }
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "type": { "enum": ["bedrock", "aws-bedrock"] }
-            }
-          },
-          "then": {
             "required": [
-              "aws_region",
-              "aws_access_key_id",
-              "aws_secret_access_key"
-            ]
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "type": { "enum": ["google-vertex"] }
-            }
-          },
-          "then": {
-            "required": [
-              "gcp_project",
-              "gcp_location"
+              "id"
             ]
           }
         }
-      ],
-      "additionalProperties": false
+      }
     },
     "compatSettings": {
       "type": "object",
       "description": "Compatibility settings for OpenAI-compatible APIs",
       "properties": {
         "supports_developer_role": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "Whether the provider supports the 'developer' role (vs 'system')"
         },
         "supports_store": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "Whether the provider supports the 'store' field"
         },
         "max_tokens_field": {
-          "type": ["string", "null"],
-          "description": "Field name for max tokens ('max_tokens' or 'max_completion_tokens')",
-          "enum": ["max_tokens", "max_completion_tokens", null]
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Field name for max tokens ('max_tokens' or 'max_completion_tokens')"
         },
         "supports_stream_options": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "Whether the provider supports stream_options: { include_usage: true }. Set to false for providers that reject this field (e.g., some Azure AI Foundry models, Ollama, vLLM)."
         }
-      },
-      "additionalProperties": false
+      }
     },
     "logBackend": {
       "oneOf": [
@@ -619,12 +910,12 @@
             "format": {
               "type": "string",
               "description": "Log format",
-              "enum": ["json", "pretty"],
               "default": "json"
             }
           },
-          "required": ["type"],
-          "additionalProperties": false
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
@@ -640,17 +931,22 @@
             "rotate": {
               "type": "string",
               "description": "Rotation strategy",
-              "enum": ["daily", "size", "none"],
-              "default": "none"
+              "default": ""
             },
             "max_size": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "description": "Max file size in bytes (for size-based rotation)",
-              "minimum": 1
+              "minimum": 0,
+              "maximum": 18446744073709551615
             }
           },
-          "required": ["type", "path"],
-          "additionalProperties": false
+          "required": [
+            "type",
+            "path"
+          ]
         },
         {
           "type": "object",
@@ -661,8 +957,7 @@
             },
             "url": {
               "type": "string",
-              "description": "URL to POST logs to",
-              "format": "uri"
+              "description": "URL to POST logs to"
             },
             "headers": {
               "type": "object",
@@ -675,34 +970,39 @@
               "type": "integer",
               "description": "Batch size before sending",
               "default": 100,
-              "minimum": 1
+              "minimum": 0,
+              "maximum": 18446744073709551615
             },
             "flush_interval_secs": {
               "type": "integer",
               "description": "Flush interval in seconds",
               "default": 5,
-              "minimum": 1
+              "minimum": 0,
+              "maximum": 18446744073709551615
             }
           },
-          "required": ["type", "url"],
-          "additionalProperties": false
+          "required": [
+            "type",
+            "url"
+          ]
         },
         {
           "type": "object",
           "description": "OpenTelemetry export",
           "properties": {
             "type": {
-              "enum": ["otel", "opentelemetry"]
+              "enum": [
+                "otel",
+                "opentelemetry"
+              ]
             },
             "endpoint": {
               "type": "string",
-              "description": "OTLP endpoint",
-              "format": "uri"
+              "description": "OTLP endpoint"
             },
             "protocol": {
               "type": "string",
               "description": "Protocol to use",
-              "enum": ["grpc", "http"],
               "default": "grpc"
             },
             "service_name": {
@@ -711,47 +1011,227 @@
               "default": "eavs"
             }
           },
-          "required": ["type", "endpoint"],
-          "additionalProperties": false
+          "required": [
+            "type",
+            "endpoint"
+          ]
         }
       ]
-    }
-  },
-  "network": {
-    "type": "object",
-    "description": "Network access control for upstream connections",
-    "properties": {
-      "allow_domains": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Allowed upstream domains (glob patterns). Empty = allow all. Examples: ['api.openai.com', '*.anthropic.com']"
-      },
-      "deny_domains": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Denied upstream domains (glob patterns). Checked before allow list. Examples: ['*.internal.corp', 'evil.com']"
-      },
-      "trusted_private_endpoints": {
-        "type": "array",
-        "description": "Operator-controlled private destinations. Host, address, and port must all match; deny rules still take precedence.",
-        "items": {
-          "type": "object",
-          "properties": {
-            "host": { "type": "string", "description": "Exact TLS SNI or HTTP Host identity" },
-            "address": { "type": "string", "format": "ip-address", "description": "Exact destination IP address" },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Exact destination TCP port" }
-          },
-          "required": ["host", "address", "port"],
-          "additionalProperties": false
+    },
+    "mockResponse": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
         }
-      },
-      "block_private_ips": {
-        "type": "boolean",
-        "default": true,
-        "description": "Block private/internal, loopback, link-local, CGNAT, and unique-local IP ranges. Default: true"
       }
     },
-    "additionalProperties": false
+    "transformPlugin": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Plugin name (for logs/observability)",
+          "default": ""
+        },
+        "command": {
+          "type": "string",
+          "description": "Executable to run (resolved via PATH unless absolute)",
+          "default": ""
+        },
+        "args": {
+          "type": "array",
+          "description": "Arguments to pass to the plugin",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables for the plugin (supports env:VAR values)",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "oauth_only": {
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    }
   },
-  "additionalProperties": false
+  "examples": [
+    {},
+    {
+      "server": {
+        "port": 0,
+        "auth_token": "",
+        "max_body_size": 0,
+        "log_redact": false
+      },
+      "network": {
+        "allow_domains": [
+          ""
+        ],
+        "deny_domains": [],
+        "block_private_ips": true,
+        "trusted_private_endpoints": [
+          {
+            "host": "",
+            "address": "::1",
+            "port": 0
+          },
+          {
+            "host": "local",
+            "address": "127.0.0.1",
+            "port": 65535
+          }
+        ]
+      },
+      "egress": {
+        "enabled": false,
+        "host": "",
+        "port": 0,
+        "enforce": true,
+        "dns_port": 65535,
+        "dns_upstream": "not-validated-on-parse"
+      },
+      "native_pricing": {
+        "jobs": {
+          "model": -1.0
+        }
+      },
+      "mock_responses": {
+        "arbitrary": {
+          "content": "",
+          "type": "custom",
+          "code": "",
+          "message": "",
+          "status": 0,
+          "name": "",
+          "arguments": "not necessarily JSON"
+        },
+        "empty": {}
+      },
+      "transform": {
+        "enabled": false,
+        "plugins": [
+          {},
+          {
+            "name": "",
+            "command": "NEVER_EXECUTE",
+            "args": [
+              ""
+            ],
+            "env": {
+              "X": "env:NEVER_READ"
+            },
+            "providers": [
+              ""
+            ],
+            "oauth_only": true,
+            "timeout_ms": 0
+          }
+        ]
+      },
+      "analysis": {
+        "broadcast_channel_size": 0,
+        "plugins": [
+          {}
+        ]
+      },
+      "providers": {
+        "default": {},
+        "custom": {
+          "type": "future-provider",
+          "base_url": "",
+          "models": [
+            {
+              "id": "",
+              "input": [
+                "audio"
+              ],
+              "cost": {
+                "cache_write": -1
+              },
+              "compat": {
+                "arbitrary": [
+                  1,
+                  true,
+                  {
+                    "x": null
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "logging": {
+        "default": "custom",
+        "log_bodies": false,
+        "backends": [
+          {
+            "type": "file",
+            "path": "",
+            "rotate": "custom",
+            "max_size": 0
+          },
+          {
+            "type": "stdout",
+            "format": "custom"
+          },
+          {
+            "type": "webhook",
+            "url": "",
+            "batch_size": 0,
+            "flush_interval_secs": 0
+          },
+          {
+            "type": "opentelemetry",
+            "endpoint": "",
+            "protocol": "custom"
+          }
+        ]
+      },
+      "keys": {
+        "default_budget_usd": -1,
+        "oauth_backend": "custom",
+        "oauth_default_user": ""
+      },
+      "ignored_future_field": true
+    }
+  ]
 }

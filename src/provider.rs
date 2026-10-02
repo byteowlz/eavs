@@ -17,14 +17,30 @@ pub enum ProviderType {
     Bedrock,
     /// Generic OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.)
     OpenAICompatible,
-    /// OpenAI Codex CLI (ChatGPT backend via OAuth) - uses Responses API
+    /// `OpenAI` Codex CLI (`ChatGPT` backend via OAuth) - uses Responses API
     OpenAICodex,
-    /// OpenAI Responses API (api.openai.com/v1/responses)
+    /// `OpenAI` Responses API (api.openai.com/v1/responses)
     OpenAIResponses,
-    /// GitHub Copilot - OpenAI completions API with Copilot token exchange and headers
+    /// GitHub Copilot - `OpenAI` completions API with Copilot token exchange and headers
     GithubCopilot,
     /// Google Vertex AI - Google Generative AI via Vertex AI platform (ADC auth)
     GoogleVertex,
+    /// `OpenCode` Zen - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai)
+    OpenCode,
+    /// `OpenCode` Go - OpenAI/Anthropic/Responses-compatible gateway (opencode.ai/zen/go)
+    OpenCodeGo,
+    /// `TypeSafe` System One typed decisions.
+    TypeSafe,
+    /// `ElevenLabs` speech and audio APIs.
+    ElevenLabs,
+    /// Cohere embeddings and reranking APIs.
+    Cohere,
+    /// Voyage embeddings and reranking APIs.
+    Voyage,
+    /// fal queued asynchronous inference.
+    Fal,
+    /// Replicate predictions API.
+    Replicate,
     /// Mock provider for benchmarking - returns canned responses without network calls
     Mock,
 }
@@ -58,7 +74,7 @@ pub enum AuthStyle {
 impl ProviderType {
     /// Parse provider type from string (case-insensitive).
     ///
-    /// Unknown strings fall back to OpenAI for backward compatibility; use
+    /// Unknown strings fall back to `OpenAI` for backward compatibility; use
     /// [`ProviderType::try_from_str`] when the caller wants to detect typos.
     pub fn from_str(s: &str) -> Self {
         Self::try_from_str(s).unwrap_or(Self::OpenAI)
@@ -84,6 +100,14 @@ impl ProviderType {
             "openai-responses" | "responses" => Self::OpenAIResponses,
             "github-copilot" | "copilot" => Self::GithubCopilot,
             "google-vertex" | "vertex" => Self::GoogleVertex,
+            "opencode" | "opencode-zen" => Self::OpenCode,
+            "opencode-go" => Self::OpenCodeGo,
+            "typesafe" | "typesafe-ai" => Self::TypeSafe,
+            "elevenlabs" => Self::ElevenLabs,
+            "cohere" => Self::Cohere,
+            "voyage" | "voyageai" => Self::Voyage,
+            "fal" | "fal-ai" => Self::Fal,
+            "replicate" => Self::Replicate,
             "mock" | "echo" | "benchmark" => Self::Mock,
             _ => return None,
         };
@@ -91,7 +115,7 @@ impl ProviderType {
     }
 
     /// Get provider metadata including defaults.
-    pub fn info(&self) -> ProviderInfo {
+    pub const fn info(&self) -> ProviderInfo {
         match self {
             Self::OpenAI => ProviderInfo {
                 provider_type: *self,
@@ -183,6 +207,54 @@ impl ProviderType {
                 env_key_name: Some("GEMINI_API_KEY"),
                 auth_style: AuthStyle::BearerToken,
             },
+            Self::OpenCode => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://opencode.ai/zen/v1"),
+                env_key_name: Some("OPENCODE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::OpenCodeGo => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://opencode.ai/zen/go/v1"),
+                env_key_name: Some("OPENCODE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::TypeSafe => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.typesafe.ai/v1"),
+                env_key_name: Some("TYPESAFE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::ElevenLabs => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.elevenlabs.io/v1"),
+                env_key_name: Some("ELEVENLABS_API_KEY"),
+                auth_style: AuthStyle::ApiKeyHeader("xi-api-key"),
+            },
+            Self::Cohere => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.cohere.com"),
+                env_key_name: Some("COHERE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::Voyage => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.voyageai.com/v1"),
+                env_key_name: Some("VOYAGE_API_KEY"),
+                auth_style: AuthStyle::BearerToken,
+            },
+            Self::Fal => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://queue.fal.run"),
+                env_key_name: Some("FAL_KEY"),
+                auth_style: AuthStyle::None, // Job gateway applies fal's `Authorization: Key` itself.
+            },
+            Self::Replicate => ProviderInfo {
+                provider_type: *self,
+                default_base_url: Some("https://api.replicate.com/v1"),
+                env_key_name: Some("REPLICATE_API_TOKEN"),
+                auth_style: AuthStyle::BearerToken,
+            },
             Self::Mock => ProviderInfo {
                 provider_type: *self,
                 default_base_url: Some("mock://localhost"), // Special scheme - handled internally
@@ -193,13 +265,13 @@ impl ProviderType {
     }
 
     /// Check if this provider is a mock provider (handled internally without network).
-    pub fn is_mock(&self) -> bool {
+    pub const fn is_mock(&self) -> bool {
         matches!(self, Self::Mock)
     }
 
     /// Check if this provider uses OpenAI-compatible chat completions API.
     #[allow(dead_code)]
-    pub fn is_openai_compatible(&self) -> bool {
+    pub const fn is_openai_compatible(&self) -> bool {
         matches!(
             self,
             Self::OpenAI
@@ -211,12 +283,14 @@ impl ProviderType {
                 | Self::OpenRouter
                 | Self::OpenAICompatible
                 | Self::GithubCopilot
+                | Self::OpenCode
+                | Self::OpenCodeGo
         )
     }
 
     /// Check if this provider requires request transformation.
     #[allow(dead_code)]
-    pub fn needs_transform(&self) -> bool {
+    pub const fn needs_transform(&self) -> bool {
         matches!(
             self,
             Self::Anthropic
@@ -230,7 +304,7 @@ impl ProviderType {
 
     /// Check if this provider supports the /v1/models endpoint natively.
     /// Providers that don't support it will get a synthetic response.
-    pub fn supports_models_endpoint(&self) -> bool {
+    pub const fn supports_models_endpoint(&self) -> bool {
         matches!(
             self,
             Self::OpenAI
@@ -242,6 +316,10 @@ impl ProviderType {
                 | Self::OpenRouter
                 | Self::OpenAICompatible
                 | Self::OpenAIResponses
+                | Self::OpenCode
+                | Self::OpenCodeGo
+                | Self::TypeSafe
+                | Self::ElevenLabs
         )
     }
 
@@ -531,7 +609,7 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
 }
 
 /// Configuration for compatibility settings with OpenAI-compatible APIs.
-/// Some providers have slight differences from the OpenAI API.
+/// Some providers have slight differences from the `OpenAI` API.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct CompatSettings {
@@ -539,7 +617,7 @@ pub struct CompatSettings {
     pub supports_store: Option<bool>,
     /// Whether provider supports `developer` role vs `system` (default: true)
     pub supports_developer_role: Option<bool>,
-    /// Which max tokens field to use: "max_completion_tokens" or "max_tokens"
+    /// Which max tokens field to use: "`max_completion_tokens`" or "`max_tokens`"
     pub max_tokens_field: Option<String>,
     /// Whether provider supports `stream_options: { include_usage: true }` (default: true)
     /// Set to false for providers that reject or ignore this field.
@@ -547,7 +625,7 @@ pub struct CompatSettings {
 }
 
 impl CompatSettings {
-    /// Merge with detected defaults based on base_url.
+    /// Merge with detected defaults based on `base_url`.
     pub fn with_detected_defaults(self, base_url: &str) -> Self {
         let detected = Self::detect_from_url(base_url);
         Self {
@@ -656,6 +734,19 @@ mod tests {
         assert_eq!(
             ProviderType::from_str("openai-responses"),
             ProviderType::OpenAIResponses
+        );
+        assert_eq!(ProviderType::from_str("opencode"), ProviderType::OpenCode);
+        assert_eq!(
+            ProviderType::from_str("opencode-zen"),
+            ProviderType::OpenCode
+        );
+        assert_eq!(
+            ProviderType::from_str("opencode-go"),
+            ProviderType::OpenCodeGo
+        );
+        assert_eq!(
+            ProviderType::from_str("OpenCode-Go"),
+            ProviderType::OpenCodeGo
         );
         assert_eq!(
             ProviderType::from_str("responses"),
@@ -828,6 +919,77 @@ mod tests {
         // Unknown hosts
         assert_eq!(detect_provider_from_host("example.com"), None);
         assert_eq!(detect_provider_from_host("localhost"), None);
+    }
+
+    #[test]
+    fn native_inference_provider_metadata() {
+        for (name, provider, url, env, auth) in [
+            (
+                "typesafe",
+                ProviderType::TypeSafe,
+                "https://api.typesafe.ai/v1",
+                "TYPESAFE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "elevenlabs",
+                ProviderType::ElevenLabs,
+                "https://api.elevenlabs.io/v1",
+                "ELEVENLABS_API_KEY",
+                AuthStyle::ApiKeyHeader("xi-api-key"),
+            ),
+            (
+                "cohere",
+                ProviderType::Cohere,
+                "https://api.cohere.com",
+                "COHERE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "voyage",
+                ProviderType::Voyage,
+                "https://api.voyageai.com/v1",
+                "VOYAGE_API_KEY",
+                AuthStyle::BearerToken,
+            ),
+            (
+                "fal",
+                ProviderType::Fal,
+                "https://queue.fal.run",
+                "FAL_KEY",
+                AuthStyle::None,
+            ),
+            (
+                "replicate",
+                ProviderType::Replicate,
+                "https://api.replicate.com/v1",
+                "REPLICATE_API_TOKEN",
+                AuthStyle::BearerToken,
+            ),
+        ] {
+            assert_eq!(ProviderType::try_from_str(name), Some(provider));
+            let info = provider.info();
+            assert_eq!(info.default_base_url, Some(url));
+            assert_eq!(info.env_key_name, Some(env));
+            assert_eq!(info.auth_style, auth);
+        }
+    }
+
+    #[test]
+    fn test_opencode_provider_info() {
+        let oc = ProviderType::OpenCode.info();
+        assert_eq!(oc.default_base_url, Some("https://opencode.ai/zen/v1"));
+        assert_eq!(oc.env_key_name, Some("OPENCODE_API_KEY"));
+        assert_eq!(oc.auth_style, AuthStyle::BearerToken);
+
+        let ocg = ProviderType::OpenCodeGo.info();
+        assert_eq!(ocg.default_base_url, Some("https://opencode.ai/zen/go/v1"));
+        assert_eq!(ocg.env_key_name, Some("OPENCODE_API_KEY"));
+        assert_eq!(ocg.auth_style, AuthStyle::BearerToken);
+        // OpenAI-compatible: no request transformation, supports /v1/models.
+        assert!(ProviderType::OpenCodeGo.is_openai_compatible());
+        assert!(!ProviderType::OpenCodeGo.needs_transform());
+        assert!(ProviderType::OpenCodeGo.supports_models_endpoint());
     }
 
     #[test]

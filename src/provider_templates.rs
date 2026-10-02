@@ -5,7 +5,7 @@
 //! 2. Auto-generated entries from the models.dev catalog
 //!
 //! The baseline takes precedence — it can override auto-generated fields
-//! for providers that need special handling (e.g., Bedrock with SigV4 auth,
+//! for providers that need special handling (e.g., Bedrock with `SigV4` auth,
 //! GitHub Copilot with device code flow, OAuth providers).
 
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,7 @@ pub struct ProviderTemplate {
     /// Special notes for the user (e.g., "Requires OAuth login via `eavs login`")
     #[serde(default)]
     pub notes: Option<String>,
-    /// Additional fields needed beyond api_key (e.g., aws_region for Bedrock)
+    /// Additional fields needed beyond `api_key` (e.g., `aws_region` for Bedrock)
     #[serde(default)]
     pub extra_fields: Vec<ExtraField>,
 }
@@ -60,14 +60,14 @@ pub struct ProviderTemplate {
 pub struct ExtraField {
     pub name: String,
     pub description: String,
-    /// Suggested env var (e.g., "env:AWS_REGION")
+    /// Suggested env var (e.g., "`env:AWS_REGION`")
     #[serde(default)]
     pub env_hint: Option<String>,
     pub required: bool,
 }
 
 /// How this provider authenticates.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthHint {
     /// Standard API key (Bearer or x-api-key)
@@ -76,7 +76,7 @@ pub enum AuthHint {
     /// OAuth device code flow (e.g., GitHub Copilot)
     #[serde(alias = "oauth")]
     OAuth,
-    /// AWS SigV4 signing
+    /// AWS `SigV4` signing
     AwsSigv4,
     /// Azure api-key header
     AzureApiKey,
@@ -294,8 +294,7 @@ pub fn build_templates(catalog: Option<&ModelCatalog>) -> Vec<ProviderTemplate> 
                 doc_url: entry.doc_url.clone(),
                 model_count: catalog
                     .and_then(|c| c.get_provider(id))
-                    .map(|p| p.models.len())
-                    .unwrap_or(0),
+                    .map_or(0, |p| p.models.len()),
                 source: "baseline".to_string(),
                 notes: entry.notes.clone(),
                 extra_fields: entry.extra_fields.clone(),
@@ -360,7 +359,7 @@ pub fn build_templates(catalog: Option<&ModelCatalog>) -> Vec<ProviderTemplate> 
     result
 }
 
-/// Generate a ProviderConfig JSON blob from a template + user-supplied values.
+/// Generate a `ProviderConfig` JSON blob from a template + user-supplied values.
 pub fn template_to_config(template: &ProviderTemplate, api_key: Option<&str>) -> serde_json::Value {
     let mut config = serde_json::Map::new();
     config.insert("type".to_string(), serde_json::json!(template.type_));

@@ -17,10 +17,10 @@ pub enum OAuthStoreError {
 impl std::fmt::Display for OAuthStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Database(e) => write!(f, "Database error: {}", e),
-            Self::Serialization(e) => write!(f, "Serialization error: {}", e),
-            Self::Io(e) => write!(f, "IO error: {}", e),
-            Self::Keychain(e) => write!(f, "Keychain error: {}", e),
+            Self::Database(e) => write!(f, "Database error: {e}"),
+            Self::Serialization(e) => write!(f, "Serialization error: {e}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::Keychain(e) => write!(f, "Keychain error: {e}"),
         }
     }
 }
@@ -51,7 +51,7 @@ impl OAuthBackend {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Keychain => "keychain",
             Self::Sqlite => "sqlite",
@@ -129,7 +129,7 @@ impl OAuthStore {
     }
 
     /// Which backend is actually in use (for diagnostics / status display).
-    pub fn backend_name(&self) -> &'static str {
+    pub const fn backend_name(&self) -> &'static str {
         self.backend_name
     }
 
@@ -236,7 +236,7 @@ impl SqliteBackend {
     async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), OAuthStoreError> {
         // Initial schema
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS oauth_credentials (
                 user_id TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -246,7 +246,7 @@ impl SqliteBackend {
                 extra_data TEXT,
                 PRIMARY KEY (user_id, provider)
             );
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -273,7 +273,7 @@ impl SqliteBackend {
             // Recreate the table with the new primary key.
             // SQLite doesn't support ALTER TABLE to change PK, so we migrate.
             sqlx::query(
-                r#"
+                r"
                 CREATE TABLE IF NOT EXISTS oauth_credentials_new (
                     user_id TEXT NOT NULL,
                     provider TEXT NOT NULL,
@@ -289,11 +289,29 @@ impl SqliteBackend {
                     FROM oauth_credentials;
                 DROP TABLE oauth_credentials;
                 ALTER TABLE oauth_credentials_new RENAME TO oauth_credentials;
-                "#,
+                ",
             )
             .execute(pool)
             .await
             .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
+        }
+
+        // Migration: persist credential ownership provenance.
+        // ALTER TABLE ADD COLUMN is idempotent; a missing column means legacy
+        // rows that predate provenance, which we treat as Owned.
+        let has_provenance: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('oauth_credentials') WHERE name = 'provenance'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| OAuthStoreError::Database(e.to_string()))?
+            > 0;
+
+        if !has_provenance {
+            sqlx::query("ALTER TABLE oauth_credentials ADD COLUMN provenance TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
         }
 
         Ok(())
@@ -310,16 +328,36 @@ struct OAuthRow {
     refresh_token: String,
     expires_at: i64,
     extra_data: Option<String>,
+    #[sqlx(default)]
+    provenance: Option<String>,
 }
 
 impl OAuthRow {
-    fn into_credentials(self) -> OAuthCredentials {
+    /// Convert a stored row into credentials.
+    ///
+    /// Fail closed on provenance: only a legacy NULL provenance is
+    /// treated as `Owned` for backward compatibility. A *present but
+    /// malformed/unknown* provenance is a data error and yields the error
+    /// variant, never `Owned` — otherwise a corrupt row would silently acquire
+    /// eavs refresh authority over a credential it does not own.
+    fn into_credentials(self) -> Result<OAuthCredentials, OAuthStoreError> {
         let extra_data = self
             .extra_data
             .as_ref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
-        OAuthCredentials {
+        let provenance = match self.provenance.as_deref() {
+            // Legacy row: no provenance column value -> Owned (backward compat).
+            None => crate::oauth::types::CredentialProvenance::Owned,
+            Some(raw) => serde_json::from_str::<crate::oauth::types::CredentialProvenance>(raw)
+                .map_err(|e| {
+                    OAuthStoreError::Serialization(format!(
+                        "Invalid stored credential provenance (refusing to treat as owned): {e}"
+                    ))
+                })?,
+        };
+
+        Ok(OAuthCredentials {
             user_id: self.user_id,
             provider: OAuthProvider::from_str(&self.provider).unwrap_or(OAuthProvider::OpenAICodex),
             account_label: if self.account_label.is_empty() {
@@ -331,7 +369,8 @@ impl OAuthRow {
             refresh_token: self.refresh_token,
             expires_at: self.expires_at,
             extra_data,
-        }
+            provenance,
+        })
     }
 }
 
@@ -348,16 +387,20 @@ impl CredentialBackend for SqliteBackend {
             .transpose()
             .map_err(|e| OAuthStoreError::Serialization(e.to_string()))?;
 
+        let provenance = serde_json::to_string(&credentials.provenance)
+            .map_err(|e| OAuthStoreError::Serialization(e.to_string()))?;
+
         sqlx::query(
-            r#"
-            INSERT INTO oauth_credentials (user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            r"
+            INSERT INTO oauth_credentials (user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data, provenance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, provider, account_label) DO UPDATE SET
                 access_token = excluded.access_token,
                 refresh_token = excluded.refresh_token,
                 expires_at = excluded.expires_at,
-                extra_data = excluded.extra_data
-            "#,
+                extra_data = excluded.extra_data,
+                provenance = excluded.provenance
+            ",
         )
         .bind(&credentials.user_id)
         .bind(credentials.provider.as_str())
@@ -366,6 +409,7 @@ impl CredentialBackend for SqliteBackend {
         .bind(&credentials.refresh_token)
         .bind(credentials.expires_at)
         .bind(extra_data)
+        .bind(provenance)
         .execute(&self.pool)
         .await
         .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
@@ -380,7 +424,7 @@ impl CredentialBackend for SqliteBackend {
         account_label: &str,
     ) -> Result<Option<OAuthCredentials>, OAuthStoreError> {
         let row: Option<OAuthRow> = sqlx::query_as(
-            "SELECT user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data FROM oauth_credentials WHERE user_id = ? AND provider = ? AND account_label = ?",
+            "SELECT user_id, provider, account_label, access_token, refresh_token, expires_at, extra_data, provenance FROM oauth_credentials WHERE user_id = ? AND provider = ? AND account_label = ?",
         )
         .bind(user_id)
         .bind(provider.as_str())
@@ -389,7 +433,7 @@ impl CredentialBackend for SqliteBackend {
         .await
         .map_err(|e| OAuthStoreError::Database(e.to_string()))?;
 
-        Ok(row.map(|r| r.into_credentials()))
+        row.map(OAuthRow::into_credentials).transpose()
     }
 
     async fn delete_credentials(
@@ -450,7 +494,7 @@ impl KeychainBackend {
         // Probe: try to access a dummy entry to check the keychain is reachable.
         // `get_password` returning NoEntry is fine -- it means the keychain works.
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, "__probe__")
-            .map_err(|e| OAuthStoreError::Keychain(format!("Cannot access keychain: {}", e)))?;
+            .map_err(|e| OAuthStoreError::Keychain(format!("Cannot access keychain: {e}")))?;
         match entry.get_password() {
             Ok(_) => {}
             Err(keyring::Error::NoEntry) => {}
@@ -458,8 +502,7 @@ impl KeychainBackend {
                 let msg = e.to_string();
                 if msg.contains("org.freedesktop.DBus.Error") || msg.contains("Secret Service") {
                     return Err(OAuthStoreError::Keychain(format!(
-                        "No secret service (DBus) available: {}",
-                        msg
+                        "No secret service (DBus) available: {msg}"
                     )));
                 }
                 // Other platform failures at probe time -- keychain is present
@@ -488,7 +531,7 @@ impl KeychainBackend {
 
     /// Build the keychain "username" for the per-user provider index.
     fn index_key(user_id: &str) -> String {
-        format!("{}/__index__", user_id)
+        format!("{user_id}/__index__")
     }
 
     /// Read the provider index for a user. Returns an empty vec on missing/corrupt data.
@@ -657,6 +700,7 @@ mod tests {
             refresh_token: "refresh".to_string(),
             expires_at: 123,
             extra_data: Some(serde_json::json!({"scope": "basic"})),
+            provenance: crate::oauth::types::CredentialProvenance::Owned,
         };
 
         store.upsert_credentials(&creds).await.unwrap();
@@ -682,6 +726,7 @@ mod tests {
             refresh_token: "refresh".to_string(),
             expires_at: 999,
             extra_data: None,
+            provenance: crate::oauth::types::CredentialProvenance::Owned,
         };
 
         store.upsert_credentials(&creds).await.unwrap();
@@ -706,10 +751,11 @@ mod tests {
             user_id: user_id.to_string(),
             provider: OAuthProvider::Anthropic,
             account_label: "default".to_string(),
-            access_token: format!("token-{}", user_id),
+            access_token: format!("token-{user_id}"),
             refresh_token: "refresh".to_string(),
             expires_at: 123,
             extra_data: None,
+            provenance: crate::oauth::types::CredentialProvenance::Owned,
         };
 
         store.upsert_credentials(&mk("alice")).await.unwrap();
@@ -767,5 +813,94 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn malformed_stored_provenance_never_grants_refresh_authority() {
+        let row = |provenance| OAuthRow {
+            user_id: "fixture".to_string(),
+            provider: "openai-codex".to_string(),
+            account_label: "default".to_string(),
+            access_token: "synthetic-access".to_string(),
+            refresh_token: "synthetic-refresh".to_string(),
+            expires_at: 0,
+            extra_data: None,
+            provenance,
+        };
+        for invalid in [
+            "",
+            " ",
+            "not-json",
+            "null",
+            "\"future-owner\"",
+            "{\"borrowed\":{}}",
+        ] {
+            assert!(matches!(
+                row(Some(invalid.to_string())).into_credentials(),
+                Err(OAuthStoreError::Serialization(_))
+            ));
+        }
+        assert!(matches!(
+            row(None).into_credentials(),
+            Ok(OAuthCredentials {
+                provenance: crate::oauth::types::CredentialProvenance::Owned,
+                ..
+            })
+        ));
+    }
+
+    /// Ownership provenance must survive the save/reload roundtrip. In
+    /// particular a `Borrowed` credential must NOT be silently downgraded to
+    /// `Owned` on reload, or the proxy would wrongly refresh/overwrite it.
+    #[tokio::test]
+    async fn test_provenance_survives_sqlite_roundtrip() {
+        let store = test_store().await;
+        let owned = OAuthCredentials {
+            user_id: "owner-1".to_string(),
+            provider: OAuthProvider::Anthropic,
+            account_label: "default".to_string(),
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            extra_data: None,
+            provenance: crate::oauth::types::CredentialProvenance::Owned,
+        };
+        let borrowed = OAuthCredentials {
+            user_id: "owner-1".to_string(),
+            provider: OAuthProvider::OpenAICodex,
+            account_label: "default".to_string(),
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            extra_data: None,
+            provenance: crate::oauth::types::CredentialProvenance::Borrowed {
+                owner: "codex".to_string(),
+            },
+        };
+
+        store.upsert_credentials(&owned).await.unwrap();
+        store.upsert_credentials(&borrowed).await.unwrap();
+
+        let loaded_owned = store
+            .get_credentials("owner-1", OAuthProvider::Anthropic)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded_owned.provenance,
+            crate::oauth::types::CredentialProvenance::Owned
+        );
+
+        let loaded_borrowed = store
+            .get_credentials("owner-1", OAuthProvider::OpenAICodex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded_borrowed.provenance,
+            crate::oauth::types::CredentialProvenance::Borrowed {
+                owner: "codex".to_string()
+            }
+        );
     }
 }

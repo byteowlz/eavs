@@ -477,7 +477,7 @@ impl AppState {
 
         let store = KeyStore::new(&db_path)
             .await
-            .map_err(|e| format!("Failed to initialize key store: {}", e))?;
+            .map_err(|e| format!("Failed to initialize key store: {e}"))?;
 
         let store = Arc::new(store);
         self.key_store
@@ -529,7 +529,7 @@ impl AppState {
 
         let store = OAuthStore::new(&db_path, backend)
             .await
-            .map_err(|e| format!("Failed to initialize OAuth store: {}", e))?;
+            .map_err(|e| format!("Failed to initialize OAuth store: {e}"))?;
 
         let store = Arc::new(store);
         self.oauth_store
@@ -576,7 +576,7 @@ impl AppState {
 
         let store = ProviderStore::new(&provider_db_path)
             .await
-            .map_err(|e| format!("Failed to initialize provider store: {}", e))?;
+            .map_err(|e| format!("Failed to initialize provider store: {e}"))?;
 
         self.provider_store
             .set(Arc::new(store))
@@ -632,6 +632,7 @@ mod tests {
             network: Default::default(),
             egress: Default::default(),
             mock_responses: Default::default(),
+            native_pricing: Default::default(),
         }
     }
 

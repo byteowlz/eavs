@@ -1,13 +1,13 @@
-//! OpenAI Responses API transformer.
+//! `OpenAI` `Responses` API transformer.
 //!
-//! Handles the newer OpenAI Responses API format used by:
-//! - OpenAI /v1/responses endpoint
-//! - ChatGPT backend /codex/responses (via OAuth)
+//! Handles the newer `OpenAI` `Responses` API format used by:
+//! - `OpenAI` `/v1/responses` endpoint
+//! - `ChatGPT` backend `/codex/responses` (via OAuth)
 //!
 //! The Responses API has a different structure from chat completions:
 //! - Uses `input` array instead of `messages`
 //! - Uses `instructions` for system prompt
-//! - Has different streaming event types (response.output_item.added, etc.)
+//! - Has different streaming event types (`response.output_item.added`, etc.)
 //! - Supports reasoning/thinking natively
 
 use serde_json::{json, Value};
@@ -15,13 +15,18 @@ use serde_json::{json, Value};
 use super::{RequestTransformer, ResponseTransformer, TransformError};
 use crate::types::{
     ApiType, AssistantMessage, ContentBlock, Context, Message, StopReason, StreamEvent,
-    StreamState, TextContent, ThinkingContent, Tool, ToolCall, Usage,
+    StreamState, TextContent, ThinkingContent, Tool, ToolCall, ToolResultMessage, Usage,
+    UserMessage,
 };
 
-/// Transformer for OpenAI Responses API format.
+/// Transformer for `OpenAI` `Responses` API format.
 #[derive(Debug, Clone, Default)]
 pub struct OpenAIResponsesTransformer {
     /// API version for headers
+    #[expect(
+        dead_code,
+        reason = "Provider API version/credential placement for the request wire format"
+    )]
     pub api_version: String,
 }
 
@@ -32,80 +37,368 @@ impl OpenAIResponsesTransformer {
         }
     }
 
-    /// Check if a model ID indicates a Codex model (uses ChatGPT backend)
+    /// Check if a model ID indicates a `Codex` model (uses `ChatGPT` backend)
+    #[cfg(test)]
     pub fn is_codex_model(model: &str) -> bool {
         let lower = model.to_lowercase();
         lower.contains("codex") || lower.contains("gpt-5")
     }
 }
 
-impl RequestTransformer for OpenAIResponsesTransformer {
-    fn transform_request(&self, context: &Context) -> Result<Value, TransformError> {
-        let mut input: Vec<Value> = Vec::new();
+/// Convert a single Responses-API output item into canonical message content/events.
+fn handle_response_item(
+    item: &Value,
+    idx: usize,
+    message: &mut AssistantMessage,
+    events: &mut Vec<StreamEvent>,
+) {
+    let item_type = item["type"].as_str().unwrap_or("");
 
-        // Convert messages to input items
-        for msg in &context.messages {
-            match msg {
-                Message::User(user_msg) => {
-                    let content_value = user_content_to_responses_format(&user_msg.content);
-                    input.push(json!({
-                        "type": "message",
-                        "role": "user",
-                        "content": content_value
-                    }));
-                }
-                Message::Assistant(assistant_msg) => {
-                    // Process content blocks
-                    for block in &assistant_msg.content {
-                        match block {
-                            ContentBlock::Text(text_content) => {
-                                input.push(json!({
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": [{"type": "output_text", "text": text_content.text}]
-                                }));
-                            }
-                            ContentBlock::Thinking(thinking_content) => {
-                                // Reasoning items
-                                input.push(json!({
-                                    "type": "reasoning",
-                                    "summary": [{"type": "summary_text", "text": thinking_content.thinking}]
-                                }));
-                            }
-                            ContentBlock::ToolCall(tool_call) => {
-                                input.push(json!({
-                                    "type": "function_call",
-                                    "call_id": tool_call.id,
-                                    "name": tool_call.name,
-                                    "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_default()
-                                }));
-                            }
-                            _ => {}
+    match item_type {
+        "message" => {
+            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                for part in content {
+                    let part_type = part["type"].as_str().unwrap_or("");
+                    if part_type == "output_text" {
+                        if let Some(text) = part["text"].as_str() {
+                            message
+                                .content
+                                .push(ContentBlock::Text(TextContent::new(text)));
+                            events.push(StreamEvent::TextEnd {
+                                content_index: idx,
+                                content: text.to_string(),
+                            });
                         }
                     }
                 }
-                Message::Tool(tool_result) => {
-                    let output = tool_result
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            ContentBlock::Text(t) => Some(t.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+            }
+        }
+        "function_call" => {
+            let id = item["call_id"].as_str().unwrap_or("").to_string();
+            let name = item["name"].as_str().unwrap_or("").to_string();
+            let args_str = item["arguments"].as_str().unwrap_or("{}");
+            let arguments: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                    input.push(json!({
-                        "type": "function_call_output",
-                        "call_id": tool_result.tool_call_id,
-                        "output": output
-                    }));
-                }
-                Message::System(_) => {
-                    // System messages are handled via instructions field
+            let tool_call = ToolCall {
+                id,
+                name,
+                arguments,
+            };
+            message
+                .content
+                .push(ContentBlock::ToolCall(tool_call.clone()));
+            events.push(StreamEvent::ToolCallEnd {
+                content_index: idx,
+                tool_call,
+            });
+        }
+        "reasoning" => {
+            if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
+                let text: String = summary
+                    .iter()
+                    .filter_map(|s| s["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !text.is_empty() {
+                    message
+                        .content
+                        .push(ContentBlock::Thinking(ThinkingContent::new(&text)));
+                    events.push(StreamEvent::ThinkingEnd {
+                        content_index: idx,
+                        content: text,
+                        signature: None,
+                    });
                 }
             }
         }
+        _ => {}
+    }
+}
+
+/// Dispatch a Responses-API streaming event to its handler.
+fn handle_responses_event(
+    event_type: &str,
+    parsed: &Value,
+    state: &mut StreamState,
+    content_index: usize,
+    events: &mut Vec<StreamEvent>,
+) -> Result<(), TransformError> {
+    match event_type {
+        "response.output_item.added" => {
+            handle_response_output_item_added(&parsed["item"], state, content_index, events);
+        }
+        "response.reasoning_summary_text.delta"
+        | "response.reasoning.delta"
+        | "response.output_text.delta"
+        | "response.text.delta"
+        | "response.refusal.delta"
+        | "response.function_call_arguments.delta" => {
+            handle_response_content_delta(event_type, parsed, state, events);
+        }
+        "response.output_item.done" => {
+            handle_response_output_item_done(&parsed["item"], state, events);
+        }
+        "response.completed" | "response.done" => {
+            handle_response_completed(parsed, state, events);
+        }
+        "error" => {
+            let message = parsed["message"].as_str().unwrap_or("Unknown error");
+            return Err(TransformError::InvalidValue(message.to_string()));
+        }
+        "response.failed" => {
+            return Err(TransformError::InvalidValue("Response failed".to_string()));
+        }
+        _ => {
+            // Unknown event type, ignore
+        }
+    }
+    Ok(())
+}
+
+fn handle_response_output_item_added(
+    item: &Value,
+    state: &mut StreamState,
+    content_index: usize,
+    events: &mut Vec<StreamEvent>,
+) {
+    let item_type = item["type"].as_str().unwrap_or("");
+    match item_type {
+        "reasoning" => {
+            state.content_blocks.push(crate::types::ContentBlockState {
+                block_type: crate::types::ContentBlockType::Thinking,
+                text: String::new(),
+                tool_id: None,
+                tool_name: None,
+            });
+            events.push(StreamEvent::ThinkingStart { content_index });
+        }
+        "message" => {
+            state.content_blocks.push(crate::types::ContentBlockState {
+                block_type: crate::types::ContentBlockType::Text,
+                text: String::new(),
+                tool_id: None,
+                tool_name: None,
+            });
+            events.push(StreamEvent::TextStart { content_index });
+        }
+        "function_call" => {
+            let id = item["call_id"].as_str().unwrap_or("").to_string();
+            let name = item["name"].as_str().unwrap_or("").to_string();
+            state.content_blocks.push(crate::types::ContentBlockState {
+                block_type: crate::types::ContentBlockType::ToolCall,
+                text: String::new(),
+                tool_id: Some(id.clone()),
+                tool_name: Some(name.clone()),
+            });
+            events.push(StreamEvent::ToolCallStart {
+                content_index,
+                id,
+                name,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn handle_response_content_delta(
+    event_type: &str,
+    parsed: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    match event_type {
+        "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
+            handle_response_delta_for_block(
+                parsed,
+                state,
+                events,
+                crate::types::ContentBlockType::Thinking,
+                "thinking",
+            );
+        }
+        "response.output_text.delta" | "response.text.delta" | "response.refusal.delta" => {
+            handle_response_delta_for_block(
+                parsed,
+                state,
+                events,
+                crate::types::ContentBlockType::Text,
+                "text",
+            );
+        }
+        "response.function_call_arguments.delta" => {
+            handle_response_delta_for_block(
+                parsed,
+                state,
+                events,
+                crate::types::ContentBlockType::ToolCall,
+                "tool",
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Append a textual delta to the most recent content block of the given type.
+fn handle_response_delta_for_block(
+    parsed: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+    block_type: crate::types::ContentBlockType,
+    kind: &str,
+) {
+    if let Some(delta) = parsed["delta"].as_str() {
+        let idx = state
+            .content_blocks
+            .iter()
+            .rposition(|b| b.block_type == block_type)
+            .unwrap_or(0);
+        if let Some(block) = state.content_blocks.get_mut(idx) {
+            block.text.push_str(delta);
+        }
+        match kind {
+            "thinking" => events.push(StreamEvent::ThinkingDelta {
+                content_index: idx,
+                delta: delta.to_string(),
+            }),
+            "tool" => events.push(StreamEvent::ToolCallDelta {
+                content_index: idx,
+                delta: delta.to_string(),
+            }),
+            _ => events.push(StreamEvent::TextDelta {
+                content_index: idx,
+                delta: delta.to_string(),
+            }),
+        }
+    }
+}
+
+fn handle_response_output_item_done(
+    item: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let item_type = item["type"].as_str().unwrap_or("");
+    match item_type {
+        "reasoning" => {
+            let idx = last_block_index(state, crate::types::ContentBlockType::Thinking);
+            let text = state
+                .content_blocks
+                .get(idx)
+                .map(|b| b.text.clone())
+                .unwrap_or_default();
+            state
+                .message
+                .content
+                .push(ContentBlock::Thinking(ThinkingContent::new(&text)));
+            events.push(StreamEvent::ThinkingEnd {
+                content_index: idx,
+                content: text,
+                signature: None,
+            });
+        }
+        "message" => {
+            let idx = last_block_index(state, crate::types::ContentBlockType::Text);
+            let text = state
+                .content_blocks
+                .get(idx)
+                .map(|b| b.text.clone())
+                .unwrap_or_default();
+            state
+                .message
+                .content
+                .push(ContentBlock::Text(TextContent::new(&text)));
+            events.push(StreamEvent::TextEnd {
+                content_index: idx,
+                content: text,
+            });
+        }
+        "function_call" => {
+            let idx = last_block_index(state, crate::types::ContentBlockType::ToolCall);
+            let block = state.content_blocks.get(idx);
+            let id = item["call_id"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| block.and_then(|b| b.tool_id.clone()))
+                .unwrap_or_default();
+            let name = item["name"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| block.and_then(|b| b.tool_name.clone()))
+                .unwrap_or_default();
+            let args_str = item["arguments"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| block.map(|b| b.text.clone()))
+                .unwrap_or_default();
+            let arguments: Value = serde_json::from_str(&args_str).unwrap_or_else(|_| json!({}));
+            let tool_call = ToolCall {
+                id,
+                name,
+                arguments,
+            };
+            state
+                .message
+                .content
+                .push(ContentBlock::ToolCall(tool_call.clone()));
+            events.push(StreamEvent::ToolCallEnd {
+                content_index: idx,
+                tool_call,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Index of the most recently created content block of the given type.
+fn last_block_index(state: &StreamState, block_type: crate::types::ContentBlockType) -> usize {
+    state
+        .content_blocks
+        .iter()
+        .rposition(|b| b.block_type == block_type)
+        .unwrap_or(0)
+}
+
+fn handle_response_completed(
+    parsed: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    if let Some(response) = parsed.get("response") {
+        if let Some(usage) = response.get("usage") {
+            let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+            let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+            let cached_tokens = usage["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32;
+            state.message.usage = Usage {
+                prompt_tokens: input_tokens.saturating_sub(cached_tokens),
+                completion_tokens: output_tokens,
+                total_tokens: input_tokens + output_tokens,
+                cache_read_input_tokens: if cached_tokens > 0 {
+                    Some(cached_tokens)
+                } else {
+                    None
+                },
+                cache_creation_input_tokens: None,
+            };
+        }
+        let status = response["status"].as_str().unwrap_or("completed");
+        state.message.stop_reason = match status {
+            "incomplete" | "cancelled" => StopReason::MaxTokens,
+            "failed" => StopReason::Other,
+            _ => StopReason::EndTurn,
+        };
+    }
+    state.message.api = ApiType::OpenAIResponses;
+    events.push(StreamEvent::Done {
+        reason: state.message.stop_reason.clone(),
+        message: state.message.clone(),
+    });
+}
+
+impl RequestTransformer for OpenAIResponsesTransformer {
+    fn transform_request(&self, context: &Context) -> Result<Value, TransformError> {
+        let input = messages_to_input_items(&context.messages);
 
         let mut body = json!({
             "model": &context.model,
@@ -177,10 +470,11 @@ impl RequestTransformer for OpenAIResponsesTransformer {
         Ok(body)
     }
 
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)> {
         vec![
             ("Content-Type".to_string(), "application/json".to_string()),
-            ("Authorization".to_string(), format!("Bearer {}", api_key)),
+            ("Authorization".to_string(), format!("Bearer {api_key}")),
         ]
     }
 
@@ -218,274 +512,7 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
                 let event_type = parsed["type"].as_str().unwrap_or("");
                 let content_index = state.content_blocks.len();
 
-                match event_type {
-                    "response.output_item.added" => {
-                        let item = &parsed["item"];
-                        let item_type = item["type"].as_str().unwrap_or("");
-
-                        match item_type {
-                            "reasoning" => {
-                                state.content_blocks.push(crate::types::ContentBlockState {
-                                    block_type: crate::types::ContentBlockType::Thinking,
-                                    text: String::new(),
-                                    tool_id: None,
-                                    tool_name: None,
-                                });
-                                events.push(StreamEvent::ThinkingStart { content_index });
-                            }
-                            "message" => {
-                                state.content_blocks.push(crate::types::ContentBlockState {
-                                    block_type: crate::types::ContentBlockType::Text,
-                                    text: String::new(),
-                                    tool_id: None,
-                                    tool_name: None,
-                                });
-                                events.push(StreamEvent::TextStart { content_index });
-                            }
-                            "function_call" => {
-                                let id = item["call_id"].as_str().unwrap_or("").to_string();
-                                let name = item["name"].as_str().unwrap_or("").to_string();
-                                state.content_blocks.push(crate::types::ContentBlockState {
-                                    block_type: crate::types::ContentBlockType::ToolCall,
-                                    text: String::new(),
-                                    tool_id: Some(id.clone()),
-                                    tool_name: Some(name.clone()),
-                                });
-                                events.push(StreamEvent::ToolCallStart {
-                                    content_index,
-                                    id,
-                                    name,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    "response.reasoning_summary_text.delta" | "response.reasoning.delta" => {
-                        if let Some(delta) = parsed["delta"].as_str() {
-                            let idx = state
-                                .content_blocks
-                                .iter()
-                                .rposition(|b| {
-                                    b.block_type == crate::types::ContentBlockType::Thinking
-                                })
-                                .unwrap_or(0);
-                            if let Some(block) = state.content_blocks.get_mut(idx) {
-                                block.text.push_str(delta);
-                            }
-                            events.push(StreamEvent::ThinkingDelta {
-                                content_index: idx,
-                                delta: delta.to_string(),
-                            });
-                        }
-                    }
-                    "response.output_text.delta" | "response.text.delta" => {
-                        if let Some(delta) = parsed["delta"].as_str() {
-                            let idx = state
-                                .content_blocks
-                                .iter()
-                                .rposition(|b| b.block_type == crate::types::ContentBlockType::Text)
-                                .unwrap_or(0);
-                            if let Some(block) = state.content_blocks.get_mut(idx) {
-                                block.text.push_str(delta);
-                            }
-                            events.push(StreamEvent::TextDelta {
-                                content_index: idx,
-                                delta: delta.to_string(),
-                            });
-                        }
-                    }
-                    "response.refusal.delta" => {
-                        if let Some(delta) = parsed["delta"].as_str() {
-                            let idx = state
-                                .content_blocks
-                                .iter()
-                                .rposition(|b| b.block_type == crate::types::ContentBlockType::Text)
-                                .unwrap_or(0);
-                            if let Some(block) = state.content_blocks.get_mut(idx) {
-                                block.text.push_str(delta);
-                            }
-                            events.push(StreamEvent::TextDelta {
-                                content_index: idx,
-                                delta: delta.to_string(),
-                            });
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = parsed["delta"].as_str() {
-                            let idx = state
-                                .content_blocks
-                                .iter()
-                                .rposition(|b| {
-                                    b.block_type == crate::types::ContentBlockType::ToolCall
-                                })
-                                .unwrap_or(0);
-                            if let Some(block) = state.content_blocks.get_mut(idx) {
-                                block.text.push_str(delta);
-                            }
-                            events.push(StreamEvent::ToolCallDelta {
-                                content_index: idx,
-                                delta: delta.to_string(),
-                            });
-                        }
-                    }
-                    "response.output_item.done" => {
-                        let item = &parsed["item"];
-                        let item_type = item["type"].as_str().unwrap_or("");
-
-                        match item_type {
-                            "reasoning" => {
-                                let idx = state
-                                    .content_blocks
-                                    .iter()
-                                    .rposition(|b| {
-                                        b.block_type == crate::types::ContentBlockType::Thinking
-                                    })
-                                    .unwrap_or(0);
-                                let text = state
-                                    .content_blocks
-                                    .get(idx)
-                                    .map(|b| b.text.clone())
-                                    .unwrap_or_default();
-
-                                // Add to message
-                                state
-                                    .message
-                                    .content
-                                    .push(ContentBlock::Thinking(ThinkingContent::new(&text)));
-
-                                events.push(StreamEvent::ThinkingEnd {
-                                    content_index: idx,
-                                    content: text,
-                                    signature: None,
-                                });
-                            }
-                            "message" => {
-                                let idx = state
-                                    .content_blocks
-                                    .iter()
-                                    .rposition(|b| {
-                                        b.block_type == crate::types::ContentBlockType::Text
-                                    })
-                                    .unwrap_or(0);
-                                let text = state
-                                    .content_blocks
-                                    .get(idx)
-                                    .map(|b| b.text.clone())
-                                    .unwrap_or_default();
-
-                                // Add to message
-                                state
-                                    .message
-                                    .content
-                                    .push(ContentBlock::Text(TextContent::new(&text)));
-
-                                events.push(StreamEvent::TextEnd {
-                                    content_index: idx,
-                                    content: text,
-                                });
-                            }
-                            "function_call" => {
-                                let idx = state
-                                    .content_blocks
-                                    .iter()
-                                    .rposition(|b| {
-                                        b.block_type == crate::types::ContentBlockType::ToolCall
-                                    })
-                                    .unwrap_or(0);
-
-                                let block = state.content_blocks.get(idx);
-                                let id = item["call_id"]
-                                    .as_str()
-                                    .map(String::from)
-                                    .or_else(|| block.and_then(|b| b.tool_id.clone()))
-                                    .unwrap_or_default();
-                                let name = item["name"]
-                                    .as_str()
-                                    .map(String::from)
-                                    .or_else(|| block.and_then(|b| b.tool_name.clone()))
-                                    .unwrap_or_default();
-                                let args_str = item["arguments"]
-                                    .as_str()
-                                    .map(String::from)
-                                    .or_else(|| block.map(|b| b.text.clone()))
-                                    .unwrap_or_default();
-                                let arguments: Value =
-                                    serde_json::from_str(&args_str).unwrap_or(json!({}));
-
-                                let tool_call = ToolCall {
-                                    id,
-                                    name,
-                                    arguments,
-                                };
-
-                                // Add to message
-                                state
-                                    .message
-                                    .content
-                                    .push(ContentBlock::ToolCall(tool_call.clone()));
-
-                                events.push(StreamEvent::ToolCallEnd {
-                                    content_index: idx,
-                                    tool_call,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    "response.completed" | "response.done" => {
-                        if let Some(response) = parsed.get("response") {
-                            // Extract usage
-                            if let Some(usage) = response.get("usage") {
-                                let input_tokens =
-                                    usage["input_tokens"].as_u64().unwrap_or(0) as u32;
-                                let output_tokens =
-                                    usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-                                let cached_tokens = usage["input_tokens_details"]["cached_tokens"]
-                                    .as_u64()
-                                    .unwrap_or(0)
-                                    as u32;
-
-                                state.message.usage = Usage {
-                                    prompt_tokens: input_tokens.saturating_sub(cached_tokens),
-                                    completion_tokens: output_tokens,
-                                    total_tokens: input_tokens + output_tokens,
-                                    cache_read_input_tokens: if cached_tokens > 0 {
-                                        Some(cached_tokens)
-                                    } else {
-                                        None
-                                    },
-                                    cache_creation_input_tokens: None,
-                                };
-                            }
-
-                            // Extract stop reason
-                            let status = response["status"].as_str().unwrap_or("completed");
-                            state.message.stop_reason = match status {
-                                "completed" => StopReason::EndTurn,
-                                "incomplete" | "cancelled" => StopReason::MaxTokens,
-                                "failed" => StopReason::Other,
-                                _ => StopReason::EndTurn,
-                            };
-                        }
-
-                        state.message.api = ApiType::OpenAIResponses;
-
-                        events.push(StreamEvent::Done {
-                            reason: state.message.stop_reason.clone(),
-                            message: state.message.clone(),
-                        });
-                    }
-                    "error" => {
-                        let message = parsed["message"].as_str().unwrap_or("Unknown error");
-                        return Err(TransformError::InvalidValue(message.to_string()));
-                    }
-                    "response.failed" => {
-                        return Err(TransformError::InvalidValue("Response failed".to_string()));
-                    }
-                    _ => {
-                        // Unknown event type, ignore
-                    }
-                }
+                handle_responses_event(event_type, &parsed, state, content_index, &mut events)?;
             }
         }
 
@@ -502,67 +529,7 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
         // Parse output items
         if let Some(output) = body.get("output").and_then(|o| o.as_array()) {
             for (idx, item) in output.iter().enumerate() {
-                let item_type = item["type"].as_str().unwrap_or("");
-
-                match item_type {
-                    "message" => {
-                        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                            for part in content {
-                                let part_type = part["type"].as_str().unwrap_or("");
-                                if part_type == "output_text" {
-                                    if let Some(text) = part["text"].as_str() {
-                                        message
-                                            .content
-                                            .push(ContentBlock::Text(TextContent::new(text)));
-                                        events.push(StreamEvent::TextEnd {
-                                            content_index: idx,
-                                            content: text.to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "function_call" => {
-                        let id = item["call_id"].as_str().unwrap_or("").to_string();
-                        let name = item["name"].as_str().unwrap_or("").to_string();
-                        let args_str = item["arguments"].as_str().unwrap_or("{}");
-                        let arguments: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
-
-                        let tool_call = ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        };
-                        message
-                            .content
-                            .push(ContentBlock::ToolCall(tool_call.clone()));
-                        events.push(StreamEvent::ToolCallEnd {
-                            content_index: idx,
-                            tool_call,
-                        });
-                    }
-                    "reasoning" => {
-                        if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
-                            let text: String = summary
-                                .iter()
-                                .filter_map(|s| s["text"].as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n\n");
-                            if !text.is_empty() {
-                                message
-                                    .content
-                                    .push(ContentBlock::Thinking(ThinkingContent::new(&text)));
-                                events.push(StreamEvent::ThinkingEnd {
-                                    content_index: idx,
-                                    content: text,
-                                    signature: None,
-                                });
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                handle_response_item(item, idx, &mut message, &mut events);
             }
         }
 
@@ -590,7 +557,6 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
         // Determine stop reason
         let status = body["status"].as_str().unwrap_or("completed");
         message.stop_reason = match status {
-            "completed" => StopReason::EndTurn,
             "incomplete" | "cancelled" => StopReason::MaxTokens,
             "failed" => StopReason::Other,
             _ => StopReason::EndTurn,
@@ -615,6 +581,79 @@ impl ResponseTransformer for OpenAIResponsesTransformer {
 }
 
 /// Convert user content blocks to Responses API format
+/// Convert canonical messages into Responses-API input items.
+fn messages_to_input_items(messages: &[Message]) -> Vec<Value> {
+    messages.iter().flat_map(message_to_input_items).collect()
+}
+
+/// Convert a single canonical message into its Responses-API input items.
+fn message_to_input_items(msg: &Message) -> Vec<Value> {
+    match msg {
+        Message::User(user) => vec![user_message_to_input(user)],
+        Message::Assistant(assistant) => assistant_message_to_input_items(assistant),
+        Message::Tool(tool_result) => vec![tool_result_to_input(tool_result)],
+        Message::System(_) => Vec::new(),
+    }
+}
+
+fn user_message_to_input(user: &UserMessage) -> Value {
+    let content_value = user_content_to_responses_format(&user.content);
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": content_value
+    })
+}
+
+fn assistant_message_to_input_items(assistant: &AssistantMessage) -> Vec<Value> {
+    let mut items = Vec::new();
+    for block in &assistant.content {
+        match block {
+            ContentBlock::Text(text_content) => {
+                items.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text_content.text}]
+                }));
+            }
+            ContentBlock::Thinking(thinking_content) => {
+                items.push(json!({
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": thinking_content.thinking}]
+                }));
+            }
+            ContentBlock::ToolCall(tool_call) => {
+                items.push(json!({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_default()
+                }));
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+fn tool_result_to_input(tool_result: &ToolResultMessage) -> Value {
+    let output = tool_result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    json!({
+        "type": "function_call_output",
+        "call_id": tool_result.tool_call_id,
+        "output": output
+    })
+}
+
 fn user_content_to_responses_format(content: &[ContentBlock]) -> Value {
     let parts: Vec<Value> = content
         .iter()
@@ -655,22 +694,31 @@ fn tool_to_responses_format(tool: &Tool) -> Value {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_transform_request_basic() {
+    fn test_transform_request_basic() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = OpenAIResponsesTransformer::new();
         let ctx = Context::new("gpt-5.1-codex")
             .with_messages(vec![Message::user("Hello")])
             .with_system("Be helpful".to_string());
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
         assert_eq!(request["model"], "gpt-5.1-codex");
         assert_eq!(request["instructions"], "Be helpful");
         assert!(request["input"].is_array());
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_passthrough_modern_responses_fields() {
+    fn test_passthrough_modern_responses_fields() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = OpenAIResponsesTransformer::new();
         let mut ctx = Context::new("gpt-5.1-codex")
             .with_messages(vec![Message::user("Hello")])
@@ -684,7 +732,7 @@ mod tests {
             "parallel_tool_calls": false
         }));
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
         // reasoning_effort mapped into the Responses reasoning: { effort } shape.
         assert_eq!(request["reasoning"]["effort"], "high");
         assert_eq!(request["include"][0], "reasoning.encrypted_content");
@@ -692,21 +740,28 @@ mod tests {
         assert_eq!(request["parallel_tool_calls"], false);
         // Derived fields still take precedence.
         assert_eq!(request["instructions"], "Be helpful");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_reasoning_object_passed_through_and_max_tokens_clamped() {
+    fn test_reasoning_object_passed_through_and_max_tokens_clamped(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let transformer = OpenAIResponsesTransformer::new();
         let mut ctx = Context::new("gpt-5.1-codex")
             .with_messages(vec![Message::user("Hi")])
             .with_max_tokens(4);
         ctx.original_request = Some(json!({"reasoning": {"effort": "low", "summary": "auto"}}));
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
         assert_eq!(request["reasoning"]["effort"], "low");
         assert_eq!(request["reasoning"]["summary"], "auto");
         // Clamped to the Responses API minimum of 16.
         assert_eq!(request["max_output_tokens"], 16);
+        Ok(())
     }
 
     #[test]
@@ -727,8 +782,12 @@ mod tests {
         assert_eq!(transformer.endpoint_path(&ctx), "/responses");
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_text_delta() {
+    fn test_parse_text_delta() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = OpenAIResponsesTransformer::new();
         let mut state = StreamState::default();
         // First add a text block
@@ -740,31 +799,35 @@ mod tests {
         });
 
         let chunk = r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#;
-        let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
+        let events = transformer.parse_stream_chunk(chunk, &mut state)?;
 
         assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::TextDelta { delta, .. } => assert_eq!(delta, "Hello"),
-            _ => panic!("Expected TextDelta"),
-        }
+        let StreamEvent::TextDelta { delta, .. } = &events[0] else {
+            return Err("Expected TextDelta".into());
+        };
+        assert_eq!(delta, "Hello");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_parse_completed() {
+    fn test_parse_completed() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = OpenAIResponsesTransformer::new();
         let mut state = StreamState::default();
 
         let chunk = r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":20}}}"#;
-        let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
+        let events = transformer.parse_stream_chunk(chunk, &mut state)?;
 
         assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::Done { reason, message } => {
-                assert_eq!(*reason, StopReason::EndTurn);
-                assert_eq!(message.usage.prompt_tokens, 10);
-                assert_eq!(message.usage.completion_tokens, 20);
-            }
-            _ => panic!("Expected Done"),
-        }
+        let StreamEvent::Done { reason, message } = &events[0] else {
+            return Err("Expected Done".into());
+        };
+        assert_eq!(*reason, StopReason::EndTurn);
+        assert_eq!(message.usage.prompt_tokens, 10);
+        assert_eq!(message.usage.completion_tokens, 20);
+        Ok(())
     }
 }

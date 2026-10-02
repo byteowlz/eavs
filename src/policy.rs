@@ -36,7 +36,7 @@ pub enum PolicyRule {
         model: Option<String>,
         to: String,
     },
-    /// Filter tool definitions (OpenAI `tools`) by name.
+    /// Filter tool definitions (`OpenAI` `tools`) by name.
     FilterTools {
         #[serde(default)]
         provider: Option<String>,

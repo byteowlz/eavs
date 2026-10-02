@@ -5,7 +5,7 @@
 //! (which the front end recovered at the redirect point, e.g. via
 //! `SO_ORIGINAL_DST`). For each connection this listener:
 //! 1. parses the PROXY v2 header -> exact original destination IP:port,
-//! 2. peeks the first client bytes for a hostname (TLS ClientHello SNI or HTTP
+//! 2. peeks the first client bytes for a hostname (TLS `ClientHello` SNI or HTTP
 //!    `Host:` header) to drive the domain ACL,
 //! 3. applies [`crate::network_acl::check_host_allowed`] under the configured
 //!    posture (enforce = deny on failure / no hostname; monitor = log only),
@@ -40,7 +40,7 @@ const PROXY_V2_SIG: [u8; 12] = [
 ];
 
 /// Max bytes peeked from the client to find a hostname (covers a TLS
-/// ClientHello with SNI or an HTTP request line + Host header).
+/// `ClientHello` with SNI or an HTTP request line + Host header).
 const PEEK_LIMIT: usize = 8192;
 
 /// Spawn the egress listener and DNS relay if enabled. Returns immediately;
@@ -261,7 +261,7 @@ fn parse_proxy_v2_dst(fam: ProxyFam, addrs: &[u8]) -> Result<SocketAddr, &'stati
 }
 
 /// Best-effort hostname extraction from the first client bytes: TLS SNI for a
-/// ClientHello, otherwise an HTTP `Host:` header. Returns `None` if neither is
+/// `ClientHello`, otherwise an HTTP `Host:` header. Returns `None` if neither is
 /// present (e.g. a non-TLS, non-HTTP protocol).
 fn extract_hostname(buf: &[u8]) -> Option<String> {
     if buf.first() == Some(&0x16) {
@@ -271,7 +271,7 @@ fn extract_hostname(buf: &[u8]) -> Option<String> {
     }
 }
 
-/// Parse the SNI server_name from a TLS ClientHello. Fully bounds-checked;
+/// Parse the SNI `server_name` from a TLS `ClientHello`. Fully bounds-checked;
 /// returns `None` on any malformed/short input rather than panicking.
 fn extract_sni(buf: &[u8]) -> Option<String> {
     // TLS record header: type(1)=0x16, version(2), length(2).
@@ -314,7 +314,9 @@ fn extract_sni(buf: &[u8]) -> Option<String> {
             }
             let name_len = u16::from_be_bytes([ext[3], ext[4]]) as usize;
             let name = ext.get(5..5 + name_len)?;
-            return std::str::from_utf8(name).ok().map(|s| s.to_string());
+            return std::str::from_utf8(name)
+                .ok()
+                .map(std::string::ToString::to_string);
         }
         p += ext_len;
     }
@@ -342,7 +344,7 @@ fn extract_http_host(buf: &[u8]) -> Option<String> {
             .map(|(_, v)| v.trim())
         {
             // Strip a :port suffix for the domain ACL.
-            let host = rest.rsplit_once(':').map(|(h, _)| h).unwrap_or(rest);
+            let host = rest.rsplit_once(':').map_or(rest, |(h, _)| h);
             return Some(host.to_string());
         }
     }
@@ -488,7 +490,7 @@ mod tests {
         assert!(extract_hostname(b"\x00\x01\x02 random binary").is_none());
     }
 
-    /// Minimal well-formed TLS ClientHello carrying `host` as SNI.
+    /// Minimal well-formed TLS `ClientHello` carrying `host` as SNI.
     fn tls_client_hello(host: &str) -> Vec<u8> {
         let host = host.as_bytes();
         let mut ch = vec![0x01]; // client_hello
@@ -526,7 +528,7 @@ mod tests {
     }
 
     /// Drive a full connection through `handle()`: client -> [PROXY hdr + SNI
-    /// ClientHello] -> handle -> fake upstream (the PROXY dst). Returns whatever
+    /// `ClientHello`] -> handle -> fake upstream (the PROXY dst). Returns whatever
     /// the client reads back (the upstream echoes), or empty if dropped.
     async fn run_handle(allow: &[&str], enforce: bool) -> Vec<u8> {
         use std::net::Ipv4Addr;
@@ -553,7 +555,7 @@ mod tests {
         // of these tests under the host->destination binding and private-IP
         // blocking without invoking real DNS for the fake hostname.
         let network = NetworkConfig {
-            allow_domains: allow.iter().map(|s| s.to_string()).collect(),
+            allow_domains: allow.iter().map(std::string::ToString::to_string).collect(),
             trusted_private_endpoints: vec![crate::config::TrustedPrivateEndpoint {
                 host: "allowed.test".into(),
                 address: up_addr.ip(),

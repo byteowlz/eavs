@@ -116,6 +116,11 @@ pub struct AppConfig {
     /// Mock provider predefined responses
     #[serde(default)]
     pub mock_responses: MockResponsesConfig,
+    /// Ignored legacy pricing configuration, retained for compatibility only.
+    /// Does not enable budgeted native jobs or establish actual billing.
+    /// Native jobs with capped keys remain disabled (fail-closed).
+    #[serde(default)]
+    pub native_pricing: NativePricingConfig,
 }
 
 impl AppConfig {
@@ -136,6 +141,7 @@ impl AppConfig {
             network: NetworkConfig::default(),
             egress: EgressConfig::default(),
             mock_responses: MockResponsesConfig::default(),
+            native_pricing: NativePricingConfig::default(),
         }
     }
 }
@@ -182,7 +188,7 @@ pub struct TrustedPrivateEndpoint {
     pub port: u16,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -256,7 +262,7 @@ impl Default for ServerConfig {
 /// Redact sensitive information from URLs and strings.
 ///
 /// Redacts:
-/// - API keys in query parameters (api_key=xxx, key=xxx)
+/// - API keys in query parameters (`api_key=xxx`, key=xxx)
 /// - Bearer tokens (keeps prefix for debugging)
 /// - Common API key patterns (sk-, eavs-, etc.)
 pub fn redact_sensitive(input: &str) -> String {
@@ -283,7 +289,7 @@ fn redact_query_param(input: &str, param_name: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut remaining = input;
 
-    while let Some(idx) = remaining.find(&format!("{}=", param_name)) {
+    while let Some(idx) = remaining.find(&format!("{param_name}=")) {
         // Check it's actually a parameter (preceded by ? or &)
         let prefix_ok = idx == 0 || {
             let prev_char = remaining.chars().nth(idx.saturating_sub(1));
@@ -291,13 +297,13 @@ fn redact_query_param(input: &str, param_name: &str) -> String {
         };
 
         if !prefix_ok {
-            result.push_str(&remaining[..idx + param_name.len() + 1]);
+            result.push_str(&remaining[..=(idx + param_name.len())]);
             remaining = &remaining[idx + param_name.len() + 1..];
             continue;
         }
 
         // Copy up to and including the =
-        result.push_str(&remaining[..idx + param_name.len() + 1]);
+        result.push_str(&remaining[..=(idx + param_name.len())]);
         result.push_str("[REDACTED]");
         remaining = &remaining[idx + param_name.len() + 1..];
 
@@ -393,7 +399,7 @@ pub struct ProviderConfig {
     /// Provider type: openai, anthropic, google, azure, mistral, groq, cerebras, xai, openrouter, ollama, etc.
     #[serde(rename = "type", default)]
     pub type_: String,
-    /// API key - supports "env:VAR_NAME" syntax or direct value
+    /// API key - supports "`env:VAR_NAME`" syntax or direct value
     #[serde(default)]
     pub api_key: String,
     /// Base URL - defaults based on provider type if not specified
@@ -419,7 +425,7 @@ pub struct ProviderConfig {
     /// AWS session token (Bedrock only, optional). Supports `env:VAR_NAME` syntax.
     #[serde(default)]
     pub aws_session_token: String,
-    /// AWS service name for SigV4 (Bedrock only). Defaults to `bedrock`.
+    /// AWS service name for `SigV4` (Bedrock only). Defaults to `bedrock`.
     #[serde(default)]
     pub aws_service: String,
     /// Azure deployment name (Azure only). If not set, uses model name as deployment.
@@ -464,7 +470,7 @@ pub struct ModelShortlistEntry {
     /// Maximum output tokens
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
-    /// Cost per million tokens: input, output, cache_read
+    /// Cost per million tokens: input, output, `cache_read`
     #[serde(default)]
     pub cost: ModelCost,
     /// Compatibility flags for Pi (e.g., supportsDeveloperRole).
@@ -477,12 +483,30 @@ fn default_input_modalities() -> Vec<String> {
     vec!["text".to_string()]
 }
 
-fn default_context_window() -> u64 {
+const fn default_context_window() -> u64 {
     128_000
 }
 
-fn default_max_tokens() -> u64 {
+const fn default_max_tokens() -> u64 {
     16_384
+}
+
+/// Ignored legacy native pricing configuration, retained for compatibility only.
+/// These operator-supplied values are not authoritative actual billing and do
+/// not enable budgeted jobs. Native jobs with capped keys fail closed.
+/// The legacy syntax below still parses but has no billing effect.
+///
+/// ```toml
+/// [native_pricing.jobs]
+/// 'fal-ai/flux/schnell' = 0.003
+/// 'replicate/example/model' = 0.01
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct NativePricingConfig {
+    /// Ignored legacy per-model job prices, retained only to parse old configs.
+    /// Not actual billing evidence; setting these never enables capped jobs.
+    #[serde(default)]
+    pub jobs: HashMap<String, f64>,
 }
 
 /// Cost per million tokens.
@@ -534,12 +558,12 @@ impl ProviderConfig {
             let provider = ProviderType::from_str(&self.type_);
             if provider == ProviderType::Bedrock {
                 if let Some(region) = self.resolved_aws_region() {
-                    return format!("https://bedrock-runtime.{}.amazonaws.com", region);
+                    return format!("https://bedrock-runtime.{region}.amazonaws.com");
                 }
             }
             if provider == ProviderType::GoogleVertex {
                 if let Some(location) = self.resolved_gcp_location() {
-                    return format!("https://{}-aiplatform.googleapis.com", location);
+                    return format!("https://{location}-aiplatform.googleapis.com");
                 }
             }
             provider
@@ -666,10 +690,10 @@ impl Default for LoggingConfig {
 impl LoggingConfig {
     /// Get effective default backend (handles legacy "sink" field).
     pub fn effective_default(&self) -> &str {
-        if !self.sink.is_empty() {
-            &self.sink
-        } else {
+        if self.sink.is_empty() {
             &self.default
+        } else {
+            &self.sink
         }
     }
 }
@@ -731,11 +755,11 @@ fn default_format() -> String {
     "json".to_string()
 }
 
-fn default_batch_size() -> usize {
+const fn default_batch_size() -> usize {
     100
 }
 
-fn default_flush_interval() -> u64 {
+const fn default_flush_interval() -> u64 {
     5
 }
 
@@ -822,7 +846,7 @@ pub struct TransformPluginConfig {
     pub timeout_ms: u64,
 }
 
-fn default_transform_timeout() -> u64 {
+const fn default_transform_timeout() -> u64 {
     5000
 }
 
@@ -874,7 +898,7 @@ pub struct KeysConfig {
     pub default_rpm_limit: Option<u32>,
     /// Default budget for new keys (USD, None = unlimited)
     pub default_budget_usd: Option<f64>,
-    /// Update pricing from LiteLLM on startup
+    /// Update pricing from `LiteLLM` on startup
     pub update_pricing_on_startup: bool,
     /// Path to word lists TOML file for human-readable key IDs.
     /// If not specified, downloads from eavs GitHub repo to XDG data directory.
@@ -931,18 +955,18 @@ impl Default for KeysConfig {
 /// a user message with `##<name>` to the mock provider.
 ///
 /// Example config:
-///   [mock_responses.success]
+///   [`mock_responses.success`]
 ///   content = "All tests passed"
 ///
-///   [mock_responses.error]
+///   [`mock_responses.error`]
 ///   type = "error"
-///   code = "rate_limit_exceeded"
+///   code = "`rate_limit_exceeded`"
 ///   message = "Too many requests"
 ///   status = 429
 ///
-///   [mock_responses.tool1]
-///   type = "tool_call"
-///   name = "get_weather"
+///   [`mock_responses.tool1`]
+///   type = "`tool_call`"
+///   name = "`get_weather`"
 ///   arguments = '{"location": "NYC"}'
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
@@ -958,7 +982,7 @@ pub struct MockResponsesConfig {
 pub struct MockResponse {
     /// Response content (for normal text responses)
     pub content: String,
-    /// Response type: "text", "error", "tool_call"
+    /// Response type: "text", "error", "`tool_call`"
     #[serde(rename = "type")]
     pub response_type: String,
     /// Error code (for error responses)
@@ -967,16 +991,16 @@ pub struct MockResponse {
     pub message: String,
     /// HTTP status code (for error responses)
     pub status: u16,
-    /// Tool function name (for tool_call responses)
+    /// Tool function name (for `tool_call` responses)
     pub name: String,
-    /// Tool arguments JSON string (for tool_call responses)
+    /// Tool arguments JSON string (for `tool_call` responses)
     pub arguments: String,
 }
 
 /// Configuration for transparent traffic capture via mitmproxy.
 ///
 /// When enabled, Eaves will automatically start mitmproxy with the
-/// eavs_capture.py addon to intercept LLM API traffic.
+/// `eavs_capture.py` addon to intercept LLM API traffic.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct CaptureConfig {
@@ -991,7 +1015,7 @@ pub struct CaptureConfig {
     pub verbose: bool,
     /// Only capture API traffic (skip desktop app domains like chat.openai.com)
     pub api_only: bool,
-    /// Path to the eavs_capture.py addon script (default: bundled with eavs)
+    /// Path to the `eavs_capture.py` addon script (default: bundled with eavs)
     pub addon_path: Option<String>,
     /// Additional mitmproxy arguments
     pub extra_args: Vec<String>,
@@ -1067,7 +1091,7 @@ impl CaptureConfig {
 
         // Set Eaves port for the addon
         args.push("--set".to_string());
-        args.push(format!("eavs_port={}", eavs_port));
+        args.push(format!("eavs_port={eavs_port}"));
 
         // Verbose mode
         if self.verbose {
@@ -1190,7 +1214,14 @@ impl AppConfig {
     fn finalize_config(
         builder: config::ConfigBuilder<config::builder::DefaultState>,
     ) -> Result<Self, ConfigError> {
-        let mut config: AppConfig = builder.build()?.try_deserialize()?;
+        let mut config: Self = builder.build()?.try_deserialize()?;
+
+        if !config.native_pricing.jobs.is_empty() {
+            tracing::warn!(
+                "native_pricing.jobs is an ignored legacy setting; it does not establish \
+                 actual billing or enable budgeted native jobs. Capped native jobs remain disabled."
+            );
+        }
 
         // Merge legacy "upstream" into "providers" for backward compatibility
         if config.providers.is_empty() && !config.upstream.is_empty() {
@@ -1305,7 +1336,7 @@ impl AppConfig {
             let generated_token = format!("eavs_{}", hex::encode(token_bytes));
             let contents = include_str!("../config/config.example.toml").replace(
                 "auth_token = \"env:EAVS_AUTH_TOKEN\"",
-                &format!("auth_token = \"{}\"", generated_token),
+                &format!("auth_token = \"{generated_token}\""),
             );
 
             let mut options = std::fs::OpenOptions::new();
@@ -1406,7 +1437,7 @@ pub const KEYCHAIN_SERVICE: &str = "eavs";
 ///
 /// Keychain uses the OS-native credential store:
 /// - macOS: Keychain
-/// - Linux: D-Bus Secret Service (gnome-keyring, kwallet, KeePassXC)
+/// - Linux: D-Bus Secret Service (gnome-keyring, kwallet, `KeePassXC`)
 /// - Windows: Credential Manager
 pub fn get_api_key(config_key: &str) -> Option<String> {
     if config_key.is_empty() {
@@ -1481,7 +1512,7 @@ pub fn delete_keychain_secret(account: &str) -> Result<bool, String> {
 }
 
 /// Help text shown when the system keychain is not accessible.
-fn keychain_help_text() -> &'static str {
+const fn keychain_help_text() -> &'static str {
     if cfg!(target_os = "linux") {
         "The system secret service (D-Bus Secret Service API) is not available.\n\
          This typically means no keyring daemon is running or unlocked.\n\n\
@@ -1509,6 +1540,19 @@ fn keychain_help_text() -> &'static str {
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn config_schema_examples_deserialize_without_side_effects() {
+        // Deserialize only: never load config, resolve secrets, or start plugins/providers.
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../config/config.schema.json")).unwrap();
+        let examples = schema["examples"].as_array().unwrap();
+        assert!(examples.len() >= 2);
+        for example in examples {
+            serde_json::from_value::<AppConfig>(example.clone()).unwrap();
+        }
+        toml::from_str::<AppConfig>(include_str!("../config/config.example.toml")).unwrap();
+    }
 
     #[test]
     fn delegated_fetch_config_defaults_to_deny_and_parses_allowlist() {

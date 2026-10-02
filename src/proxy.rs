@@ -2,7 +2,7 @@ use crate::aws_sigv4::{sign_request_headers, AwsCredentials};
 use crate::keys::{is_virtual_key, ValidatedKey};
 use crate::oauth::{
     anthropic as oauth_anthropic, openai_codex as oauth_openai, OAuthCredentials,
-    OAuthProvider as OAuthProviderKind,
+    OAuthProvider as OAuthProviderKind, OAuthResolveError,
 };
 use crate::provider::{
     detect_provider_from_host, detect_provider_from_model, AuthStyle, ProviderType,
@@ -34,6 +34,71 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use uuid::Uuid;
+
+/// Native inference operations do not use the chat-completions schema.
+/// Keep this an explicit allowlist: provider credentials must not become a
+/// general-purpose proxy to account, billing, or administrative endpoints.
+fn native_inference_path(provider: ProviderType, path: &str) -> bool {
+    let openai_media = path == "/v1/embeddings"
+        || path == "/v1/images/generations"
+        || path == "/v1/images/edits"
+        || path == "/v1/images/variations"
+        || path == "/v1/videos"
+        || path.starts_with("/v1/videos/");
+    match provider {
+        ProviderType::OpenAI | ProviderType::OpenAIResponses | ProviderType::OpenAICompatible => {
+            openai_media
+        }
+        ProviderType::TypeSafe => path == "/v1/systemone",
+        ProviderType::ElevenLabs => {
+            path.starts_with("/v1/text-to-speech/")
+                || path == "/v1/speech-to-text"
+                || path.starts_with("/v1/speech-to-text/")
+        }
+        ProviderType::Cohere => matches!(
+            path,
+            "/v1/eavs/rerank" | "/v2/rerank" | "/v2/embed" | "/v1/embed"
+        ),
+        ProviderType::Voyage => matches!(path, "/v1/eavs/rerank" | "/v1/rerank" | "/v1/embeddings"),
+        _ => false,
+    }
+}
+
+fn has_remote_media_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            ((key == "url" || key.ends_with("_url"))
+                && value
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("http://") || s.starts_with("https://")))
+                || has_remote_media_reference(value)
+        }),
+        Value::Array(values) => values.iter().any(has_remote_media_reference),
+        _ => false,
+    }
+}
+
+fn native_inference_method(path: &str, method: &http::Method) -> bool {
+    if path.starts_with("/v1/videos/") {
+        return *method == http::Method::GET;
+    }
+    *method == http::Method::POST
+}
+
+fn is_inference_path(path: &str) -> bool {
+    path == "/v1/systemone"
+        || path == "/v1/eavs/rerank"
+        || path == "/v1/embeddings"
+        || path.starts_with("/v1/images/")
+        || path == "/v1/videos"
+        || path.starts_with("/v1/videos/")
+        || matches!(
+            path,
+            "/v1/rerank" | "/v2/rerank" | "/v1/embed" | "/v2/embed"
+        )
+        || path.starts_with("/v1/text-to-speech/")
+        || path.starts_with("/v1/speech-to-text")
+}
 
 /// Error response for proxy errors.
 #[derive(Serialize)]
@@ -82,29 +147,100 @@ fn sanitize_delegated_fetch_body(
     }
 }
 
+// Operator rewrites do not grant tenant delegated-fetch permission.
+fn apply_policy_and_sanitize(
+    body: &mut Value,
+    policy: &crate::policy::PolicyConfig,
+    provider: &str,
+    path: &str,
+    delegated_fetch: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+    correlation_id: &str,
+) -> Result<(), crate::policy::PolicyViolation> {
+    policy.apply(provider, path, body)?;
+    sanitize_delegated_fetch_body(body, delegated_fetch, analysis_tx, correlation_id);
+    Ok(())
+}
+
+fn sanitize_codex_ws_message(
+    message: AxumWsMessage,
+    policy: &crate::policy::PolicyConfig,
+    provider: &str,
+    permissions: Option<&crate::keys::KeyPermissions>,
+    delegated_fetch: &crate::delegated_fetch::DelegatedFetchPolicy,
+    analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
+) -> Option<TungsteniteMessage> {
+    let payload = match &message {
+        AxumWsMessage::Text(text) => text.as_bytes(),
+        AxumWsMessage::Binary(bytes) => bytes.as_slice(),
+        _ => return axum_to_tungstenite(message),
+    };
+    let mut body = parse_and_sanitize_ws_json(payload, delegated_fetch, analysis_tx)?;
+    if body.get("type").and_then(Value::as_str) == Some("response.create") {
+        if !codex_frame_model_allowed(&body, permissions) {
+            tracing::warn!("Codex WS frame rejected by model scope");
+            return None;
+        }
+        if let Err(error) = apply_policy_and_sanitize(
+            &mut body,
+            policy,
+            provider,
+            "/codex/responses",
+            delegated_fetch,
+            analysis_tx,
+            &Uuid::new_v4().to_string(),
+        ) {
+            tracing::warn!("Policy violation on Codex WS: {}", error.message);
+            return None;
+        }
+        if !codex_frame_model_allowed(&body, permissions) {
+            tracing::warn!("Codex WS policy rewrite rejected by model scope");
+            return None;
+        }
+    }
+    match message {
+        AxumWsMessage::Text(_) => Some(TungsteniteMessage::Text(body.to_string())),
+        _ => serde_json::to_vec(&body)
+            .ok()
+            .map(TungsteniteMessage::Binary),
+    }
+}
+
+fn codex_frame_model_allowed(
+    body: &Value,
+    permissions: Option<&crate::keys::KeyPermissions>,
+) -> bool {
+    let Some(permissions) = permissions else {
+        return true;
+    };
+    // With model restrictions, never inherit an unspecified upstream model.
+    // The connection's synthetic `codex-ws` label is not a model authorization.
+    let Some(model) = body.get("model").and_then(Value::as_str) else {
+        return permissions.allowed_models.is_none();
+    };
+    permissions.is_model_allowed(model)
+}
+
 fn parse_and_sanitize_ws_json(
     payload: &[u8],
     policy: &crate::delegated_fetch::DelegatedFetchPolicy,
     analysis_tx: &tokio::sync::broadcast::Sender<AnalysisEvent>,
 ) -> Option<Value> {
     let correlation_id = Uuid::new_v4().to_string();
-    match serde_json::from_slice::<Value>(payload) {
-        Ok(mut body) => {
-            sanitize_delegated_fetch_body(&mut body, policy, analysis_tx, &correlation_id);
-            Some(body)
-        }
-        Err(_) => {
-            emit_delegated_fetch_audit(
-                crate::delegated_fetch::StrippedItem {
-                    field_path: "/".to_string(),
-                    capability: "invalid_json_frame_rejected".to_string(),
-                    target_host: None,
-                },
-                analysis_tx,
-                &correlation_id,
-            );
-            None
-        }
+    if let Ok(mut body) = serde_json::from_slice::<Value>(payload) {
+        sanitize_delegated_fetch_body(&mut body, policy, analysis_tx, &correlation_id);
+        Some(body)
+    } else {
+        emit_delegated_fetch_audit(
+            crate::delegated_fetch::StrippedItem {
+                field_path: "/".to_string(),
+                capability: "invalid_json_frame_rejected".to_string(),
+                target_host: None,
+            },
+            analysis_tx,
+            &correlation_id,
+        );
+        None
     }
 }
 
@@ -125,7 +261,7 @@ pub fn conversation_namespace(conversation_id: &str, key_hash: Option<&str>) -> 
 
 /// Extract the model a Realtime WebSocket client actually requests.
 ///
-/// The OpenAI Realtime protocol carries the model in the connection query
+/// The `OpenAI` Realtime protocol carries the model in the connection query
 /// string (`?model=...`). Validating against this actual model (rather than a
 /// fixed sentinel) is what makes virtual-key model scope apply to realtime.
 pub fn extract_realtime_model(uri: &http::Uri) -> String {
@@ -209,15 +345,14 @@ async fn proxy_handler_inner(
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     // Extract conversation ID and provider selection from headers
     let conversation_id = req
         .headers()
         .get("X-Conversation-ID")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "default".to_string());
+        .map_or_else(|| "default".to_string(), std::string::ToString::to_string);
 
     // Provider selection priority (pre-body):
     // 1. Path parameter (/{provider}/v1/...)
@@ -228,13 +363,13 @@ async fn proxy_handler_inner(
         .headers()
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let original_host = req
         .headers()
         .get("X-Original-Host")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     // Initial provider from path/header/host (model-based comes later)
     let pre_body_provider = path_provider
@@ -251,8 +386,7 @@ async fn proxy_handler_inner(
         .headers
         .get("anthropic-beta")
         .and_then(|h| h.to_str().ok())
-        .map(|v| v.split(',').any(|p| p.trim() == "claude-code-20250219"))
-        .unwrap_or(false);
+        .is_some_and(|v| v.split(',').any(|p| p.trim() == "claude-code-20250219"));
 
     // Use configurable max body size to prevent DoS attacks
     let max_body_size = if state.config.server.max_body_size > 0 {
@@ -270,10 +404,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(ProxyError::new(
-                        format!(
-                            "Request body too large. Maximum size: {} bytes",
-                            max_body_size
-                        ),
+                        format!("Request body too large. Maximum size: {max_body_size} bytes"),
                         "payload_too_large",
                     )),
                 )
@@ -296,8 +427,7 @@ async fn proxy_handler_inner(
         .headers
         .get(http::header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().eq_ignore_ascii_case("zstd"))
-        .unwrap_or(false)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"))
     {
         match zstd::stream::decode_all(bytes.as_ref()) {
             Ok(decoded) => Bytes::from(decoded),
@@ -305,7 +435,7 @@ async fn proxy_handler_inner(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ProxyError::new(
-                        format!("Failed to decompress zstd request body: {}", e),
+                        format!("Failed to decompress zstd request body: {e}"),
                         "invalid_request",
                     )),
                 )
@@ -316,15 +446,16 @@ async fn proxy_handler_inner(
         bytes
     };
 
-    let mut json_body: Value = if !bytes.is_empty() {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    } else {
+    let mut json_body: Value = if bytes.is_empty() {
         Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
 
     // Extract model from request for validation
     let model = json_body
         .get("model")
+        .or_else(|| json_body.get("model_id"))
         .and_then(|m| m.as_str())
         .unwrap_or("unknown")
         .to_string();
@@ -402,8 +533,7 @@ async fn proxy_handler_inner(
                 StatusCode::BAD_REQUEST,
                 Json(ProxyError::new(
                     format!(
-                        "Unknown provider '{}'. Available providers: {:?}",
-                        provider_name_requested, available
+                        "Unknown provider '{provider_name_requested}'. Available providers: {available:?}"
                     ),
                     "invalid_provider",
                 )),
@@ -412,6 +542,134 @@ async fn proxy_handler_inner(
         })?;
 
     let provider_config = provider_lookup.config;
+    if matches!(
+        provider_config.provider_type(),
+        ProviderType::Fal | ProviderType::Replicate
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Use the tenant-bound /{provider}/v1/eavs/jobs API for asynchronous jobs",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
+    let api_path = if let Some(ref provider) = path_provider {
+        parts
+            .uri
+            .path()
+            .strip_prefix(&format!("/{provider}"))
+            .unwrap_or(parts.uri.path())
+    } else {
+        parts.uri.path()
+    };
+    // An allowlisted prefix must never be escapable through URL normalization
+    // or a backend decoding encoded separators/dot segments.
+    if api_path.contains('%')
+        || api_path.contains('\\')
+        || api_path.split('/').any(|s| s == "." || s == "..")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Encoded or traversal path segments are not allowed",
+                "invalid_path",
+            )),
+        )
+            .into_response());
+    }
+    let is_native_inference = native_inference_path(provider_config.provider_type(), api_path);
+    if (is_inference_path(api_path) && !is_native_inference)
+        || (matches!(
+            provider_config.provider_type(),
+            ProviderType::TypeSafe
+                | ProviderType::ElevenLabs
+                | ProviderType::Cohere
+                | ProviderType::Voyage
+        ) && !is_native_inference
+            && !(api_path == "/v1/models"
+                && provider_config.provider_type().supports_models_endpoint()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "This provider does not support the requested native inference API shape",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
+    if is_native_inference && !native_inference_method(api_path, &parts.method) {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(ProxyError::new(
+                "Method not supported for this inference endpoint",
+                "unsupported_method",
+            )),
+        )
+            .into_response());
+    }
+    let is_opaque_inference = is_native_inference
+        && !bytes.is_empty()
+        && !parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|s| s.starts_with("application/json"));
+    if is_native_inference && !is_opaque_inference && !bytes.is_empty() && json_body.is_null() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Invalid JSON inference request",
+                "invalid_request",
+            )),
+        )
+            .into_response());
+    }
+    if is_opaque_inference {
+        let allowed_upload = api_path == "/v1/images/edits"
+            || api_path == "/v1/images/variations"
+            || api_path.starts_with("/v1/speech-to-text")
+            || api_path.starts_with("/v1/text-to-speech/");
+        if !allowed_upload
+            || !parts
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(|s| {
+                    s.starts_with("multipart/form-data;")
+                        || s.starts_with("audio/")
+                        || s == "application/octet-stream"
+                })
+        {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ProxyError::new(
+                    "Unsupported native inference upload content type",
+                    "unsupported_media_type",
+                )),
+            )
+                .into_response());
+        }
+        if state.config.policy.enabled
+            && state
+                .config
+                .policy
+                .rules
+                .iter()
+                .any(|rule| !matches!(rule, crate::policy::PolicyRule::Deny { .. }))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProxyError::new(
+                    "Body-mutating policy rules cannot be applied to binary uploads",
+                    "unsupported_policy",
+                )),
+            )
+                .into_response());
+        }
+    }
     let resolved_provider = provider_lookup.resolved_name.clone();
     let provider_name = resolved_provider.clone();
 
@@ -441,8 +699,7 @@ async fn proxy_handler_inner(
                 // Estimate tokens for rate limiting
                 let estimated_tokens = state
                     .get_cost_calculator()
-                    .map(|calc| calc.estimate_request_tokens(&json_body, &model))
-                    .unwrap_or(0);
+                    .map_or(0, |calc| calc.estimate_request_tokens(&json_body, &model));
 
                 match validator
                     .validate(key, &model, &provider_name, Some(estimated_tokens))
@@ -506,6 +763,40 @@ async fn proxy_handler_inner(
         None
     };
 
+    // The OpenAI video job ID is a bearer-like handle at the upstream. With a
+    // shared provider credential, virtual tenants must not access each other's
+    // jobs by guessing/leaking an ID. Reject the whole lifecycle rather than
+    // allowing submission of jobs that this key cannot retrieve safely.
+    if (api_path == "/v1/videos" || api_path.starts_with("/v1/videos/")) && validated_key.is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Native video jobs are not tenant-bound; virtual keys cannot use this route",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
+    // Native providers use incompatible or non-token billing units. Until cost
+    // adapters exist, a virtual key's budget/TPM must not silently be bypassed.
+    // Canonical rerank is not an exception: reported units are not a verified
+    // pricing contract and durable accounting is not implemented (eavs-avm8).
+    if is_native_inference
+        && validated_key.as_ref().is_some_and(|key| {
+            key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Native inference cannot enforce this virtual key's budget or token limit yet",
+                "unsupported_metering",
+            )),
+        )
+            .into_response());
+    }
+
     // Provider-side URL fetching and hosted tools bypass EAVS's network ACL.
     // Resolve tenant metadata after key validation, then sanitize before any
     // routing transform or passthrough serialization.
@@ -541,25 +832,70 @@ async fn proxy_handler_inner(
     }
 
     // Check for injections (new conversation store)
-    let injections = state.conversations.take_injections(&ns_conversation);
-    if !injections.is_empty() {
-        apply_injections(&mut json_body, &injections);
-    }
+    if !is_native_inference {
+        let injections = state.conversations.take_injections(&ns_conversation);
+        if !injections.is_empty() {
+            apply_injections(&mut json_body, &injections);
+        }
 
-    // Legacy fallback: check old injections map
-    if let Some((_, legacy_injections)) = state.injections.remove(&ns_conversation) {
-        apply_injections(&mut json_body, &legacy_injections);
+        // Legacy fallback: check old injections map
+        if let Some((_, legacy_injections)) = state.injections.remove(&ns_conversation) {
+            apply_injections(&mut json_body, &legacy_injections);
+        }
     }
 
     // Apply policy rules (deny/rewrite/filter) after injection.
-    if let Err(err) = state
-        .config
-        .policy
-        .apply(&provider_name, parts.uri.path(), &mut json_body)
-    {
+    if let Err(err) = apply_policy_and_sanitize(
+        &mut json_body,
+        &state.config.policy,
+        &provider_name,
+        parts.uri.path(),
+        &delegated_fetch_policy,
+        &state.analysis_tx,
+        &correlation_id,
+    ) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ProxyError::new(err.message, "policy_violation")),
+        )
+            .into_response());
+    }
+
+    // Policies can rewrite the model after initial authentication. Authorize
+    // the effective body again without charging request/rate limits twice.
+    // Native URL-addressed models still use the already-resolved path model.
+    if let Some(ref validated) = validated_key {
+        let effective_model = json_body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&model);
+        if !validated.permissions.is_model_allowed(effective_model) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(
+                    ProxyError::new(
+                        format!("Model '{effective_model}' is not allowed by this key"),
+                        "authentication_error",
+                    )
+                    .with_code("model_not_allowed"),
+                ),
+            )
+                .into_response());
+        }
+    }
+
+    // Check the final body: policy rewrites may introduce new remote URLs.
+    if is_native_inference
+        && !delegated_fetch_policy.allow_remote_content
+        && (api_path.starts_with("/v1/images/") || api_path.starts_with("/v1/videos"))
+        && has_remote_media_reference(&json_body)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(
+                "Remote media references require delegated fetch permission",
+                "network_policy",
+            )),
         )
             .into_response());
     }
@@ -576,7 +912,13 @@ async fn proxy_handler_inner(
         id: correlation_id.clone(),
         method: parts.method.to_string(),
         uri: parts.uri.to_string(),
-        body: json_body.clone(),
+        // Native responses can contain large base64 media or sensitive documents.
+        // Audit metadata, never the raw content of native inference calls.
+        body: if is_native_inference {
+            json!({"native_api": api_path, "model": model, "request_bytes": bytes.len()})
+        } else {
+            json_body.clone()
+        },
     });
 
     // Use real API key from provider config (virtual key was just for auth)
@@ -622,6 +964,7 @@ async fn proxy_handler_inner(
                     token
                 }
                 Err(msg) => {
+                    let msg = msg.to_string();
                     tracing::error!("OAuth token resolution failed: {}", msg);
                     return Err((
                         StatusCode::UNAUTHORIZED,
@@ -633,26 +976,26 @@ async fn proxy_handler_inner(
         }
     }
 
-    // Determine the actual API path (strip provider prefix if using provider-prefixed routing)
-    let api_path = if let Some(ref provider) = path_provider {
-        let prefix = format!("/{}", provider);
-        parts
-            .uri
-            .path()
-            .strip_prefix(&prefix)
-            .unwrap_or(parts.uri.path())
-    } else {
-        parts.uri.path()
-    };
-
+    // Native-only providers have no OpenAI-format synthetic catalog.
+    if api_path == "/v1/models"
+        && matches!(provider_type, ProviderType::Cohere | ProviderType::Voyage)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ProxyError::new(
+                "This provider does not expose a compatible models endpoint",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response());
+    }
     // Handle /v1/models endpoint for providers that don't support it natively
     // Return a synthetic response with known models for that provider
     if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
         let models = provider_type.synthetic_models();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         let models_response = serde_json::json!({
             "object": "list",
@@ -661,7 +1004,7 @@ async fn proxy_handler_inner(
                     "id": m,
                     "object": "model",
                     "created": now,
-                    "owned_by": format!("{:?}", provider_type).to_lowercase()
+                    "owned_by": format!("{provider_type:?}").to_lowercase()
                 })
             }).collect::<Vec<_>>()
         });
@@ -700,9 +1043,7 @@ async fn proxy_handler_inner(
     // Check if this is a pass-through endpoint that doesn't need transformation
     // (e.g., /v1/models, /v1/embeddings for providers that support them natively)
     let is_passthrough_endpoint = !is_native_format_request
-        && (api_path == "/v1/models"
-            || api_path.starts_with("/v1/models/")
-            || api_path == "/v1/embeddings");
+        && (api_path == "/v1/models" || api_path.starts_with("/v1/models/") || is_native_inference);
 
     // Check if client is sending Responses API format directly
     // This allows clients to use the Responses API natively with EAVS just handling OAuth
@@ -752,7 +1093,7 @@ async fn proxy_handler_inner(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ProxyError::new(
-                    format!("Failed to parse request: {}", e),
+                    format!("Failed to parse request: {e}"),
                     "invalid_request",
                 )),
             )
@@ -788,7 +1129,7 @@ async fn proxy_handler_inner(
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ProxyError::new(
-                            format!("Failed to resolve image URL: {}", e),
+                            format!("Failed to resolve image URL: {e}"),
                             "invalid_request",
                         )),
                     )
@@ -813,7 +1154,7 @@ async fn proxy_handler_inner(
             };
 
             tracing::error!("Failed to transform request: {}", e);
-            (status, Json(ProxyError::new(format!("{}", e), error_type))).into_response()
+            (status, Json(ProxyError::new(format!("{e}"), error_type))).into_response()
         })?;
 
         if is_anthropic_oauth {
@@ -827,7 +1168,7 @@ async fn proxy_handler_inner(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ProxyError::new(
-                    format!("Failed to serialize request: {}", e),
+                    format!("Failed to serialize request: {e}"),
                     "internal_error",
                 )),
             )
@@ -835,6 +1176,15 @@ async fn proxy_handler_inner(
         })?;
         (body, model)
     } else {
+        // Explicit Eavs rerank contract: Cohere's top_n/results shape, with
+        // Voyage's top_k/data translated at the provider boundary.
+        if api_path == "/v1/eavs/rerank" && provider_type == ProviderType::Voyage {
+            if let Some(body) = json_body.as_object_mut() {
+                if let Some(top_n) = body.remove("top_n") {
+                    body.insert("top_k".to_string(), top_n);
+                }
+            }
+        }
         // Pass through for OpenAI-compatible providers
         if !is_native_format_request
             && !is_responses_api_request
@@ -853,7 +1203,7 @@ async fn proxy_handler_inner(
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ProxyError::new(
-                            format!("Failed to transform request for Mistral: {}", e),
+                            format!("Failed to transform request for Mistral: {e}"),
                             "invalid_request",
                         )),
                     )
@@ -881,16 +1231,22 @@ async fn proxy_handler_inner(
                 }
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let body = serde_json::to_vec(&json_body).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProxyError::new(
-                    format!("Failed to serialize request: {}", e),
-                    "internal_error",
-                )),
-            )
-                .into_response()
-        })?;
+        let body = if is_opaque_inference {
+            bytes.to_vec()
+        } else if bytes.is_empty() && is_native_inference {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&json_body).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ProxyError::new(
+                        format!("Failed to serialize request: {e}"),
+                        "internal_error",
+                    )),
+                )
+                    .into_response()
+            })?
+        };
         (body, model)
     };
 
@@ -968,7 +1324,7 @@ async fn proxy_handler_inner(
         // If using provider-prefixed routing (e.g., /openai/v1/models), strip the provider prefix
         // to get the actual API path (e.g., /v1/models)
         let request_path = if let Some(ref provider) = path_provider {
-            let prefix = format!("/{}", provider);
+            let prefix = format!("/{provider}");
             request_path.strip_prefix(&prefix).unwrap_or(request_path)
         } else {
             request_path
@@ -980,6 +1336,12 @@ async fn proxy_handler_inner(
             "/v1/messages"
         } else if is_google_native_request {
             request_path.strip_prefix("/v1").unwrap_or(request_path)
+        } else if request_path == "/v1/eavs/rerank" {
+            if provider_type == ProviderType::Cohere {
+                "/v2/rerank"
+            } else {
+                "/v1/rerank"
+            }
         } else if request_path == "/v1/codex/responses" {
             // Codex SSE upstream is {base}/codex/responses on chatgpt.com/backend-api
             "/codex/responses"
@@ -1006,27 +1368,31 @@ async fn proxy_handler_inner(
                 let deployment = provider_config
                     .resolved_deployment()
                     .unwrap_or_else(|| model_name.clone());
-                format!("/openai/deployments/{}{}", deployment, stripped_path)
+                format!("/openai/deployments/{deployment}{stripped_path}")
             }
         } else {
             stripped_path.to_string()
         }
     };
 
-    let mut url = format!("{}{}", base, path);
+    let mut url = format!("{base}{path}");
 
     // Handle Query Parameters (Original + API Version for Azure)
     let mut query_string = if needs_transform {
         String::new() // Transformer includes query params in path if needed
     } else {
-        parts.uri.query().map(|s| s.to_string()).unwrap_or_default()
+        parts
+            .uri
+            .query()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default()
     };
 
     if let Some(ref ver) = provider_config.resolved_api_version() {
         if !query_string.is_empty() {
             query_string.push('&');
         }
-        query_string.push_str(&format!("api-version={}", ver));
+        query_string.push_str(&format!("api-version={ver}"));
     }
 
     if !query_string.is_empty() && !url.contains('?') {
@@ -1047,13 +1413,22 @@ async fn proxy_handler_inner(
 
     // Build upstream request
     let mut upstream_headers = HeaderMap::new();
-    upstream_headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-    );
+    if !request_body.is_empty() {
+        if is_opaque_inference {
+            if let Some(content_type) = parts.headers.get(http::header::CONTENT_TYPE) {
+                upstream_headers.insert(http::header::CONTENT_TYPE, content_type.clone());
+            }
+        } else {
+            upstream_headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+        }
+    }
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
+    apply_opencode_session_headers(&mut upstream_headers, provider_type, &conversation_id);
 
     // Add custom headers from provider config
     for (key, value) in &provider_config.headers {
@@ -1162,7 +1537,7 @@ async fn proxy_handler_inner(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ProxyError::new(
-                    format!("Failed to sign Bedrock request: {}", e),
+                    format!("Failed to sign Bedrock request: {e}"),
                     "invalid_request",
                 )),
             )
@@ -1219,7 +1594,7 @@ async fn proxy_handler_inner(
                                         {
                                             part.get("text")
                                                 .and_then(|t| t.as_str())
-                                                .map(|s| s.to_string())
+                                                .map(std::string::ToString::to_string)
                                         } else {
                                             None
                                         }
@@ -1243,7 +1618,7 @@ async fn proxy_handler_inner(
             &model_name,
             json_body
                 .get("stream")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             &correlation_id,
             &parts.headers,
@@ -1260,7 +1635,7 @@ async fn proxy_handler_inner(
         (
             StatusCode::BAD_GATEWAY,
             Json(ProxyError::new(
-                format!("Upstream request failed: {}", e),
+                format!("Upstream request failed: {e}"),
                 "upstream_error",
             )),
         )
@@ -1302,9 +1677,31 @@ async fn proxy_handler_inner(
     let analysis_tx = state.analysis_tx.clone();
     let correlation_id_clone = correlation_id.clone();
 
+    // Native inference APIs have their own error schemas. Preserve status,
+    // headers and bytes; never text-decode an audio/video error payload.
+    if !status.is_success() && is_native_inference {
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        return Ok(response);
+    }
+
     // Normalize non-success upstream errors to OpenAI-compatible error format.
     if !status.is_success() {
-        let body_bytes = collect_stream_bytes(stream).await.unwrap_or_default();
+        // A non-success upstream (e.g. 401) may send a status but never terminate
+        // its error body, which would otherwise hang the request forever (eavs-1sfs).
+        // Bound the error-body read so we always return a prompt, well-formed error.
+        let body_bytes =
+            tokio::time::timeout(upstream_error_body_timeout(), collect_stream_bytes(stream))
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        status = %status,
+                        "Timed out reading upstream error body; returning empty error body"
+                    );
+                    Ok(Bytes::new())
+                })
+                .unwrap_or_default();
         let text = String::from_utf8_lossy(&body_bytes).to_string();
 
         let _ = analysis_tx.send(AnalysisEvent::ResponseChunk {
@@ -1339,6 +1736,67 @@ async fn proxy_handler_inner(
             .headers_mut()
             .insert("x-eavs-provider", resolved_provider.parse().unwrap());
         return Ok(response);
+    }
+
+    if api_path == "/v1/eavs/rerank" {
+        // Rerank results are bounded JSON, unlike media/streaming responses.
+        // Limit buffering rather than letting a malicious upstream exhaust RAM.
+        let mut body = Vec::new();
+        let mut stream = stream;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        "Upstream rerank stream failed",
+                        "upstream_error",
+                    )),
+                )
+                    .into_response()
+            })?;
+            if body.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProxyError::new(
+                        "Rerank response exceeds 2 MiB",
+                        "upstream_error",
+                    )),
+                )
+                    .into_response());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let mut result: Value = serde_json::from_slice(&body).map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(
+                    "Invalid rerank response JSON",
+                    "upstream_error",
+                )),
+            )
+                .into_response()
+        })?;
+        if provider_type == ProviderType::Voyage {
+            let data = result.as_object_mut().and_then(|r| r.remove("data"));
+            if let Some(data) = data {
+                result["results"] = data;
+            }
+        }
+        if !result.get("results").is_some_and(Value::is_array) {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(
+                    "Rerank response is missing results",
+                    "upstream_error",
+                )),
+            )
+                .into_response());
+        }
+
+        // Preserve upstream usage verbatim, including absent/unknown usage.
+        // Do not reinterpret search units or total_tokens as output tokens or
+        // bill them with chat pricing. Capped keys were rejected before dispatch.
+        return Ok(Json(result).into_response());
     }
 
     // Prepare usage tracking state for virtual keys
@@ -1455,7 +1913,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Failed to read upstream response: {}", e),
+                        format!("Failed to read upstream response: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1473,7 +1931,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Invalid upstream JSON: {}", e),
+                        format!("Invalid upstream JSON: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1488,7 +1946,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Failed to parse upstream response: {}", e),
+                        format!("Failed to parse upstream response: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1549,7 +2007,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Failed to read upstream response: {}", e),
+                        format!("Failed to read upstream response: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1567,7 +2025,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Invalid upstream JSON: {}", e),
+                        format!("Invalid upstream JSON: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1582,7 +2040,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(ProxyError::new(
-                        format!("Failed to parse upstream response: {}", e),
+                        format!("Failed to parse upstream response: {e}"),
                         "upstream_error",
                     )),
                 )
@@ -1595,7 +2053,7 @@ async fn proxy_handler_inner(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ProxyError::new(
-                        format!("Failed to serialize response: {}", e),
+                        format!("Failed to serialize response: {e}"),
                         "internal_error",
                     )),
                 )
@@ -1614,12 +2072,18 @@ async fn proxy_handler_inner(
 
             if let Some(tracker) = usage_tracker.clone() {
                 if let Some(usage) = response_json.get("usage") {
-                    if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(input) = usage
+                        .get("prompt_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                    {
                         tracker
                             .input_tokens
                             .store(input as u32, std::sync::atomic::Ordering::SeqCst);
                     }
-                    if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(output) = usage
+                        .get("completion_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                    {
                         tracker
                             .output_tokens
                             .store(output as u32, std::sync::atomic::Ordering::SeqCst);
@@ -1636,10 +2100,15 @@ async fn proxy_handler_inner(
             Ok(response)
         }
     } else {
-        // Pass through without transformation
+        // Native media bytes are forwarded unchanged and never decoded into the
+        // text analysis stream (audio/video/image payloads can be sensitive).
         let tracker_clone = usage_tracker.clone();
         let stream_with_logging = stream.map(move |chunk_result| match chunk_result {
             Ok(chunk) => {
+                if is_native_inference {
+                    // Never publish media, embeddings or typed decisions to text audit logs.
+                    return Ok(chunk);
+                }
                 let text = String::from_utf8_lossy(&chunk).to_string();
 
                 // Try to extract usage from streaming responses in the
@@ -1711,19 +2180,25 @@ struct UsageTracker {
 /// final output tokens. Non-streaming: top-level `usage` object.
 fn extract_anthropic_usage(chunk: &str, tracker: &UsageTracker) {
     let store = |usage: &Value| {
-        if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+        if let Some(input) = usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
             tracker
                 .input_tokens
                 .store(input as u32, std::sync::atomic::Ordering::SeqCst);
         }
-        if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+        if let Some(output) = usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
             tracker
                 .output_tokens
                 .store(output as u32, std::sync::atomic::Ordering::SeqCst);
         }
         if let Some(cached) = usage
             .get("cache_read_input_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
         {
             tracker
                 .cached_tokens
@@ -1731,7 +2206,7 @@ fn extract_anthropic_usage(chunk: &str, tracker: &UsageTracker) {
         }
         if let Some(write) = usage
             .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
         {
             tracker
                 .cache_write_tokens
@@ -1766,25 +2241,31 @@ fn extract_anthropic_usage(chunk: &str, tracker: &UsageTracker) {
 /// Extract usage from native Google generateContent responses (SSE or JSON).
 fn extract_google_usage(chunk: &str, tracker: &UsageTracker) {
     let store = |meta: &Value| {
-        if let Some(input) = meta.get("promptTokenCount").and_then(|v| v.as_u64()) {
+        if let Some(input) = meta
+            .get("promptTokenCount")
+            .and_then(serde_json::Value::as_u64)
+        {
             tracker
                 .input_tokens
                 .store(input as u32, std::sync::atomic::Ordering::SeqCst);
         }
         let output = meta
             .get("candidatesTokenCount")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
             + meta
                 .get("thoughtsTokenCount")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
         if output > 0 {
             tracker
                 .output_tokens
                 .store(output as u32, std::sync::atomic::Ordering::SeqCst);
         }
-        if let Some(cached) = meta.get("cachedContentTokenCount").and_then(|v| v.as_u64()) {
+        if let Some(cached) = meta
+            .get("cachedContentTokenCount")
+            .and_then(serde_json::Value::as_u64)
+        {
             tracker
                 .cached_tokens
                 .store(cached as u32, std::sync::atomic::Ordering::SeqCst);
@@ -1820,12 +2301,18 @@ fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
         if let Some(data) = line.strip_prefix("data: ") {
             if let Ok(json) = serde_json::from_str::<Value>(data) {
                 if let Some(usage) = json.get("usage") {
-                    if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(input) = usage
+                        .get("prompt_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                    {
                         tracker
                             .input_tokens
                             .store(input as u32, std::sync::atomic::Ordering::SeqCst);
                     }
-                    if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(output) = usage
+                        .get("completion_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                    {
                         tracker
                             .output_tokens
                             .store(output as u32, std::sync::atomic::Ordering::SeqCst);
@@ -1833,7 +2320,7 @@ fn extract_openai_usage(chunk: &str, tracker: &UsageTracker) {
                     if let Some(cached) = usage
                         .get("prompt_tokens_details")
                         .and_then(|d| d.get("cached_tokens"))
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                     {
                         tracker
                             .cached_tokens
@@ -2190,6 +2677,17 @@ pub async fn provider_ws_proxy_handler(
     ws_proxy_handler_inner(state, ws, headers, uri, Some(provider)).await
 }
 
+/// Voice-specific `ElevenLabs` WebSocket route.
+pub async fn provider_voice_ws_proxy_handler(
+    State(state): State<AppState>,
+    Path((provider, _voice_id)): Path<(String, String)>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    ws_proxy_handler_inner(state, ws, headers, uri, Some(provider)).await
+}
+
 /// Handler for the default WebSocket route: /v1/realtime
 pub async fn ws_proxy_handler(
     State(state): State<AppState>,
@@ -2218,16 +2716,42 @@ async fn ws_proxy_handler_inner(
     let header_provider = headers
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
+    let request_path = path_provider
+        .as_ref()
+        .and_then(|p| uri.path().strip_prefix(&format!("/{p}")))
+        .unwrap_or(uri.path());
     let provider_name = path_provider
         .or(header_provider)
         .unwrap_or_else(|| "default".to_string());
+    let elevenlabs_ws = request_path == "/v1/speech-to-text/realtime"
+        || request_path.starts_with("/v1/text-to-speech/")
+            && matches!(
+                request_path.rsplit('/').next(),
+                Some("stream-input" | "multi-stream-input")
+            );
 
     // Determine the actual model the client requested (Realtime carries it in
     // the connection query, e.g. ?model=gpt-4o-realtime). Validating this real
     // model is what makes virtual-key model scope apply to Realtime.
-    let ws_model = extract_realtime_model(&uri);
+    let ws_model = if elevenlabs_ws {
+        uri.query()
+            .and_then(|q| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(name, _)| name == "model_id")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_else(|| {
+                if request_path == "/v1/speech-to-text/realtime" {
+                    "scribe_v2_realtime".to_string()
+                } else {
+                    "eleven_multilingual_v2".to_string()
+                }
+            })
+    } else {
+        extract_realtime_model(&uri)
+    };
 
     // Validate virtual API key if present (or required)
     let require_key = state.config.keys.enabled && state.config.keys.require_key;
@@ -2235,7 +2759,7 @@ async fn ws_proxy_handler_inner(
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let mut validated_key: Option<ValidatedKey> = None;
 
@@ -2314,15 +2838,19 @@ async fn ws_proxy_handler_inner(
     // Usage accounting for the Realtime session. Token counts are filled from
     // upstream response.done events as the session runs; the request is debited
     // once the session ends so budget/TPM limits apply to Realtime traffic.
-    let ws_tracker: Option<UsageTracker> = validated_key.as_ref().map(|vk| UsageTracker {
-        key_hash: vk.key_hash.clone(),
-        model: ws_model.clone(),
-        provider: provider_name.clone(),
-        input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-    });
+    let ws_tracker: Option<UsageTracker> =
+        validated_key
+            .as_ref()
+            .filter(|_| !elevenlabs_ws)
+            .map(|vk| UsageTracker {
+                key_hash: vk.key_hash.clone(),
+                model: ws_model.clone(),
+                provider: provider_name.clone(),
+                input_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                output_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            });
     let ws_state = state.clone();
 
     // Register/update conversation in store if capture_all is enabled
@@ -2337,26 +2865,119 @@ async fn ws_proxy_handler_inner(
             });
     }
 
-    let provider_lookup = match state.config.resolve_provider(&provider_name) {
-        Some(v) => v,
-        None => {
-            let available = state.config.provider_names();
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(
-                    format!(
-                        "Unknown provider '{}'. Available providers: {:?}",
-                        provider_name, available
-                    ),
-                    "invalid_provider",
-                )),
-            )
-                .into_response();
-        }
+    let provider_lookup = if let Some(v) = state.config.resolve_provider(&provider_name) {
+        v
+    } else {
+        let available = state.config.provider_names();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                format!("Unknown provider '{provider_name}'. Available providers: {available:?}"),
+                "invalid_provider",
+            )),
+        )
+            .into_response();
     };
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
+    if elevenlabs_ws
+        && (request_path.contains('%')
+            || request_path.contains('\\')
+            || request_path
+                .split('/')
+                .any(|segment| segment == "." || segment == ".."))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Encoded or traversal path segments are not allowed",
+                "invalid_path",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && state.config.policy.enabled
+        && state
+            .config
+            .policy
+            .rules
+            .iter()
+            .any(|rule| !matches!(rule, crate::policy::PolicyRule::Deny { .. }))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Body-mutating policies cannot be enforced for native realtime speech",
+                "unsupported_policy",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && state
+            .config
+            .policy
+            .apply(&provider_name, uri.path(), &mut json!({"model": ws_model}))
+            .is_err()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(
+                "Realtime speech request denied by policy",
+                "policy_violation",
+            )),
+        )
+            .into_response();
+    }
+    if matches!(provider_type, ProviderType::Fal | ProviderType::Replicate)
+        || (elevenlabs_ws && provider_type != ProviderType::ElevenLabs)
+        || (!elevenlabs_ws && provider_type == ProviderType::ElevenLabs)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "WebSocket API shape is not supported by this provider",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response();
+    }
+    // Never relay user-supplied provider tokens in the query string.
+    if elevenlabs_ws
+        && uri.query().is_some_and(|q| {
+            url::form_urlencoded::parse(q.as_bytes()).any(|(name, _)| {
+                matches!(
+                    name.as_ref(),
+                    "token" | "single_use_token" | "authorization"
+                )
+            })
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Use an Eavs Authorization header, not a provider token query parameter",
+                "invalid_request",
+            )),
+        )
+            .into_response();
+    }
+    if elevenlabs_ws
+        && validated_key.as_ref().is_some_and(|key| {
+            key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some()
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Native realtime speech cannot enforce this key's budget or token limit yet",
+                "unsupported_metering",
+            )),
+        )
+            .into_response();
+    }
     let mut api_key = provider_config.resolved_api_key();
 
     if let Some(ref validated) = validated_key {
@@ -2371,6 +2992,7 @@ async fn ws_proxy_handler_inner(
             {
                 Ok(token) => token,
                 Err(msg) => {
+                    let msg = msg.to_string();
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
@@ -2383,7 +3005,7 @@ async fn ws_proxy_handler_inner(
 
     let upstream_url = match build_ws_upstream_url(
         &provider_config.resolved_base_url(),
-        uri.path(),
+        request_path,
         uri.query(),
     ) {
         Ok(u) => u,
@@ -2422,16 +3044,16 @@ async fn ws_proxy_handler_inner(
             sessions: state.ws_sessions.clone(),
         };
 
-        let mut request = match upstream_url.into_client_request() {
-            Ok(r) => r,
-            Err(_) => {
-                let _ = client_socket.send(AxumWsMessage::Close(None)).await;
-                return;
-            }
+        let mut request = if let Ok(r) = upstream_url.into_client_request() {
+            r
+        } else {
+            let _ = client_socket.send(AxumWsMessage::Close(None)).await;
+            return;
         };
 
         apply_ws_auth_headers(&mut request, provider_type, &api_key);
         apply_ws_extra_headers(&mut request, provider_type);
+        apply_opencode_session_headers(&mut request, provider_type, &conversation_id);
 
         // Custom provider headers
         for (key, value) in &provider_config.headers {
@@ -2448,12 +3070,12 @@ async fn ws_proxy_handler_inner(
             }
         }
 
-        let (upstream_socket, _) = match tokio_tungstenite::connect_async(request).await {
-            Ok(pair) => pair,
-            Err(_) => {
-                let _ = client_socket.send(AxumWsMessage::Close(None)).await;
-                return;
-            }
+        let (upstream_socket, _) = if let Ok(pair) = tokio_tungstenite::connect_async(request).await
+        {
+            pair
+        } else {
+            let _ = client_socket.send(AxumWsMessage::Close(None)).await;
+            return;
         };
 
         let (mut client_sender, mut client_receiver) = client_socket.split();
@@ -2473,11 +3095,15 @@ async fn ws_proxy_handler_inner(
         let upstream_tx_client = upstream_tx.clone();
         let client_to_upstream = tokio::spawn(async move {
             while let Some(Ok(msg)) = client_receiver.next().await {
-                let Some(up_msg) = sanitize_ws_client_message(
-                    msg,
-                    &delegated_fetch_policy,
-                    &delegated_fetch_analysis_tx,
-                ) else {
+                let Some(up_msg) = (if elevenlabs_ws {
+                    axum_to_tungstenite(msg)
+                } else {
+                    sanitize_ws_client_message(
+                        msg,
+                        &delegated_fetch_policy,
+                        &delegated_fetch_analysis_tx,
+                    )
+                }) else {
                     continue;
                 };
                 let is_close = matches!(up_msg, TungsteniteMessage::Close(_));
@@ -2505,15 +3131,17 @@ async fn ws_proxy_handler_inner(
                                 .pointer("/response/usage")
                                 .or_else(|| json.get("usage"));
                             if let Some(usage) = usage {
-                                if let Some(input) =
-                                    usage.get("input_tokens").and_then(|v| v.as_u64())
+                                if let Some(input) = usage
+                                    .get("input_tokens")
+                                    .and_then(serde_json::Value::as_u64)
                                 {
                                     tracker
                                         .input_tokens
                                         .store(input as u32, std::sync::atomic::Ordering::SeqCst);
                                 }
-                                if let Some(output) =
-                                    usage.get("output_tokens").and_then(|v| v.as_u64())
+                                if let Some(output) = usage
+                                    .get("output_tokens")
+                                    .and_then(serde_json::Value::as_u64)
                                 {
                                     tracker
                                         .output_tokens
@@ -2539,6 +3167,9 @@ async fn ws_proxy_handler_inner(
 
         // Injection -> upstream (OpenAI Realtime semantics).
         let inject_to_upstream = tokio::spawn(async move {
+            if elevenlabs_ws {
+                return;
+            }
             while let Some(injections) = injection_rx.recv().await {
                 for inj in injections {
                     let event = serde_json::json!({
@@ -2599,7 +3230,7 @@ pub async fn codex_ws_handler(
 ///
 /// Protocol: client sends `{"type": "response.create", ...body}`, server streams
 /// back response events as JSON messages. Eavs intercepts the initial message to
-/// apply policy rules (e.g., set_field for `store: true`), then relays bidirectionally.
+/// apply policy rules (e.g., `set_field` for `store: true`), then relays bidirectionally.
 async fn codex_ws_handler_inner(
     state: AppState,
     ws: WebSocketUpgrade,
@@ -2612,7 +3243,7 @@ async fn codex_ws_handler_inner(
     let header_provider = headers
         .get("X-Provider")
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let provider_name = path_provider
         .or(header_provider)
@@ -2623,7 +3254,7 @@ async fn codex_ws_handler_inner(
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let mut validated_key: Option<ValidatedKey> = None;
 
@@ -2684,26 +3315,35 @@ async fn codex_ws_handler_inner(
             .into_response();
     }
 
-    let provider_lookup = match state.config.resolve_provider(&provider_name) {
-        Some(v) => v,
-        None => {
-            let available = state.config.provider_names();
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(
-                    format!(
-                        "Unknown provider '{}'. Available: {:?}",
-                        provider_name, available
-                    ),
-                    "invalid_provider",
-                )),
-            )
-                .into_response();
-        }
+    let provider_lookup = if let Some(v) = state.config.resolve_provider(&provider_name) {
+        v
+    } else {
+        let available = state.config.provider_names();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                format!("Unknown provider '{provider_name}'. Available: {available:?}"),
+                "invalid_provider",
+            )),
+        )
+            .into_response();
     };
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
+    if matches!(
+        provider_type,
+        ProviderType::Fal | ProviderType::Replicate | ProviderType::ElevenLabs
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Codex WebSocket is not supported by this provider",
+                "unsupported_api_shape",
+            )),
+        )
+            .into_response();
+    }
     let mut api_key = provider_config.resolved_api_key();
 
     // Resolve OAuth token if key is bound to an oauth_user
@@ -2719,6 +3359,7 @@ async fn codex_ws_handler_inner(
             {
                 Ok(token) => token,
                 Err(msg) => {
+                    let msg = msg.to_string();
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(ProxyError::new(msg, "oauth_error").with_code("oauth_failed")),
@@ -2774,6 +3415,7 @@ async fn codex_ws_handler_inner(
     let provider_name_for_policy = provider_name.clone();
     let provider_name_for_usage = provider_name.clone();
     let provider_headers = provider_config.headers.clone();
+    let frame_permissions = validated_key.as_ref().map(|key| key.permissions.clone());
     let validated_key_hash = validated_key.as_ref().map(|k| k.key_hash.clone());
     // We'll reference state inside the closure directly
 
@@ -2838,51 +3480,14 @@ async fn codex_ws_handler_inner(
         let upstream_tx_client = upstream_tx.clone();
         let client_to_upstream = tokio::spawn(async move {
             while let Some(Ok(msg)) = client_receiver.next().await {
-                let processed = match &msg {
-                    AxumWsMessage::Text(text) => {
-                        let Some(mut json) = parse_and_sanitize_ws_json(
-                            text.as_bytes(),
-                            &delegated_fetch_policy,
-                            &delegated_fetch_analysis_tx,
-                        ) else {
-                            continue;
-                        };
-                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
-                            if let Err(e) = policy.apply(
-                                &provider_name_for_policy,
-                                "/codex/responses",
-                                &mut json,
-                            ) {
-                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
-                                continue;
-                            }
-                        }
-                        Some(TungsteniteMessage::Text(json.to_string()))
-                    }
-                    AxumWsMessage::Binary(bytes) => {
-                        let Some(mut json) = parse_and_sanitize_ws_json(
-                            bytes,
-                            &delegated_fetch_policy,
-                            &delegated_fetch_analysis_tx,
-                        ) else {
-                            continue;
-                        };
-                        if json.get("type").and_then(Value::as_str) == Some("response.create") {
-                            if let Err(e) = policy.apply(
-                                &provider_name_for_policy,
-                                "/codex/responses",
-                                &mut json,
-                            ) {
-                                tracing::warn!("Policy violation on Codex WS: {}", e.message);
-                                continue;
-                            }
-                        }
-                        serde_json::to_vec(&json)
-                            .ok()
-                            .map(TungsteniteMessage::Binary)
-                    }
-                    _ => axum_to_tungstenite(msg),
-                };
+                let processed = sanitize_codex_ws_message(
+                    msg,
+                    &policy,
+                    &provider_name_for_policy,
+                    frame_permissions.as_ref(),
+                    &delegated_fetch_policy,
+                    &delegated_fetch_analysis_tx,
+                );
 
                 let Some(up_msg) = processed else {
                     continue;
@@ -2923,18 +3528,18 @@ async fn codex_ws_handler_inner(
                                 if let Some(usage) = usage {
                                     let input_tokens = usage
                                         .get("input_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0)
                                         as u32;
                                     let output_tokens = usage
                                         .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0)
                                         as u32;
                                     let cached_tokens = usage
                                         .get("input_tokens_details")
                                         .and_then(|d| d.get("cached_tokens"))
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0)
                                         as u32;
 
@@ -3071,14 +3676,11 @@ fn build_ws_upstream_url(
     } else if base.starts_with("ws://") || base.starts_with("wss://") {
         Ok(base)
     } else {
-        Err(format!(
-            "Unsupported upstream base_url scheme: {}",
-            base_url
-        ))
+        Err(format!("Unsupported upstream base_url scheme: {base_url}"))
     }
 }
 
-/// Trait for abstracting over different header map types (HeaderMap vs http::Request<()>).
+/// Trait for abstracting over different header map types (`HeaderMap` vs `http::Request`<()>).
 /// This allows us to use a single implementation for both HTTP and WebSocket headers.
 trait HeadersExt {
     fn insert_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
@@ -3101,14 +3703,14 @@ fn is_anthropic_oauth_token(api_key: &str) -> bool {
     api_key.starts_with("sk-ant-oat")
 }
 
-/// Check if this is an OpenAI Codex OAuth token (JWT format)
-/// OpenAI OAuth tokens are JWTs that start with "eyJ" (base64 encoded JSON header)
+/// Check if this is an `OpenAI` Codex OAuth token (JWT format)
+/// `OpenAI` OAuth tokens are JWTs that start with "eyJ" (base64 encoded JSON header)
 fn is_openai_codex_oauth_token(api_key: &str) -> bool {
     api_key.starts_with("eyJ") && api_key.contains('.')
 }
 
-/// Extract account ID from OpenAI OAuth JWT token.
-/// The account ID is stored in the JWT claims under "https://api.openai.com/auth"
+/// Extract account ID from `OpenAI` OAuth JWT token.
+/// The account ID is stored in the JWT claims under `https://api.openai.com/auth`
 fn extract_openai_account_id(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
     let parts: Vec<&str> = token.split('.').collect();
@@ -3120,8 +3722,8 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
     let payload = parts[1];
     // JWT uses base64url encoding, need to handle padding
     let padded = match payload.len() % 4 {
-        2 => format!("{}==", payload),
-        3 => format!("{}=", payload),
+        2 => format!("{payload}=="),
+        3 => format!("{payload}="),
         _ => payload.to_string(),
     };
 
@@ -3162,12 +3764,27 @@ fn extract_openai_account_id(token: &str) -> Option<String> {
 
 /// Anthropic OAuth tokens are scoped to "Claude Code" - requests must identify as Claude Code.
 /// This injects the required system prompt prefix for the token to work.
+/// Bounds how long the proxy will wait to read an upstream error body before
+/// returning a prompt error (eavs-1sfs). Prevents an upstream that sends a
+/// non-success status (e.g. 401) but never terminates its body from hanging
+/// the request indefinitely. Defaults to 30s; `EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS`
+/// overrides it (used by tests to keep the hang-case fast).
+fn upstream_error_body_timeout() -> std::time::Duration {
+    std::env::var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis,
+        )
+}
+
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 fn inject_claude_code_identity_into_context(context: &mut crate::types::Context) {
     // Prepend Claude Code identity to the system prompt
     let new_system = match &context.system_prompt {
-        Some(existing) => format!("{}\n\n{}", CLAUDE_CODE_IDENTITY, existing),
+        Some(existing) => format!("{CLAUDE_CODE_IDENTITY}\n\n{existing}"),
         None => CLAUDE_CODE_IDENTITY.to_string(),
     };
     context.system_prompt = Some(new_system);
@@ -3178,7 +3795,7 @@ fn inject_claude_code_identity_into_context(context: &mut crate::types::Context)
 fn inject_claude_code_identity_into_anthropic_body(body: &mut Value) {
     match body.get_mut("system") {
         Some(Value::String(existing)) => {
-            *existing = format!("{}\n\n{}", CLAUDE_CODE_IDENTITY, existing);
+            *existing = format!("{CLAUDE_CODE_IDENTITY}\n\n{existing}");
         }
         Some(Value::Array(blocks)) => {
             blocks.insert(
@@ -3217,8 +3834,7 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
         for tool in tools {
             if let Some(name) = tool.get_mut("name").and_then(|v| v.as_str()) {
                 if !name.starts_with(TOOL_PREFIX) {
-                    *tool.get_mut("name").unwrap() =
-                        Value::String(format!("{}{}", TOOL_PREFIX, name));
+                    *tool.get_mut("name").unwrap() = Value::String(format!("{TOOL_PREFIX}{name}"));
                 }
             }
         }
@@ -3232,13 +3848,12 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
                     let is_tool_use = block
                         .get("type")
                         .and_then(|t| t.as_str())
-                        .map(|t| t == "tool_use")
-                        .unwrap_or(false);
+                        .is_some_and(|t| t == "tool_use");
                     if is_tool_use {
                         if let Some(name) = block.get_mut("name").and_then(|v| v.as_str()) {
                             if !name.starts_with(TOOL_PREFIX) {
                                 *block.get_mut("name").unwrap() =
-                                    Value::String(format!("{}{}", TOOL_PREFIX, name));
+                                    Value::String(format!("{TOOL_PREFIX}{name}"));
                             }
                         }
                     }
@@ -3253,7 +3868,7 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
             if let Some(name_value) = obj.get_mut("name") {
                 if let Some(name) = name_value.as_str() {
                     if !name.starts_with(TOOL_PREFIX) {
-                        *name_value = Value::String(format!("{}{}", TOOL_PREFIX, name));
+                        *name_value = Value::String(format!("{TOOL_PREFIX}{name}"));
                     }
                 }
             }
@@ -3263,9 +3878,9 @@ fn prefix_anthropic_oauth_tools(body: &mut Value) {
 
 /// Apply Anthropic OAuth-specific body transformations.
 ///
-/// Sanitizes system prompt text to replace "OpenCode" with "Claude Code" and
+/// Sanitizes system prompt text to replace "`OpenCode`" with "Claude Code" and
 /// "opencode" (case-insensitive) with "Claude", matching the opencode-anthropic-auth
-/// plugin behavior. The Anthropic server blocks requests containing "OpenCode" in
+/// plugin behavior. The Anthropic server blocks requests containing "`OpenCode`" in
 /// system prompts when using OAuth tokens.
 fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
     // Sanitize system prompt - server blocks 'OpenCode' string
@@ -3275,8 +3890,7 @@ fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
                 if item
                     .get("type")
                     .and_then(|t| t.as_str())
-                    .map(|t| t == "text")
-                    .unwrap_or(false)
+                    .is_some_and(|t| t == "text")
                 {
                     if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                         let sanitized = sanitize_system_prompt(text);
@@ -3295,7 +3909,7 @@ fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
     }
 }
 
-/// Sanitize system prompt for Anthropic OAuth: replace "OpenCode" -> "Claude Code"
+/// Sanitize system prompt for Anthropic OAuth: replace "`OpenCode`" -> "Claude Code"
 /// and "opencode" (case-insensitive) -> "Claude".
 fn sanitize_system_prompt(text: &str) -> String {
     // First replace case-sensitive "OpenCode" with "Claude Code"
@@ -3318,7 +3932,7 @@ fn sanitize_system_prompt(text: &str) -> String {
 }
 
 /// Apply authentication headers to any header container.
-/// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
+/// Unified implementation for both HTTP `HeaderMap` and WebSocket Request headers.
 fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType, api_key: &str) {
     if api_key.is_empty() {
         return;
@@ -3329,7 +3943,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
     // user-agent, and x-app. The underlying Anthropic SDK (not us) handles
     // x-stainless-* headers.
     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(api_key) {
-        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {api_key}")) {
             headers.insert_header(http::header::AUTHORIZATION, value);
         }
         // Required OAuth beta headers
@@ -3350,7 +3964,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
 
     // Special handling for GitHub Copilot tokens - they need specific headers
     if provider_type == ProviderType::GithubCopilot {
-        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {api_key}")) {
             headers.insert_header(http::header::AUTHORIZATION, value);
         }
         // Required Copilot headers (mimic VS Code extension)
@@ -3375,7 +3989,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
 
     // Special handling for OpenAI Codex OAuth tokens - they need additional headers
     if provider_type == ProviderType::OpenAICodex && is_openai_codex_oauth_token(api_key) {
-        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {api_key}")) {
             headers.insert_header(http::header::AUTHORIZATION, value);
         }
 
@@ -3403,7 +4017,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
 
     match provider_type.info().auth_style {
         AuthStyle::BearerToken => {
-            if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+            if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {api_key}")) {
                 headers.insert_header(http::header::AUTHORIZATION, value);
             } else {
                 tracing::warn!("Failed to create Authorization header: invalid API key characters");
@@ -3435,7 +4049,7 @@ fn apply_auth_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderTyp
 }
 
 /// Apply provider-specific extra headers to any header container.
-/// Unified implementation for both HTTP HeaderMap and WebSocket Request headers.
+/// Unified implementation for both HTTP `HeaderMap` and WebSocket Request headers.
 fn apply_extra_headers<H: HeadersExt>(headers: &mut H, provider_type: ProviderType) {
     match provider_type {
         ProviderType::Anthropic => {
@@ -3467,7 +4081,7 @@ fn apply_ws_extra_headers(request: &mut http::Request<()>, provider_type: Provid
     apply_extra_headers(request, provider_type);
 }
 
-pub(crate) fn apply_http_auth_headers(
+pub fn apply_http_auth_headers(
     headers: &mut HeaderMap,
     provider_type: ProviderType,
     api_key: &str,
@@ -3475,8 +4089,29 @@ pub(crate) fn apply_http_auth_headers(
     apply_auth_headers(headers, provider_type, api_key);
 }
 
-pub(crate) fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
+pub fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: ProviderType) {
     apply_extra_headers(headers, provider_type);
+}
+
+/// `OpenCode` providers (opencode, opencode-go) route each request to a session via
+/// the `x-opencode-session` header, derived from the conversation id.
+fn apply_opencode_session_headers<H: HeadersExt>(
+    headers: &mut H,
+    provider_type: ProviderType,
+    session_id: &str,
+) {
+    if matches!(
+        provider_type,
+        ProviderType::OpenCode | ProviderType::OpenCodeGo
+    ) && !session_id.is_empty()
+    {
+        if let Ok(value) = http::HeaderValue::from_str(session_id) {
+            headers.insert_header(
+                http::header::HeaderName::from_static("x-opencode-session"),
+                value,
+            );
+        }
+    }
 }
 
 async fn resolve_oauth_access_token_with_account(
@@ -3484,7 +4119,24 @@ async fn resolve_oauth_access_token_with_account(
     provider_name: &str,
     oauth_user: &str,
     oauth_account: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, OAuthResolveError> {
+    resolve_oauth_access_token_using_client(
+        state,
+        provider_name,
+        oauth_user,
+        oauth_account,
+        &reqwest::Client::new(),
+    )
+    .await
+}
+
+async fn resolve_oauth_access_token_using_client(
+    state: &AppState,
+    provider_name: &str,
+    oauth_user: &str,
+    oauth_account: Option<&str>,
+    client: &reqwest::Client,
+) -> Result<String, OAuthResolveError> {
     // Try to resolve from provider type first (more reliable when config key
     // differs from provider type, e.g., [providers.my-claude] with type = "anthropic").
     // Falls back to matching on the config section name for backward compatibility.
@@ -3494,38 +4146,44 @@ async fn resolve_oauth_access_token_with_account(
         .and_then(|lookup| OAuthProviderKind::from_str(&lookup.config.type_))
         .or_else(|| OAuthProviderKind::from_str(provider_name))
         .ok_or_else(|| {
-            format!(
-                "OAuth provider not supported for '{}'. Supported: anthropic, openai-codex, github-copilot",
-                provider_name
-            )
+            OAuthResolveError::UnsupportedProvider(format!(
+                "OAuth provider not supported for '{provider_name}'. Supported: anthropic, openai-codex, github-copilot"
+            ))
         })?;
 
     let store = state
         .get_oauth_store()
-        .ok_or_else(|| "OAuth store not initialized".to_string())?;
+        .ok_or(OAuthResolveError::StoreNotInitialized)?;
 
     let account_label = oauth_account.unwrap_or("default");
     let mut credentials = store
         .get_credentials_for_account(oauth_user, provider, account_label)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            if account_label == "default" {
-                "OAuth credentials not found".to_string()
+        .map_err(|e| OAuthResolveError::Store(e.to_string()))?
+        .ok_or_else(|| OAuthResolveError::CredentialsNotFound {
+            account: if account_label == "default" {
+                None
             } else {
-                format!(
-                    "OAuth credentials not found for account '{}'",
-                    account_label
-                )
-            }
+                Some(account_label.to_string())
+            },
         })?;
 
     if credentials.is_expired(60) {
-        if credentials.refresh_token.is_empty() {
-            return Err("OAuth token expired and no refresh token available".to_string());
+        // Ownership guard: a borrowed credential belongs to an external owner
+        // CLI. Eavs must NOT refresh it (rotating refresh tokens logs the owner
+        // out) nor write back to the owner's file. Return an actionable typed
+        // error naming the owner instead.
+        if let crate::oauth::CredentialProvenance::Borrowed { owner } = &credentials.provenance {
+            return Err(OAuthResolveError::ExpiredBorrowed {
+                owner: owner.clone(),
+                provider,
+            });
         }
 
-        let client = reqwest::Client::new();
+        if credentials.refresh_token.is_empty() {
+            return Err(OAuthResolveError::ExpiredNoRefresh);
+        }
+
         let redirect_uri = std::env::var("EAVS_OAUTH_REDIRECT_URI")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -3533,28 +4191,23 @@ async fn resolve_oauth_access_token_with_account(
 
         credentials = match provider {
             OAuthProviderKind::Anthropic => {
-                let config =
-                    oauth_anthropic::config_from_env(redirect_uri).map_err(|e| e.to_string())?;
+                let config = oauth_anthropic::config_from_env(redirect_uri)
+                    .map_err(|e| OAuthResolveError::RefreshFailed(e))?;
                 oauth_anthropic::refresh_token(
-                    &client,
+                    client,
                     &config,
                     oauth_user,
                     &credentials.refresh_token,
                 )
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| OAuthResolveError::RefreshFailed(e))?
             }
             OAuthProviderKind::OpenAICodex => {
-                let config =
-                    oauth_openai::config_from_env(redirect_uri).map_err(|e| e.to_string())?;
-                oauth_openai::refresh_token(
-                    &client,
-                    &config,
-                    oauth_user,
-                    &credentials.refresh_token,
-                )
-                .await
-                .map_err(|e| e.to_string())?
+                let config = oauth_openai::config_from_env(redirect_uri)
+                    .map_err(|e| OAuthResolveError::RefreshFailed(e))?;
+                oauth_openai::refresh_token(client, &config, oauth_user, &credentials.refresh_token)
+                    .await
+                    .map_err(|e| OAuthResolveError::RefreshFailed(e))?
             }
             OAuthProviderKind::GithubCopilot => {
                 // GitHub Copilot uses a two-step flow:
@@ -3567,7 +4220,9 @@ async fn resolve_oauth_access_token_with_account(
                 } else {
                     &credentials.refresh_token
                 };
-                exchange_copilot_token(&client, oauth_user, github_token).await?
+                exchange_copilot_token(client, oauth_user, github_token)
+                    .await
+                    .map_err(|e| OAuthResolveError::RefreshFailed(e))?
             }
         };
 
@@ -3577,7 +4232,7 @@ async fn resolve_oauth_access_token_with_account(
         store
             .upsert_credentials(&credentials)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| OAuthResolveError::RefreshFailed(e.to_string()))?;
     }
 
     Ok(credentials.access_token)
@@ -3602,14 +4257,14 @@ async fn exchange_copilot_token(
     let resp = client
         .get("https://api.github.com/copilot_internal/v2/token")
         .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", github_access_token))
+        .header("Authorization", format!("Bearer {github_access_token}"))
         .header("User-Agent", "GitHubCopilotChat/0.35.0")
         .header("Editor-Version", "vscode/1.107.0")
         .header("Editor-Plugin-Version", "copilot-chat/0.35.0")
         .header("Copilot-Integration-Id", "vscode-chat")
         .send()
         .await
-        .map_err(|e| format!("Copilot token exchange request failed: {}", e))?;
+        .map_err(|e| format!("Copilot token exchange request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -3617,16 +4272,13 @@ async fn exchange_copilot_token(
             .text()
             .await
             .unwrap_or_else(|_| "<unreadable>".to_string());
-        return Err(format!(
-            "Copilot token exchange failed ({}): {}",
-            status, body
-        ));
+        return Err(format!("Copilot token exchange failed ({status}): {body}"));
     }
 
     let token_resp: CopilotTokenResponse = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Copilot token response: {}", e))?;
+        .map_err(|e| format!("Failed to parse Copilot token response: {e}"))?;
 
     // Parse proxy-ep from token to determine the actual API base URL.
     // Token format: tid=...;exp=...;proxy-ep=proxy.individual.githubcopilot.com;...
@@ -3636,7 +4288,7 @@ async fn exchange_copilot_token(
         .find_map(|part| part.strip_prefix("proxy-ep="))
     {
         let api_host = proxy_ep.replace("proxy.", "api.");
-        Some(format!("https://{}", api_host))
+        Some(format!("https://{api_host}"))
     } else {
         None
     };
@@ -3649,6 +4301,7 @@ async fn exchange_copilot_token(
         refresh_token: github_access_token.to_string(),
         expires_at: token_resp.expires_at,
         extra_data: base_url.map(|url| serde_json::json!({ "base_url": url })),
+        provenance: crate::oauth::CredentialProvenance::Owned,
     })
 }
 
@@ -3677,7 +4330,7 @@ async fn resolve_bedrock_aws_credentials(
         let role_arn = role_arn.trim().to_string();
         if !token_file.is_empty() && !role_arn.is_empty() {
             let token = std::fs::read_to_string(&token_file)
-                .map_err(|e| format!("Failed to read AWS web identity token file: {}", e))?;
+                .map_err(|e| format!("Failed to read AWS web identity token file: {e}"))?;
             let token = token.trim();
             if token.is_empty() {
                 return Err("AWS web identity token file is empty".to_string());
@@ -3745,36 +4398,28 @@ fn anthropic_beta_scan_value(v: &Value, out: &mut BTreeSet<String>) {
             if map
                 .get("media_type")
                 .and_then(|m| m.as_str())
-                .map(|m| m.eq_ignore_ascii_case("application/pdf"))
-                .unwrap_or(false)
+                .is_some_and(|m| m.eq_ignore_ascii_case("application/pdf"))
             {
                 out.insert("pdfs-2024-09-25".to_string());
             }
             if map
                 .get("type")
                 .and_then(|t| t.as_str())
-                .map(|t| t.eq_ignore_ascii_case("document"))
-                .unwrap_or(false)
+                .is_some_and(|t| t.eq_ignore_ascii_case("document"))
             {
                 out.insert("pdfs-2024-09-25".to_string());
             }
 
             // Computer use: look for common markers (tool name / type).
-            if map
-                .get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| {
-                    t.eq_ignore_ascii_case("computer_use") || t.eq_ignore_ascii_case("computer")
-                })
-                .unwrap_or(false)
-            {
+            if map.get("type").and_then(|t| t.as_str()).is_some_and(|t| {
+                t.eq_ignore_ascii_case("computer_use") || t.eq_ignore_ascii_case("computer")
+            }) {
                 out.insert("computer-use-2024-10-22".to_string());
             }
             if map
                 .get("name")
                 .and_then(|n| n.as_str())
-                .map(|n| n.eq_ignore_ascii_case("computer"))
-                .unwrap_or(false)
+                .is_some_and(|n| n.eq_ignore_ascii_case("computer"))
             {
                 out.insert("computer-use-2024-10-22".to_string());
             }
@@ -3848,7 +4493,7 @@ fn normalize_upstream_error(
             .into_iter()
             .flatten()
             .next()
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let code_candidates = [
             v.pointer("/error/code").and_then(|v| v.as_str()),
@@ -3860,15 +4505,10 @@ fn normalize_upstream_error(
             .into_iter()
             .flatten()
             .next()
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
     }
 
-    if message
-        .as_ref()
-        .map(|m| m.trim().is_empty())
-        .unwrap_or(true)
-        && !body_text.trim().is_empty()
-    {
+    if message.as_ref().is_none_or(|m| m.trim().is_empty()) && !body_text.trim().is_empty() {
         message = Some(body_text.trim().to_string());
     }
 
@@ -3900,7 +4540,7 @@ fn normalize_upstream_error(
     )
 }
 
-fn openai_error_type_for_status(status: StatusCode) -> &'static str {
+const fn openai_error_type_for_status(status: StatusCode) -> &'static str {
     match status.as_u16() {
         400 | 404 | 409 | 413 | 422 => "invalid_request_error",
         401 | 403 => "authentication_error",
@@ -3973,7 +4613,7 @@ fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
 
     // Block localhost and loopback
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return Err(format!("blocked internal URL: {}", host));
+        return Err(format!("blocked internal URL: {host}"));
     }
 
     // Block common internal hostnames
@@ -3985,7 +4625,7 @@ fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
         "fd00:ec2::254",   // AWS IMDSv2 IPv6
     ];
     if blocked_hostnames.contains(&host) {
-        return Err(format!("blocked internal URL: {}", host));
+        return Err(format!("blocked internal URL: {host}"));
     }
 
     // Parse IP address if host is an IP
@@ -4015,7 +4655,7 @@ fn validate_url_not_internal(url: &url::Url) -> Result<(), String> {
         };
 
         if is_private {
-            return Err(format!("blocked private/internal IP address: {}", ip));
+            return Err(format!("blocked private/internal IP address: {ip}"));
         }
     }
 
@@ -4029,7 +4669,7 @@ async fn fetch_image_to_base64(
     const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
     const TIMEOUT_SECS: u64 = 10;
 
-    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
         _ => return Err(format!("unsupported image url scheme: {}", parsed.scheme())),
@@ -4078,6 +4718,10 @@ fn guess_mime_from_url(url: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[path = "oauth/proxy_ownership_tests.rs"]
+mod oauth_ownership_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::api;
@@ -4086,6 +4730,7 @@ mod tests {
         CostCalculator, CreateKeyRequest, KeyPermissions, KeyStore, KeyValidator, RateLimiter,
     };
     use crate::upstream::UpstreamResponse;
+    use anyhow::Context;
     use axum::routing::{any, post};
     use axum::Router;
     use bytes::Bytes;
@@ -4099,8 +4744,53 @@ mod tests {
     use tokio::sync::Mutex;
     use tower::util::ServiceExt;
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn websocket_text_messages_are_sanitized_and_audited() {
+    fn opencode_session_header_is_applied() -> Result<(), anyhow::Error> {
+        let mut headers = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut headers, ProviderType::OpenCodeGo, "sess-1");
+        assert_eq!(
+            headers
+                .get("x-opencode-session")
+                .context("get(...) returned None or Err")?
+                .to_str()
+                .context("to_str(...) returned None or Err")?,
+            "sess-1"
+        );
+
+        // OpenCode (Zen) also gets the session header.
+        let mut h2 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h2, ProviderType::OpenCode, "sess-2");
+        assert_eq!(
+            h2.get("x-opencode-session")
+                .context("get(...) returned None or Err")?
+                .to_str()
+                .context("to_str(...) returned None or Err")?,
+            "sess-2"
+        );
+
+        // Non-OpenCode providers must NOT receive the header.
+        let mut h3 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h3, ProviderType::OpenAI, "sess-3");
+        assert!(h3.get("x-opencode-session").is_none());
+
+        // Empty session id -> no header.
+        let mut h4 = http::HeaderMap::new();
+        apply_opencode_session_headers(&mut h4, ProviderType::OpenCodeGo, "");
+        assert!(h4.get("x-opencode-session").is_none());
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[test]
+    fn websocket_text_messages_are_sanitized_and_audited() -> Result<(), anyhow::Error> {
         let (analysis_tx, mut audit_rx) = tokio::sync::broadcast::channel(8);
         let message = AxumWsMessage::Text(
             json!({
@@ -4122,13 +4812,17 @@ mod tests {
             &crate::delegated_fetch::DelegatedFetchPolicy::default(),
             &analysis_tx,
         )
-        .unwrap();
+        .context("unexpected None or Err")?;
         let TungsteniteMessage::Text(text) = sanitized else {
-            panic!("expected text frame");
+            return Err(anyhow::anyhow!("expected text frame"));
         };
-        let body: Value = serde_json::from_str(text.as_str()).unwrap();
+        let body: Value =
+            serde_json::from_str(text.as_str()).context("as_str(...) returned None or Err")?;
         assert!(!body.to_string().contains("file_url"));
-        assert!(body["tools"].as_array().unwrap().is_empty());
+        assert!(body["tools"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?
+            .is_empty());
         assert_eq!(body["tool_choice"], "auto");
 
         let events: Vec<AnalysisEvent> = std::iter::from_fn(|| audit_rx.try_recv().ok()).collect();
@@ -4139,17 +4833,24 @@ mod tests {
                 ..
             } if host == "ws-target.example"
         )));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn websocket_binary_messages_are_sanitized_and_invalid_json_is_rejected() {
+    fn websocket_binary_messages_are_sanitized_and_invalid_json_is_rejected(
+    ) -> Result<(), anyhow::Error> {
         let (analysis_tx, mut audit_rx) = tokio::sync::broadcast::channel(8);
         let binary = AxumWsMessage::Binary(
             serde_json::to_vec(&json!({
                 "tools": [{"type": "web_fetch"}],
                 "tool_choice": "web_fetch"
             }))
-            .unwrap(),
+            .context("unexpected None or Err")?,
         );
 
         let sanitized = sanitize_ws_client_message(
@@ -4157,12 +4858,15 @@ mod tests {
             &crate::delegated_fetch::DelegatedFetchPolicy::default(),
             &analysis_tx,
         )
-        .unwrap();
+        .context("unexpected None or Err")?;
         let TungsteniteMessage::Binary(bytes) = sanitized else {
-            panic!("expected binary frame");
+            return Err(anyhow::anyhow!("expected binary frame"));
         };
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(body["tools"].as_array().unwrap().is_empty());
+        let body: Value = serde_json::from_slice(&bytes).context("unexpected None or Err")?;
+        assert!(body["tools"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?
+            .is_empty());
         assert_eq!(body["tool_choice"], "auto");
 
         assert!(sanitize_ws_client_message(
@@ -4178,10 +4882,16 @@ mod tests {
             AnalysisEvent::DelegatedFetchStripped { capability, .. }
                 if capability == "invalid_json_frame_rejected"
         )));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_apply_injections() {
+    fn test_apply_injections() -> Result<(), anyhow::Error> {
         let mut body = json!({
             "model": "gpt-3.5",
             "messages": [
@@ -4202,7 +4912,9 @@ mod tests {
 
         apply_injections(&mut body, &injections);
 
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
 
         // Should have 3 messages now
         assert_eq!(messages.len(), 3);
@@ -4218,6 +4930,8 @@ mod tests {
         // Assistant response should be last
         assert_eq!(messages[2]["role"], "assistant");
         assert_eq!(messages[2]["content"], "Assistant Response");
+
+        Ok(())
     }
 
     #[test]
@@ -4238,8 +4952,12 @@ mod tests {
         assert!(body.get("messages").is_none());
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_apply_injections_multiple_system_messages() {
+    fn test_apply_injections_multiple_system_messages() -> Result<(), anyhow::Error> {
         let mut body = json!({
             "model": "gpt-4",
             "messages": [
@@ -4260,7 +4978,9 @@ mod tests {
 
         apply_injections(&mut body, &injections);
 
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
 
         // Should have 3 messages
         assert_eq!(messages.len(), 3);
@@ -4271,6 +4991,8 @@ mod tests {
         assert_eq!(messages[1]["role"], "system");
         assert_eq!(messages[1]["content"], "Second system");
         assert_eq!(messages[2]["role"], "user");
+
+        Ok(())
     }
 
     #[test]
@@ -4290,8 +5012,12 @@ mod tests {
         assert!(!bedrock_is_claude_model("meta.llama3-70b-instruct-v1:0"));
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_upsert_csv_header_merges_and_dedupes() {
+    fn test_upsert_csv_header_merges_and_dedupes() -> Result<(), anyhow::Error> {
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::HeaderName::from_static("anthropic-beta"),
@@ -4309,30 +5035,42 @@ mod tests {
 
         let val = headers
             .get("anthropic-beta")
-            .unwrap()
+            .context("unexpected None or Err")?
             .to_str()
-            .unwrap()
+            .context("unexpected None or Err")?
             .to_string();
         assert!(val.contains("prompt-caching-2024-07-31"));
         assert!(val.contains("pdfs-2024-09-25"));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_normalize_upstream_error_rate_limit() {
+    fn test_normalize_upstream_error_rate_limit() -> Result<(), anyhow::Error> {
         let body = br#"{"error":{"message":"rate limited","type":"rate_limit_error"}}"#;
         let (msg, ty, code) = normalize_upstream_error(
             ProviderType::OpenAI,
             StatusCode::TOO_MANY_REQUESTS,
-            std::str::from_utf8(body).unwrap(),
+            std::str::from_utf8(body).context("unexpected None or Err")?,
             body,
         );
         assert_eq!(msg, "rate limited");
         assert_eq!(ty, "rate_limit_error");
         assert!(code.is_some());
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_apply_injections_empty_injections() {
+    fn test_apply_injections_empty_injections() -> Result<(), anyhow::Error> {
         let mut body = json!({
             "model": "gpt-4",
             "messages": [
@@ -4343,9 +5081,13 @@ mod tests {
         let injections: Vec<Injection> = vec![];
         apply_injections(&mut body, &injections);
 
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["content"], "Hello");
+
+        Ok(())
     }
 
     #[test]
@@ -4372,8 +5114,12 @@ mod tests {
         assert_eq!(body["max_tokens"], 1000);
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_apply_injections_with_existing_system_message() {
+    fn test_apply_injections_with_existing_system_message() -> Result<(), anyhow::Error> {
         let mut body = json!({
             "model": "gpt-4",
             "messages": [
@@ -4389,7 +5135,9 @@ mod tests {
 
         apply_injections(&mut body, &injections);
 
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
 
         // Should have 3 messages now
         assert_eq!(messages.len(), 3);
@@ -4400,10 +5148,16 @@ mod tests {
         assert_eq!(messages[1]["content"], "Original system");
         // User message last
         assert_eq!(messages[2]["content"], "Hello");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_apply_injections_user_and_assistant_roles() {
+    fn test_apply_injections_user_and_assistant_roles() -> Result<(), anyhow::Error> {
         let mut body = json!({
             "model": "gpt-4",
             "messages": [
@@ -4424,7 +5178,9 @@ mod tests {
 
         apply_injections(&mut body, &injections);
 
-        let messages = body["messages"].as_array().unwrap();
+        let messages = body["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
 
         // Should have 3 messages
         assert_eq!(messages.len(), 3);
@@ -4435,6 +5191,8 @@ mod tests {
         assert_eq!(messages[1]["content"], "Injected user");
         // Injected assistant last (appended)
         assert_eq!(messages[2]["content"], "Injected assistant");
+
+        Ok(())
     }
 
     #[test]
@@ -4471,89 +5229,158 @@ mod tests {
         assert!(body.is_null());
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_localhost() {
-        let url = url::Url::parse("http://localhost/image.png").unwrap();
+    fn test_ssrf_protection_blocks_localhost() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("http://localhost/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked internal URL"));
+        assert!(matches!(result, Err(e) if e.contains("blocked internal URL")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_loopback() {
-        let url = url::Url::parse("http://127.0.0.1/image.png").unwrap();
+    fn test_ssrf_protection_blocks_loopback() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("http://127.0.0.1/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked internal URL"));
+        assert!(matches!(result, Err(e) if e.contains("blocked internal URL")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_metadata_endpoint() {
-        let url = url::Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+    fn test_ssrf_protection_blocks_metadata_endpoint() -> Result<(), anyhow::Error> {
+        let url = url::Url::parse("http://169.254.169.254/latest/meta-data/")
+            .context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked internal URL"));
+        assert!(matches!(result, Err(e) if e.contains("blocked internal URL")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_private_ip_10() {
-        let url = url::Url::parse("http://10.0.0.1/image.png").unwrap();
+    fn test_ssrf_protection_blocks_private_ip_10() -> Result<(), anyhow::Error> {
+        let url = url::Url::parse("http://10.0.0.1/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+        assert!(matches!(result, Err(e) if e.contains("blocked private/internal IP")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_private_ip_172() {
-        let url = url::Url::parse("http://172.16.0.1/image.png").unwrap();
+    fn test_ssrf_protection_blocks_private_ip_172() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("http://172.16.0.1/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+        assert!(matches!(result, Err(e) if e.contains("blocked private/internal IP")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_private_ip_192() {
-        let url = url::Url::parse("http://192.168.1.1/image.png").unwrap();
+    fn test_ssrf_protection_blocks_private_ip_192() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("http://192.168.1.1/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+        assert!(matches!(result, Err(e) if e.contains("blocked private/internal IP")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_ipv6_loopback() {
-        let url = url::Url::parse("http://[::1]/image.png").unwrap();
+    fn test_ssrf_protection_blocks_ipv6_loopback() -> Result<(), anyhow::Error> {
+        let url = url::Url::parse("http://[::1]/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked internal URL"));
+        assert!(matches!(result, Err(e) if e.contains("blocked internal URL")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_blocks_ipv6_link_local() {
-        let url = url::Url::parse("http://[fe80::1]/image.png").unwrap();
+    fn test_ssrf_protection_blocks_ipv6_link_local() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("http://[fe80::1]/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("blocked private/internal IP"));
+        assert!(matches!(result, Err(e) if e.contains("blocked private/internal IP")));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_allows_public_ip() {
-        let url = url::Url::parse("https://example.com/image.png").unwrap();
+    fn test_ssrf_protection_allows_public_ip() -> Result<(), anyhow::Error> {
+        let url =
+            url::Url::parse("https://example.com/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_ok());
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_ssrf_protection_allows_public_ip_address() {
-        let url = url::Url::parse("https://8.8.8.8/image.png").unwrap();
+    fn test_ssrf_protection_allows_public_ip_address() -> Result<(), anyhow::Error> {
+        let url = url::Url::parse("https://8.8.8.8/image.png").context("unexpected None or Err")?;
         let result = super::validate_url_not_internal(&url);
         assert!(result.is_ok());
+
+        Ok(())
     }
+
+    type MockImages = HashMap<String, (HeaderMap, Bytes, StatusCode)>;
 
     #[derive(Clone)]
     struct MockUpstream {
         requests: Arc<Mutex<Vec<crate::upstream::UpstreamRequest>>>,
         responses: Arc<Mutex<Vec<ResponseSpec>>>,
-        images: Arc<HashMap<String, (HeaderMap, Bytes, StatusCode)>>,
+        images: Arc<MockImages>,
     }
 
     #[derive(Clone)]
@@ -4572,7 +5399,7 @@ mod tests {
             }
         }
 
-        fn with_images(mut self, images: HashMap<String, (HeaderMap, Bytes, StatusCode)>) -> Self {
+        fn with_images(mut self, images: MockImages) -> Self {
             self.images = Arc::new(images);
             self
         }
@@ -4583,10 +5410,10 @@ mod tests {
     }
 
     impl crate::upstream::Upstream for MockUpstream {
-        fn send<'a>(
-            &'a self,
+        fn send(
+            &self,
             request: crate::upstream::UpstreamRequest,
-        ) -> futures::future::BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+        ) -> futures::future::BoxFuture<'_, Result<UpstreamResponse, std::io::Error>> {
             Box::pin(async move {
                 // Record request for assertions.
                 {
@@ -4606,7 +5433,7 @@ mod tests {
                         return Ok(UpstreamResponse {
                             status: *status,
                             headers: headers.clone(),
-                            body: stream::iter(chunks.into_iter())
+                            body: stream::iter(chunks)
                                 .then(|chunk| async move {
                                     tokio::task::yield_now().await;
                                     Ok(chunk)
@@ -4616,12 +5443,14 @@ mod tests {
                     }
                 }
 
-                let mut responses = self.responses.lock().await;
-                let spec = responses.remove(0);
+                let spec = {
+                    let mut responses = self.responses.lock().await;
+                    responses.remove(0)
+                };
                 Ok(UpstreamResponse {
                     status: spec.status,
                     headers: spec.headers,
-                    body: stream::iter(spec.chunks.into_iter())
+                    body: stream::iter(spec.chunks)
                         .then(|chunk| async move {
                             tokio::task::yield_now().await;
                             Ok(chunk)
@@ -4634,25 +5463,31 @@ mod tests {
 
     fn make_config(providers: HashMap<String, ProviderConfig>) -> AppConfig {
         AppConfig {
-            server: Default::default(),
+            server: crate::config::ServerConfig::default(),
             providers,
             upstream: HashMap::new(),
-            logging: Default::default(),
-            analysis: Default::default(),
-            policy: Default::default(),
-            delegated_fetch: Default::default(),
-            state: Default::default(),
-            keys: Default::default(),
-            capture: Default::default(),
-            transform: Default::default(),
-            network: Default::default(),
-            egress: Default::default(),
-            mock_responses: Default::default(),
+            logging: crate::config::LoggingConfig::default(),
+            analysis: crate::config::AnalysisConfig::default(),
+            policy: crate::policy::PolicyConfig::default(),
+            delegated_fetch: crate::delegated_fetch::DelegatedFetchConfig::default(),
+            state: crate::config::StateConfig::default(),
+            keys: crate::config::KeysConfig::default(),
+            capture: crate::config::CaptureConfig::default(),
+            transform: crate::config::TransformConfig::default(),
+            network: crate::config::NetworkConfig::default(),
+            egress: crate::config::EgressConfig::default(),
+            mock_responses: crate::config::MockResponsesConfig::default(),
+            native_pricing: crate::config::NativePricingConfig::default(),
         }
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_delegated_fetch_is_stripped_before_passthrough_and_audited() {
+    async fn e2e_delegated_fetch_is_stripped_before_passthrough_and_audited(
+    ) -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![
             ResponseSpec {
                 status: StatusCode::OK,
@@ -4701,9 +5536,15 @@ mod tests {
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&unsafe_body).unwrap()))
-            .unwrap();
-        let _ = app.clone().oneshot(unsafe_request).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&unsafe_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let _ = app
+            .clone()
+            .oneshot(unsafe_request)
+            .await
+            .context("oneshot(...) returned None or Err")?;
 
         let control_body = json!({
             "model": "gpt-5",
@@ -4714,23 +5555,36 @@ mod tests {
             "tools": [{"type": "function", "function": {"name": "local_tool"}}],
             "tool_choice": "auto"
         });
-        let control_bytes = serde_json::to_vec(&control_body).unwrap();
+        let control_bytes = serde_json::to_vec(&control_body).context("unexpected None or Err")?;
         let control_request = http::Request::builder()
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(control_bytes.clone()))
-            .unwrap();
-        let _ = app.oneshot(control_request).await.unwrap();
+            .context("unexpected None or Err")?;
+        let _ = app
+            .oneshot(control_request)
+            .await
+            .context("oneshot(...) returned None or Err")?;
 
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 2);
-        let forwarded: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let forwarded: Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(
-            forwarded["input"][0]["content"].as_array().unwrap().len(),
+            forwarded["input"][0]["content"]
+                .as_array()
+                .context("as_array(...) returned None or Err")?
+                .len(),
             1
         );
-        assert_eq!(forwarded["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            forwarded["tools"]
+                .as_array()
+                .context("as_array(...) returned None or Err")?
+                .len(),
+            1
+        );
         assert_eq!(forwarded["tool_choice"], "auto");
         assert!(!String::from_utf8_lossy(&requests[0].body).contains("file_url"));
         assert_eq!(requests[1].body, control_bytes);
@@ -4758,10 +5612,17 @@ mod tests {
         assert!(audit_items
             .iter()
             .any(|(path, _, _)| path == "/tool_choice"));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_virtual_key_metadata_controls_remote_content_per_tenant() {
+    async fn e2e_virtual_key_metadata_controls_remote_content_per_tenant(
+    ) -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![
             ResponseSpec {
                 status: StatusCode::OK,
@@ -4783,7 +5644,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().context("unexpected None or Err")?;
         let mut config = make_config(providers);
         config.keys.enabled = true;
         config.keys.require_key = true;
@@ -4793,12 +5654,17 @@ mod tests {
         config.delegated_fetch.enabled = true;
 
         let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
-        state.init_key_store().await.unwrap();
-        let store = state.get_key_store().unwrap();
+        state
+            .init_key_store()
+            .await
+            .map_err(|e| anyhow::anyhow!("init_key_store: {e}"))?;
+        let store = state
+            .get_key_store()
+            .context("get_key_store(...) returned None or Err")?;
         let denied_key = store
             .create_key(crate::keys::CreateKeyRequest::default())
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let allowed_key = store
             .create_key(crate::keys::CreateKeyRequest {
                 metadata: json!({
@@ -4807,7 +5673,7 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
 
         let app = Router::new()
             .route("/v1/*path", any(proxy_handler))
@@ -4827,9 +5693,15 @@ mod tests {
                 .uri("/v1/responses")
                 .header(http::header::CONTENT_TYPE, "application/json")
                 .header(http::header::AUTHORIZATION, format!("Bearer {key}"))
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap();
-            let response = app.clone().oneshot(request).await.unwrap();
+                .body(Body::from(
+                    serde_json::to_vec(&body).context("body(...) returned None or Err")?,
+                ))
+                .context("unexpected None or Err")?;
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .context("oneshot(...) returned None or Err")?;
             assert_eq!(response.status(), StatusCode::OK);
         }
 
@@ -4837,10 +5709,17 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(!String::from_utf8_lossy(&requests[0].body).contains("file_url"));
         assert!(String::from_utf8_lossy(&requests[1].body).contains("file_url"));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_passthrough_applies_compat_to_openai_compatible_body() {
+    async fn e2e_passthrough_applies_compat_to_openai_compatible_body() -> Result<(), anyhow::Error>
+    {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
@@ -4883,22 +5762,32 @@ mod tests {
                     "stream_options": {"include_usage": true},
                     "max_completion_tokens": 20
                 }))
-                .unwrap(),
+                .context("unexpected None or Err")?,
             ))
-            .unwrap();
-        let _ = app.oneshot(req).await.unwrap();
+            .context("unexpected None or Err")?;
+        let _ = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
 
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 1);
-        let forwarded: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let forwarded: Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(forwarded["messages"][0]["role"], "system");
         assert!(forwarded.get("store").is_none());
         assert!(forwarded.get("stream_options").is_none());
         assert_eq!(forwarded["max_tokens"], 20);
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_passthrough_and_injection_without_network() {
+    async fn e2e_passthrough_and_injection_without_network() -> Result<(), anyhow::Error> {
         let response_json = json!({
             "id": "test",
             "object": "chat.completion",
@@ -4915,7 +5804,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&response_json).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&response_json).context("unexpected None or Err")?,
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -4940,9 +5831,15 @@ mod tests {
             .method("POST")
             .uri("/inject/conv1")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&inj).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&inj).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Proxy request
@@ -4955,33 +5852,51 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Conversation-ID", "conv1")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 1);
-        let sent: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-        let msgs = sent["messages"].as_array().unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
+        let msgs = sent["messages"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "You are injected");
         assert_eq!(msgs[1]["role"], "user");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_provider_routing_changes_upstream_url() {
+    async fn e2e_provider_routing_changes_upstream_url() -> Result<(), anyhow::Error> {
         let response_json = json!({"choices":[{"message":{"role":"assistant","content":"ok"}}]});
         let mock = MockUpstream::new(vec![
             ResponseSpec {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                chunks: vec![Bytes::from(serde_json::to_vec(&response_json).unwrap())],
+                chunks: vec![Bytes::from(
+                    serde_json::to_vec(&response_json).context("unexpected None or Err")?,
+                )],
             },
             ResponseSpec {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                chunks: vec![Bytes::from(serde_json::to_vec(&response_json).unwrap())],
+                chunks: vec![Bytes::from(
+                    serde_json::to_vec(&response_json).context("unexpected None or Err")?,
+                )],
             },
         ]);
 
@@ -5015,27 +5930,787 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "alt")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let _ = app.clone().oneshot(req1).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let _ = app
+            .clone()
+            .oneshot(req1)
+            .await
+            .context("oneshot(...) returned None or Err")?;
 
         let req2 = http::Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let _ = app.oneshot(req2).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let _ = app
+            .oneshot(req2)
+            .await
+            .context("oneshot(...) returned None or Err")?;
 
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.starts_with("http://up2/"));
         assert!(requests[1].url.starts_with("http://up1/"));
+
+        Ok(())
     }
 
+    /// An upstream whose error body never yields and never terminates — the
+    /// eavs-1sfs hang scenario. The proxy must bound the error-body read and
+    /// still return a prompt 401 rather than hang forever.
+    struct HangUpstream;
+    impl crate::upstream::Upstream for HangUpstream {
+        fn send(
+            &self,
+            _req: crate::upstream::UpstreamRequest,
+        ) -> futures::future::BoxFuture<'_, Result<UpstreamResponse, std::io::Error>> {
+            Box::pin(async move {
+                let body = futures::stream::pending::<Result<Bytes, std::io::Error>>().boxed();
+                Ok(UpstreamResponse {
+                    status: StatusCode::UNAUTHORIZED,
+                    headers: HeaderMap::new(),
+                    body,
+                })
+            })
+        }
+    }
+
+    /// eavs-1sfs double-proof: (1) a terminated 401 surfaces promptly as a
+    /// well-formed error; (2) a 401 whose error body never terminates is bounded
+    /// by `upstream_error_body_timeout()` and does not hang.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_streaming_passthrough_forwards_sse_payload() {
+    async fn upstream_401_with_non_terminating_body_does_not_hang() -> Result<(), anyhow::Error> {
+        std::env::set_var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS", "50");
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai".to_string(),
+                base_url: "http://upstream/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(HangUpstream));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
+            .context("unexpected None or Err")?;
+        // Must return well before the 50ms bounded read + margin, and as a 401.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req)).await;
+        assert!(
+            result.is_ok(),
+            "upstream 401 with a non-terminating body must not hang"
+        );
+        let response = result
+            .context("unexpected None or Err")?
+            .context("unwrap(...) returned None or Err")?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        std::env::remove_var("EAVS_UPSTREAM_ERROR_BODY_TIMEOUT_MS");
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn upstream_401_returns_error_promptly() -> Result<(), anyhow::Error> {
+        // Repro eavs-1sfs: an upstream 401 must be surfaced as a prompt
+        // OpenAI-style error, not leave the request hanging.
+        let body = br#"{"error":{"message":"invalid api key","type":"invalid_request_error"}}"#;
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::UNAUTHORIZED,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(&body[..])],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".to_string(),
+            ProviderConfig {
+                type_: "openai".to_string(),
+                base_url: "http://upstream/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
+            .context("unexpected None or Err")?;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(req)).await;
+        assert!(result.is_ok(), "upstream 401 must not hang");
+        let response = result
+            .context("unexpected None or Err")?
+            .context("unwrap(...) returned None or Err")?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_shapes_are_scoped_to_their_provider() {
+        assert!(native_inference_path(
+            ProviderType::TypeSafe,
+            "/v1/systemone"
+        ));
+        assert!(native_inference_path(ProviderType::Cohere, "/v2/rerank"));
+        assert!(native_inference_path(ProviderType::Voyage, "/v1/rerank"));
+        assert!(native_inference_path(
+            ProviderType::OpenAI,
+            "/v1/videos/vid_1/content"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::Anthropic,
+            "/v1/videos"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::ElevenLabs,
+            "/v1/admin/keys"
+        ));
+        assert!(!native_inference_path(
+            ProviderType::TypeSafe,
+            "/v1/chat/completions"
+        ));
+        assert!(has_remote_media_reference(
+            &json!({"input_reference": {"image_url": "https://example.com/a.png"}})
+        ));
+        assert!(!has_remote_media_reference(
+            &json!({"input_reference": {"image_url": "data:image/png;base64,AAAA"}})
+        ));
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_typesafe_systemone_preserves_typed_json_and_errors() -> Result<(), anyhow::Error> {
+        let payload = json!({"model":"jev-latest","state":{"ticket":"refund"},
+            "questions":{"urgent":{"type":"noul","instructions":"Is this urgent?"}}});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(br#"{"detail":"invalid question"}"#)],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "typesafe".into(),
+            ProviderConfig {
+                type_: "typesafe".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/typesafe/v1/systemone")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&payload).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let response = app
+            .oneshot(request)
+            .await
+            .context("oneshot(...) returned None or Err")?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response_body.as_ref(), br#"{"detail":"invalid question"}"#);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v1/systemone");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).context("unexpected None or Err")?,
+            payload
+        );
+        assert_eq!(
+            sent[0]
+                .headers
+                .get("authorization")
+                .context("get(...) returned None or Err")?,
+            "Bearer secret"
+        );
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_elevenlabs_binary_upload_and_download_preserve_bytes() -> Result<(), anyhow::Error>
+    {
+        let mut audio_headers = HeaderMap::new();
+        audio_headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("audio/mpeg"),
+        );
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: audio_headers,
+            chunks: vec![Bytes::from_static(b"\xff\xfb\x00\x80")],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "elevenlabs".into(),
+            ProviderConfig {
+                type_: "elevenlabs".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let multipart = b"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n\r\n\xff\x00\r\n--boundary--\r\n";
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/elevenlabs/v1/speech-to-text")
+            .header(
+                http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=boundary",
+            )
+            .body(Body::from(multipart.as_slice()))
+            .context("unexpected None or Err")?;
+        let response = app
+            .oneshot(request)
+            .await
+            .context("oneshot(...) returned None or Err")?;
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .context("get(...) returned None or Err")?,
+            "audio/mpeg"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(body.as_ref(), b"\xff\xfb\x00\x80");
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].body.as_ref(), multipart);
+        assert_eq!(
+            sent[0]
+                .headers
+                .get("xi-api-key")
+                .context("get(...) returned None or Err")?,
+            "secret"
+        );
+        assert_eq!(
+            sent[0]
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .context("get(...) returned None or Err")?,
+            "multipart/form-data; boundary=boundary"
+        );
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn remote_video_reference_is_rejected_before_upstream() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "openai".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"sora-2","prompt":"x","input_reference":{"image_url":"https://example.com/private"}});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&payload).context("body(...) returned None or Err")?,
+                    ))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(mock.take_requests().await.is_empty());
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unsupported_native_shape_rejected_before_upstream() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "anthropic".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .body(Body::from("{}"))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(mock.take_requests().await.is_empty());
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_canonical_rerank_translates_voyage_without_changing_native_route(
+    ) -> Result<(), anyhow::Error> {
+        let response = json!({"object":"list","data":[{"index":1,"relevance_score":0.9}],
+            "model":"rerank-2.5","usage":{"total_tokens":12}});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&response).context("unexpected None or Err")?,
+            )],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "voyage".into(),
+            ProviderConfig {
+                type_: "voyage".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"rerank-2.5","query":"test","documents":["a","b"],"top_n":1});
+        let result = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/voyage/v1/eavs/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&payload).context("body(...) returned None or Err")?,
+                    ))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(result.status(), StatusCode::OK);
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(result.into_body(), usize::MAX)
+                .await
+                .context("unexpected None or Err")?,
+        )
+        .context("unexpected None or Err")?;
+        assert_eq!(value["results"][0]["index"], 1);
+        assert_eq!(value["usage"]["total_tokens"], 12);
+        assert!(value.get("data").is_none());
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v1/rerank");
+        let upstream: Value =
+            serde_json::from_slice(&sent[0].body).context("unexpected None or Err")?;
+        assert_eq!(upstream["top_k"], 1);
+        assert!(upstream.get("top_n").is_none());
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_canonical_rerank_keeps_cohere_shape() -> Result<(), anyhow::Error> {
+        let value = json!({"results":[{"index":0,"relevance_score":0.9}]});
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&value).context("unexpected None or Err")?,
+            )],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "cohere".into(),
+            ProviderConfig {
+                type_: "cohere".into(),
+                base_url: "http://up".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = json!({"model":"rerank-v3.5","query":"q","documents":["a"],"top_n":1});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/cohere/v1/eavs/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&request).context("body(...) returned None or Err")?,
+                    ))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .context("unexpected None or Err")?,
+        )
+        .context("unexpected None or Err")?;
+        assert_eq!(body, value);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v2/rerank");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).context("unexpected None or Err")?,
+            request
+        );
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn capped_rerank_denied_before_upstream_uncapped_usage_preserved(
+    ) -> Result<(), anyhow::Error> {
+        use crate::keys::{CreateKeyRequest, KeyPermissions, KeyValidator, RateLimiter};
+        for provider in ["cohere", "voyage"] {
+            for permissions in [
+                KeyPermissions {
+                    max_budget_usd: Some(1.0),
+                    ..Default::default()
+                },
+                KeyPermissions {
+                    tpm_limit: Some(1000),
+                    ..Default::default()
+                },
+                KeyPermissions::default(),
+            ] {
+                let capped =
+                    permissions.max_budget_usd.is_some() || permissions.tpm_limit.is_some();
+                let mut value = json!({
+                    "results": [{"index":0,"relevance_score":0.9}],
+                    "usage": {"total_tokens": 100},
+                    "meta": {"billed_units": {"search_units": 1}}
+                });
+                if provider == "voyage" {
+                    value["data"] = value
+                        .as_object_mut()
+                        .context("as_object_mut(...) returned None or Err")?
+                        .remove("results")
+                        .context("remove(...) returned None or Err")?;
+                }
+                let mock = MockUpstream::new(vec![ResponseSpec {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    chunks: vec![Bytes::from(
+                        serde_json::to_vec(&value).context("unexpected None or Err")?,
+                    )],
+                }]);
+                let mut providers = HashMap::new();
+                providers.insert(
+                    "cohere".into(),
+                    ProviderConfig {
+                        type_: "cohere".into(),
+                        base_url: "http://up".into(),
+                        api_key: "secret".into(),
+                        ..Default::default()
+                    },
+                );
+                let mut provider_config = providers
+                    .remove("cohere")
+                    .context("remove(...) returned None or Err")?;
+                provider_config.type_ = provider.into();
+                providers.insert(provider.into(), provider_config);
+                let state =
+                    AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+                let store = Arc::new(
+                    KeyStore::in_memory()
+                        .await
+                        .context("unexpected None or Err")?,
+                );
+                let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
+                state
+                    .key_validator
+                    .set(Arc::new(validator))
+                    .ok()
+                    .context("set(...) returned None or Err")?;
+                state
+                    .key_store
+                    .set(store.clone())
+                    .ok()
+                    .context("clone(...) returned None or Err")?;
+                state
+                    .cost_calculator
+                    .set(CostCalculator::new(state.pricing.clone()))
+                    .ok()
+                    .context("unexpected None or Err")?;
+                let key = store
+                    .create_key(CreateKeyRequest {
+                        permissions,
+                        ..Default::default()
+                    })
+                    .await
+                    .context("unexpected None or Err")?
+                    .key;
+                let app = Router::new()
+                    .route("/:provider/v1/*path", any(provider_proxy_handler))
+                    .with_state(state);
+                let response = app
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/{provider}/v1/eavs/rerank"))
+                            .header(http::header::CONTENT_TYPE, "application/json")
+                            .header("authorization", format!("Bearer {key}"))
+                            .body(Body::from(
+                                json!({"model":"rerank-v3.5","query":"q","documents":["a"]})
+                                    .to_string(),
+                            ))
+                            .context("unexpected None or Err")?,
+                    )
+                    .await
+                    .context("unexpected None or Err")?;
+                assert_eq!(
+                    response.status(),
+                    if capped {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::OK
+                    }
+                );
+                let body: Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .context("unexpected None or Err")?,
+                )
+                .context("unexpected None or Err")?;
+                let requests = mock.take_requests().await;
+                if capped {
+                    assert!(requests.is_empty());
+                    assert_eq!(body["error"]["type"], "unsupported_metering");
+                } else {
+                    assert_eq!(requests.len(), 1);
+                    assert_eq!(body["usage"], value["usage"]);
+                    assert_eq!(body["meta"], value["meta"]);
+                    assert!(body["results"].is_array());
+                }
+                let settled = store
+                    .get_by_key(&key)
+                    .context("get_by_key(...) returned None or Err")?;
+                assert_eq!(settled.usage.total_input_tokens, 0);
+                assert_eq!(settled.usage.total_output_tokens, 0);
+                assert_eq!(settled.usage.total_spend_usd, 0.0);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_cohere_rerank_uses_v2_native_path() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(
+                br#"{"results":[{"index":0,"relevance_score":0.9}]}"#,
+            )],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "cohere".into(),
+            ProviderConfig {
+                type_: "cohere".into(),
+                base_url: "http://up".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v2/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let payload = json!({"model":"rerank-v3.5","query":"test","documents":["hello"]});
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/cohere/v2/rerank")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&payload).context("body(...) returned None or Err")?,
+                    ))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].url, "http://up/v2/rerank");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent[0].body).context("unexpected None or Err")?,
+            payload
+        );
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_video_get_has_no_json_null_body() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"mp4")],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "default".into(),
+            ProviderConfig {
+                type_: "openai".into(),
+                base_url: "http://up/v1".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/videos/vid_1/content")
+                    .body(Body::empty())
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert!(sent[0].body.is_empty());
+        assert!(sent[0].headers.get(http::header::CONTENT_TYPE).is_none());
+        assert_eq!(sent[0].url, "http://up/v1/videos/vid_1/content");
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_streaming_passthrough_forwards_sse_payload() -> Result<(), anyhow::Error> {
         let mut upstream_headers = HeaderMap::new();
         upstream_headers.insert(
             http::header::CONTENT_TYPE,
@@ -5075,20 +6750,31 @@ mod tests {
             .method("POST")
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("data: [DONE]"));
         assert!(text.contains("\"hi\""));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_error_forwarding() {
+    async fn e2e_error_forwarding() -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::TOO_MANY_REQUESTS,
             headers: HeaderMap::new(),
@@ -5117,18 +6803,29 @@ mod tests {
             .method("POST")
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         assert!(String::from_utf8_lossy(&body).contains("rate limited"));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn bedrock_fake_streaming_emits_sse() {
+    async fn bedrock_fake_streaming_emits_sse() -> Result<(), anyhow::Error> {
         let bedrock_body = json!({
             "id": "msg_1",
             "model": "anthropic.claude-3-opus-20240229-v1:0",
@@ -5140,7 +6837,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&bedrock_body).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&bedrock_body).context("unexpected None or Err")?,
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -5170,9 +6869,14 @@ mod tests {
             .method("POST")
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers()
@@ -5183,14 +6887,20 @@ mod tests {
         );
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("[DONE]"));
         assert!(text.contains("\"ok\""));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_logging_emits_request_and_chunk() {
+    async fn e2e_logging_emits_request_and_chunk() -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
@@ -5219,34 +6929,46 @@ mod tests {
             .method("POST")
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
 
         let mut saw_request = false;
         let mut saw_chunk = false;
         for _ in 0..10 {
-            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
-                Ok(Ok(evt)) => match evt {
+            if let Ok(Ok(evt)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                match evt {
                     AnalysisEvent::Request { .. } => saw_request = true,
                     AnalysisEvent::ResponseChunk { .. } => {
                         saw_chunk = true;
                         break;
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
         }
         assert!(saw_request);
         assert!(saw_chunk);
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn vision_url_images_are_fetched_for_inline_providers() {
+    async fn vision_url_images_are_fetched_for_inline_providers() -> Result<(), anyhow::Error> {
         let img_url = "http://images.test/img.png".to_string();
 
         let mut img_headers = HeaderMap::new();
@@ -5278,7 +7000,7 @@ mod tests {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             chunks: vec![Bytes::from(
-                serde_json::to_vec(&anthropic_response).unwrap(),
+                serde_json::to_vec(&anthropic_response).context("unexpected None or Err")?,
             )],
         }])
         .with_images(images);
@@ -5293,7 +7015,9 @@ mod tests {
             },
         );
 
-        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let mut config = make_config(providers);
+        config.delegated_fetch.enabled = true;
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
         let app = Router::new()
             .route("/v1/*path", any(proxy_handler))
             .with_state(state);
@@ -5313,9 +7037,14 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Ensure upstream request to Anthropic had base64 inline image data (AQID for [1,2,3]).
@@ -5324,14 +7053,24 @@ mod tests {
             .iter()
             .any(|r| r.method == Method::GET && r.url == "http://images.test/img.png"));
 
-        let post = requests.iter().find(|r| r.method == Method::POST).unwrap();
-        let sent: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        let post = requests
+            .iter()
+            .find(|r| r.method == Method::POST)
+            .context("find(...) returned None or Err")?;
+        let sent: serde_json::Value =
+            serde_json::from_slice(&post.body).context("unexpected None or Err")?;
         assert_eq!(sent["messages"][0]["content"][1]["type"], "image");
         assert_eq!(sent["messages"][0]["content"][1]["source"]["data"], "AQID");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_non_streaming_transform_returns_openai_json() {
+    async fn e2e_non_streaming_transform_returns_openai_json() -> Result<(), anyhow::Error> {
         let anthropic_response = json!({
             "id": "msg_123",
             "type": "message",
@@ -5346,7 +7085,7 @@ mod tests {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             chunks: vec![Bytes::from(
-                serde_json::to_vec(&anthropic_response).unwrap(),
+                serde_json::to_vec(&anthropic_response).context("unexpected None or Err")?,
             )],
         }]);
 
@@ -5375,19 +7114,31 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            .context("unexpected None or Err")?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).context("unexpected None or Err")?;
         assert_eq!(json["choices"][0]["message"]["content"], "ok");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_bedrock_request_is_sigv4_signed() {
+    async fn e2e_bedrock_request_is_sigv4_signed() -> Result<(), anyhow::Error> {
         let bedrock_response = json!({
             "id": "msg_123",
             "type": "message",
@@ -5401,7 +7152,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&bedrock_response).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&bedrock_response).context("unexpected None or Err")?,
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -5431,15 +7184,21 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            .context("unexpected None or Err")?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).context("unexpected None or Err")?;
         assert_eq!(json["choices"][0]["message"]["content"], "ok");
 
         let requests = mock.take_requests().await;
@@ -5452,9 +7211,9 @@ mod tests {
         let auth = requests[0]
             .headers
             .get(http::header::AUTHORIZATION)
-            .unwrap()
+            .context("unexpected None or Err")?
             .to_str()
-            .unwrap();
+            .context("unexpected None or Err")?;
         assert!(auth.starts_with("AWS4-HMAC-SHA256 "));
         assert!(auth.contains("Credential=AKIDEXAMPLE/"));
         assert!(requests[0]
@@ -5466,13 +7225,20 @@ mod tests {
                 "x-amz-content-sha256"
             )));
 
-        let sent: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(sent["anthropic_version"], "bedrock-2023-05-31");
         assert!(sent.get("model").is_none());
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_bedrock_missing_credentials_returns_400() {
+    async fn e2e_bedrock_missing_credentials_returns_400() -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![]);
 
         let mut providers = HashMap::new();
@@ -5500,17 +7266,29 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         let requests = mock.take_requests().await;
         assert!(requests.is_empty());
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_azure_base_url_env_is_resolved_and_deployment_path_is_added() {
+    async fn e2e_azure_base_url_env_is_resolved_and_deployment_path_is_added(
+    ) -> Result<(), anyhow::Error> {
         std::env::set_var("AZURE_OPENAI_ENDPOINT", "https://azure.example.com/");
 
         let response_json = json!({
@@ -5528,7 +7306,9 @@ mod tests {
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            chunks: vec![Bytes::from(serde_json::to_vec(&response_json).unwrap())],
+            chunks: vec![Bytes::from(
+                serde_json::to_vec(&response_json).context("unexpected None or Err")?,
+            )],
         }]);
 
         let mut providers = HashMap::new();
@@ -5558,9 +7338,14 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "default")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let requests = mock.take_requests().await;
@@ -5573,17 +7358,23 @@ mod tests {
             requests[0]
                 .headers
                 .get(http::header::HeaderName::from_static("api-key"))
-                .unwrap()
+                .context("unexpected None or Err")?
                 .to_str()
-                .unwrap(),
+                .context("unexpected None or Err")?,
             "azure-key"
         );
 
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn stress_100_concurrent_non_streaming_requests() {
+    async fn stress_100_concurrent_non_streaming_requests() -> Result<(), anyhow::Error> {
         let response_json = json!({
             "id": "test",
             "object": "chat.completion",
@@ -5601,7 +7392,9 @@ mod tests {
             responses.push(ResponseSpec {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                chunks: vec![Bytes::from(serde_json::to_vec(&response_json).unwrap())],
+                chunks: vec![Bytes::from(
+                    serde_json::to_vec(&response_json).context("unexpected None or Err")?,
+                )],
             });
         }
 
@@ -5625,7 +7418,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "stream": false
         }))
-        .unwrap();
+        .context("unexpected None or Err")?;
 
         let tasks = (0..100).map(|_| {
             let app = app.clone();
@@ -5636,13 +7429,16 @@ mod tests {
                     .uri("/v1/chat/completions")
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .body(Body::from(req_body))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
+                    .context("unexpected None or Err")?;
+                let resp = app
+                    .oneshot(req)
+                    .await
+                    .context("oneshot(...) returned None or Err")?;
                 let status = resp.status();
                 let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
                     .await
-                    .unwrap();
-                status
+                    .context("unexpected None or Err")?;
+                Ok::<_, anyhow::Error>(status)
             }
         });
 
@@ -5651,15 +7447,21 @@ mod tests {
             futures::future::join_all(tasks),
         )
         .await
-        .unwrap();
+        .context("unexpected None or Err")?;
 
-        assert!(statuses.iter().all(|s| *s == StatusCode::OK));
+        assert!(statuses.iter().all(|s| matches!(s, Ok(StatusCode::OK))));
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 100);
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn stress_50_concurrent_streaming_requests() {
+    async fn stress_50_concurrent_streaming_requests() -> Result<(), anyhow::Error> {
         let mut upstream_headers = HeaderMap::new();
         upstream_headers.insert(
             http::header::CONTENT_TYPE,
@@ -5700,7 +7502,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "stream": true
         }))
-        .unwrap();
+        .context("unexpected None or Err")?;
 
         let tasks = (0..50).map(|_| {
             let app = app.clone();
@@ -5711,14 +7513,18 @@ mod tests {
                     .uri("/v1/chat/completions")
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .body(Body::from(req_body))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
+                    .context("unexpected None or Err")?;
+                let resp = app
+                    .oneshot(req)
+                    .await
+                    .context("oneshot(...) returned None or Err")?;
                 assert_eq!(resp.status(), StatusCode::OK);
                 let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
                     .await
-                    .unwrap();
+                    .context("unexpected None or Err")?;
                 let text = String::from_utf8_lossy(&body);
                 assert!(text.contains("data: [DONE]"));
+                Ok::<(), anyhow::Error>(())
             }
         });
 
@@ -5727,11 +7533,15 @@ mod tests {
             futures::future::join_all(tasks),
         )
         .await
-        .unwrap();
+        .context("unexpected None or Err")?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn stress_rapid_connect_disconnect_cycles() {
+    async fn stress_rapid_connect_disconnect_cycles() -> Result<(), anyhow::Error> {
         let mut upstream_headers = HeaderMap::new();
         upstream_headers.insert(
             http::header::CONTENT_TYPE,
@@ -5767,7 +7577,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "stream": true
         }))
-        .unwrap();
+        .context("unexpected None or Err")?;
 
         for _ in 0..200 {
             let req = http::Request::builder()
@@ -5775,14 +7585,24 @@ mod tests {
                 .uri("/v1/chat/completions")
                 .header(http::header::CONTENT_TYPE, "application/json")
                 .body(Body::from(req_body.clone()))
-                .unwrap();
-            let resp = app.clone().oneshot(req).await.unwrap();
+                .context("unexpected None or Err")?;
+            let resp = app
+                .clone()
+                .oneshot(req)
+                .await
+                .context("oneshot(...) returned None or Err")?;
             drop(resp);
         }
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn stress_injection_during_concurrent_streaming() {
+    async fn stress_injection_during_concurrent_streaming() -> Result<(), anyhow::Error> {
         let mut upstream_headers = HeaderMap::new();
         upstream_headers.insert(
             http::header::CONTENT_TYPE,
@@ -5828,7 +7648,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "stream": true
         }))
-        .unwrap();
+        .context("unexpected None or Err")?;
 
         let stream_tasks = (0..20).map(|_| {
             let app = app.clone();
@@ -5840,12 +7660,16 @@ mod tests {
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .header("X-Conversation-ID", "conv-stress")
                     .body(Body::from(stream_body))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
+                    .context("unexpected None or Err")?;
+                let resp = app
+                    .oneshot(req)
+                    .await
+                    .context("oneshot(...) returned None or Err")?;
                 assert_eq!(resp.status(), StatusCode::OK);
                 let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
                     .await
-                    .unwrap();
+                    .context("unexpected None or Err")?;
+                Ok::<(), anyhow::Error>(())
             }
         });
 
@@ -5858,29 +7682,47 @@ mod tests {
                     .method("POST")
                     .uri("/inject/conv-stress")
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_vec(&inj).unwrap()))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
+                    .body(Body::from(
+                        serde_json::to_vec(&inj).context("body(...) returned None or Err")?,
+                    ))
+                    .context("unexpected None or Err")?;
+                let resp = app
+                    .oneshot(req)
+                    .await
+                    .context("oneshot(...) returned None or Err")?;
                 assert_eq!(resp.status(), StatusCode::OK);
+                Ok::<(), anyhow::Error>(())
             }
         };
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async move {
-            tokio::join!(futures::future::join_all(stream_tasks), inject_task);
+            let (stream_results, injected) =
+                tokio::join!(futures::future::join_all(stream_tasks), inject_task,);
+            injected?;
+            stream_results
+                .into_iter()
+                .collect::<Result<Vec<_>, anyhow::Error>>()?;
+            Ok::<(), anyhow::Error>(())
         })
         .await
-        .unwrap();
+        .context("unexpected None or Err")??;
 
         let delivered = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .context("unexpected None or Err")?
+            .context("unexpected None or Err")?;
         assert_eq!(delivered[0].role, "system");
         assert_eq!(delivered[0].content, "Injected mid-stream");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn inject_delivers_to_active_ws_sessions() {
+    async fn inject_delivers_to_active_ws_sessions() -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![]);
         let mut providers = HashMap::new();
         providers.insert(
@@ -5903,32 +7745,49 @@ mod tests {
             .method("POST")
             .uri("/inject/convws")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&inj).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&inj).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let delivered = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .context("unexpected None or Err")?
+            .context("unexpected None or Err")?;
         assert_eq!(delivered[0].role, "system");
         assert_eq!(delivered[0].content, "Injected mid-stream");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn ws_upstream_url_builder_converts_http_to_ws() {
+    fn ws_upstream_url_builder_converts_http_to_ws() -> Result<(), anyhow::Error> {
         let url = build_ws_upstream_url(
             "https://api.example.com/v1",
             "/v1/realtime",
             Some("model=x"),
         )
-        .unwrap();
+        .map_err(|e| anyhow::anyhow!("build_ws_upstream_url: {e}"))?;
         assert_eq!(url, "wss://api.example.com/v1/realtime?model=x");
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_mock_provider_returns_synthetic_response() {
+    async fn e2e_mock_provider_returns_synthetic_response() -> Result<(), anyhow::Error> {
         // Mock upstream won't be called since mock provider handles requests internally
         let mock = MockUpstream::new(vec![]);
 
@@ -5957,23 +7816,35 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "mock")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
 
-        let resp = app.clone().oneshot(req).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.headers().get("x-mock-response").unwrap(), "true");
+        assert_eq!(
+            resp.headers()
+                .get("x-mock-response")
+                .context("get(...) returned None or Err")?,
+            "true"
+        );
 
         let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            .context("unexpected None or Err")?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).context("unexpected None or Err")?;
 
         assert_eq!(body["object"], "chat.completion");
         assert_eq!(body["model"], "mock-model");
         assert!(body["choices"][0]["message"]["content"]
             .as_str()
-            .unwrap()
+            .context("unexpected None or Err")?
             .contains("mock response"));
 
         // Verify no upstream requests were made
@@ -5983,10 +7854,16 @@ mod tests {
             0,
             "Mock provider should not make upstream requests"
         );
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_mock_provider_returns_streaming_response() {
+    async fn e2e_mock_provider_returns_streaming_response() -> Result<(), anyhow::Error> {
         let mock = MockUpstream::new(vec![]);
 
         let mut providers = HashMap::new();
@@ -6014,19 +7891,26 @@ mod tests {
             .uri("/v1/chat/completions")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("X-Provider", "mock")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
 
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get("content-type").unwrap(),
+            resp.headers()
+                .get("content-type")
+                .context("get(...) returned None or Err")?,
             "text/event-stream"
         );
 
         let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let body_str = String::from_utf8_lossy(&body_bytes);
 
         // Should contain SSE data lines with word-by-word streaming
@@ -6038,6 +7922,8 @@ mod tests {
         // Verify no upstream requests were made
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 0);
+
+        Ok(())
     }
 
     #[test]
@@ -6056,7 +7942,7 @@ mod tests {
                 "org_id": "org-platform"
             }
         }));
-        let token = format!("{}.{}.sig", header, payload);
+        let token = format!("{header}.{payload}.sig");
         assert_eq!(
             extract_openai_account_id(&token).as_deref(),
             Some("acct-chatgpt")
@@ -6066,7 +7952,7 @@ mod tests {
         let payload = b64(&json!({
             "https://api.openai.com/auth": {"org_id": "org-only"}
         }));
-        let token = format!("{}.{}.sig", header, payload);
+        let token = format!("{header}.{payload}.sig");
         assert_eq!(
             extract_openai_account_id(&token).as_deref(),
             Some("org-only")
@@ -6086,12 +7972,18 @@ mod tests {
         assert_eq!(google_model_from_path("/v1/chat/completions"), None);
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn test_inject_claude_code_identity_into_anthropic_body() {
+    fn test_inject_claude_code_identity_into_anthropic_body() -> Result<(), anyhow::Error> {
         // String system prompt gets prefixed
         let mut body = json!({"system": "You are helpful.", "messages": []});
         inject_claude_code_identity_into_anthropic_body(&mut body);
-        let system = body["system"].as_str().unwrap();
+        let system = body["system"]
+            .as_str()
+            .context("as_str(...) returned None or Err")?;
         assert!(system.starts_with(CLAUDE_CODE_IDENTITY));
         assert!(system.contains("You are helpful."));
 
@@ -6101,15 +7993,34 @@ mod tests {
             "messages": []
         });
         inject_claude_code_identity_into_anthropic_body(&mut body);
-        let blocks = body["system"].as_array().unwrap();
+        let blocks = body["system"]
+            .as_array()
+            .context("as_array(...) returned None or Err")?;
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0]["text"].as_str().unwrap(), CLAUDE_CODE_IDENTITY);
-        assert_eq!(blocks[1]["text"].as_str().unwrap(), "existing");
+        assert_eq!(
+            blocks[0]["text"]
+                .as_str()
+                .context("as_str(...) returned None or Err")?,
+            CLAUDE_CODE_IDENTITY
+        );
+        assert_eq!(
+            blocks[1]["text"]
+                .as_str()
+                .context("as_str(...) returned None or Err")?,
+            "existing"
+        );
 
         // Missing system gets created
         let mut body = json!({"messages": []});
         inject_claude_code_identity_into_anthropic_body(&mut body);
-        assert_eq!(body["system"].as_str().unwrap(), CLAUDE_CODE_IDENTITY);
+        assert_eq!(
+            body["system"]
+                .as_str()
+                .context("as_str(...) returned None or Err")?,
+            CLAUDE_CODE_IDENTITY
+        );
+
+        Ok(())
     }
 
     fn make_tracker() -> UsageTracker {
@@ -6182,15 +8093,399 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[test]
+    fn websocket_remote_images_and_policy_injection_are_sanitized() -> Result<(), anyhow::Error> {
+        let input = json!([{"role":"user","content":[
+            {"type":"input_text","text":"describe"},
+            {"type":"input_image","image_url":"https://private.example/image"},
+            {"type":"input_image","image_url":"data:image/png;base64,AQID"}
+        ]}]);
+        let policy = crate::policy::PolicyConfig {
+            enabled: true,
+            rules: vec![crate::policy::PolicyRule::SetField {
+                provider: None,
+                model: None,
+                path: None,
+                field: "input".into(),
+                value: input.clone(),
+            }],
+        };
+        let (tx, mut audit) = tokio::sync::broadcast::channel(32);
+        let no_policy = crate::policy::PolicyConfig::default();
+        for binary in [false, true] {
+            for rewrite in [false, true] {
+                let body = json!({"type":"response.create", "input":input});
+                let message = if binary {
+                    AxumWsMessage::Binary(
+                        serde_json::to_vec(&body).context("unexpected None or Err")?,
+                    )
+                } else {
+                    AxumWsMessage::Text(body.to_string())
+                };
+                let result = sanitize_codex_ws_message(
+                    message,
+                    if rewrite { &policy } else { &no_policy },
+                    "openai-codex",
+                    None,
+                    &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+                    &tx,
+                )
+                .context("unexpected None or Err")?;
+                let value: Value = match result {
+                    TungsteniteMessage::Text(text) => {
+                        assert!(!binary);
+                        serde_json::from_str(&text).context("unexpected None or Err")?
+                    }
+                    TungsteniteMessage::Binary(bytes) => {
+                        assert!(binary);
+                        serde_json::from_slice(&bytes).context("unexpected None or Err")?
+                    }
+                    _ => return Err(anyhow::anyhow!("expected JSON frame")),
+                };
+                let content = value["input"][0]["content"]
+                    .as_array()
+                    .context("as_array(...) returned None or Err")?;
+                assert_eq!(content.len(), 2);
+                assert_eq!(content[0], input[0]["content"][0]);
+                assert_eq!(content[1], input[0]["content"][2]);
+            }
+        }
+        let mut stripped = 0;
+        while let Ok(event) = audit.try_recv() {
+            if let AnalysisEvent::DelegatedFetchStripped { target_host, .. } = event {
+                assert_eq!(target_host.as_deref(), Some("private.example"));
+                stripped += 1;
+            }
+        }
+        assert_eq!(stripped, 6); // Four inbound strips, two policy reinjections.
+
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify scope denial and frame preservation; serialization errors propagate"
+    )]
+    fn codex_ws_frames_enforce_model_scope_before_and_after_policy() -> Result<(), anyhow::Error> {
+        let permissions = KeyPermissions {
+            allowed_models: Some(["codex-ws".to_string(), "gpt-allowed".to_string()].into()),
+            ..Default::default()
+        };
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        for binary in [false, true] {
+            for (model, rewrite, expected) in [
+                (Some("gpt-allowed"), None, true),
+                (Some("gpt-forbidden"), None, false),
+                (None, None, false),
+                (Some("gpt-allowed"), Some("gpt-forbidden"), false),
+                (Some("gpt-forbidden"), Some("gpt-allowed"), false),
+                (Some("gpt-allowed"), Some("gpt-allowed"), true),
+            ] {
+                let mut body = json!({"type":"response.create", "input":"fixture"});
+                if let Some(model) = model {
+                    body["model"] = json!(model);
+                }
+                let policy = crate::policy::PolicyConfig {
+                    enabled: rewrite.is_some(),
+                    rules: rewrite.map_or_else(Vec::new, |target| {
+                        vec![crate::policy::PolicyRule::RewriteModel {
+                            provider: None,
+                            model: None,
+                            to: target.to_string(),
+                        }]
+                    }),
+                };
+                let message = if binary {
+                    AxumWsMessage::Binary(serde_json::to_vec(&body)?)
+                } else {
+                    AxumWsMessage::Text(body.to_string())
+                };
+                let result = sanitize_codex_ws_message(
+                    message,
+                    &policy,
+                    "openai-codex",
+                    Some(&permissions),
+                    &crate::delegated_fetch::DelegatedFetchPolicy::default(),
+                    &tx,
+                );
+                assert_eq!(
+                    result.is_some(),
+                    expected,
+                    "binary={binary}, model={model:?}, rewrite={rewrite:?}"
+                );
+                if let Some(frame) = result {
+                    let sent: Value = match frame {
+                        TungsteniteMessage::Text(text) => serde_json::from_str(&text)?,
+                        TungsteniteMessage::Binary(bytes) => serde_json::from_slice(&bytes)?,
+                        _ => return Err(anyhow::anyhow!("unexpected frame type")),
+                    };
+                    assert_eq!(sent["model"], "gpt-allowed");
+                    assert_eq!(sent["input"], "fixture");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_native_anthropic_messages_passthrough() {
+    async fn policy_rewrite_cannot_expand_virtual_key_model_scope() -> Result<(), anyhow::Error> {
+        for (target, allowed) in [("gpt-forbidden", false), ("gpt-allowed", true)] {
+            let mock = MockUpstream::new(vec![ResponseSpec {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                chunks: vec![Bytes::from_static(b"{}")],
+            }]);
+            let providers = HashMap::from([(
+                "test".into(),
+                ProviderConfig {
+                    type_: "openai-compatible".into(),
+                    base_url: "http://up/v1".into(),
+                    api_key: "synthetic-secret".into(),
+                    ..Default::default()
+                },
+            )]);
+            let mut config = make_config(providers);
+            config.policy = crate::policy::PolicyConfig {
+                enabled: true,
+                rules: vec![crate::policy::PolicyRule::RewriteModel {
+                    provider: None,
+                    model: None,
+                    to: target.into(),
+                }],
+            };
+            let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+            let store = Arc::new(KeyStore::in_memory().await?);
+            state
+                .key_validator
+                .set(Arc::new(KeyValidator::new(
+                    store.clone(),
+                    Arc::new(RateLimiter::new()),
+                )))
+                .map_err(|_| anyhow::anyhow!("validator already initialized"))?;
+            let key = store
+                .create_key(CreateKeyRequest {
+                    permissions: KeyPermissions {
+                        allowed_models: Some(["gpt-allowed".to_string()].into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .await?
+                .key;
+            let app = Router::new()
+                .route("/:provider/v1/*path", any(provider_proxy_handler))
+                .with_state(state);
+            let response = app
+                .oneshot(
+                    http::Request::builder()
+                        .method("POST")
+                        .uri("/test/v1/responses")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {key}"))
+                        .body(Body::from(
+                            json!({"model":"gpt-allowed", "input":"fixture"}).to_string(),
+                        ))?,
+                )
+                .await?;
+            let requests = mock.take_requests().await;
+            if allowed {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(requests.len(), 1);
+                let sent: Value = serde_json::from_slice(&requests[0].body)?;
+                assert_eq!(sent["model"], target);
+            } else {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert!(
+                    requests.is_empty(),
+                    "Forbidden rewrite must not reach upstream"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify native media preservation while fixture failures propagate"
+    )]
+    async fn e2e_remote_media_policy_preserves_inline_native_shapes() -> Result<(), anyhow::Error> {
+        use crate::keys::{CreateKeyRequest, KeyValidator, RateLimiter};
+        let remote = "https://private.example/media";
+        for (provider, path, body, parts_path) in [
+            (
+                "openai-compatible",
+                "chat/completions",
+                json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                    {"type":"text","text":"describe"},
+                    {"type":"image_url","image_url":{"url":remote}},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}
+                ]}]}),
+                "/messages/0/content",
+            ),
+            (
+                "openai-compatible",
+                "responses",
+                json!({"model":"gpt-5","input":[{"role":"user","content":[
+                    {"type":"input_text","text":"describe"},
+                    {"type":"input_image","image_url":remote},
+                    {"type":"input_image","image_url":"data:image/png;base64,AQID"}
+                ]}]}),
+                "/input/0/content",
+            ),
+            (
+                "anthropic",
+                "messages",
+                json!({"model":"claude-opus-4-6","max_tokens":32,"messages":[{"role":"user","content":[
+                    {"type":"text","text":"describe"},
+                    {"type":"image","source":{"type":"url","url":remote}},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}
+                ]}]}),
+                "/messages/0/content",
+            ),
+            (
+                "google",
+                "models/gemini-2.5-pro:generateContent",
+                json!({"contents":[{"role":"user","parts":[
+                    {"text":"describe"},
+                    {"fileData":{"mimeType":"image/png","fileUri":remote}},
+                    {"inlineData":{"mimeType":"image/png","data":"AQID"}}
+                ]}]}),
+                "/contents/0/parts",
+            ),
+        ] {
+            let mock = MockUpstream::new(
+                (0..2)
+                    .map(|_| ResponseSpec {
+                        status: StatusCode::OK,
+                        headers: HeaderMap::new(),
+                        chunks: vec![Bytes::from_static(b"{}")],
+                    })
+                    .collect(),
+            );
+            let providers = HashMap::from([(
+                "test".into(),
+                ProviderConfig {
+                    type_: provider.into(),
+                    base_url: "http://up/v1".into(),
+                    api_key: "secret".into(),
+                    ..Default::default()
+                },
+            )]);
+            let mut config = make_config(providers);
+            // A tenant must not inherit the permissive process fallback or
+            // media injected by an operator body-mutating policy.
+            config.delegated_fetch.enabled = true;
+            let field = parts_path
+                .split('/')
+                .nth(1)
+                .context("nth(...) returned None or Err")?;
+            config.policy = crate::policy::PolicyConfig {
+                enabled: true,
+                rules: vec![crate::policy::PolicyRule::SetField {
+                    provider: None,
+                    model: None,
+                    path: None,
+                    field: field.into(),
+                    value: body[field].clone(),
+                }],
+            };
+            let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+            let store = Arc::new(
+                KeyStore::in_memory()
+                    .await
+                    .context("unexpected None or Err")?,
+            );
+            state
+                .key_validator
+                .set(Arc::new(KeyValidator::new(
+                    store.clone(),
+                    Arc::new(RateLimiter::new()),
+                )))
+                .ok()
+                .context("unexpected None or Err")?;
+            let mut audit = state.analysis_tx.subscribe();
+            let app = Router::new()
+                .route("/:provider/v1/*path", any(provider_proxy_handler))
+                .with_state(state);
+            for allowed in [false, true] {
+                let key = store
+                    .create_key(CreateKeyRequest {
+                        metadata: json!({"delegated_fetch":{"remote_content":allowed}}),
+                        ..Default::default()
+                    })
+                    .await
+                    .context("unexpected None or Err")?
+                    .key;
+                let response = app
+                    .clone()
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/test/v1/{path}"))
+                            .header("content-type", "application/json")
+                            .header("authorization", format!("Bearer {key}"))
+                            .body(Body::from(body.to_string()))
+                            .context("unexpected None or Err")?,
+                    )
+                    .await
+                    .context("unexpected None or Err")?;
+                assert_eq!(response.status(), StatusCode::OK, "{provider}: {allowed}");
+                let requests = mock.take_requests().await;
+                assert_eq!(requests.len(), 1, "No gateway fetch may occur");
+                assert_eq!(requests[0].method, Method::POST);
+                let sent: Value =
+                    serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
+                let mut expected = body.clone();
+                if !allowed {
+                    expected
+                        .pointer_mut(parts_path)
+                        .context("unexpected None or Err")?
+                        .as_array_mut()
+                        .context("unexpected None or Err")?
+                        .remove(1);
+                }
+                assert_eq!(sent, expected, "{provider}: {allowed}");
+            }
+            let mut stripped = false;
+            while let Ok(event) = audit.try_recv() {
+                if let AnalysisEvent::DelegatedFetchStripped { target_host, .. } = event {
+                    stripped |= target_host.as_deref() == Some("private.example");
+                }
+            }
+            assert!(stripped, "{provider}: missing denial audit");
+        }
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_native_anthropic_messages_passthrough() -> Result<(), anyhow::Error> {
         // pi (api=anthropic-messages) posts a native Anthropic body to
         // {eavs}/{provider}/v1 + the SDK's /v1/messages. It must be relayed
         // untouched (system, tools, thinking intact) to {base}/v1/messages
         // and the anthropic-format SSE response returned unmodified.
         let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         let mut headers = HeaderMap::new();
-        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        headers.insert(
+            "content-type",
+            "text/event-stream"
+                .parse()
+                .context("parse(...) returned None or Err")?,
+        );
         let mock = MockUpstream::new(vec![ResponseSpec {
             status: StatusCode::OK,
             headers,
@@ -6225,33 +8520,54 @@ mod tests {
             .uri("/anthropic/v1/v1/messages")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("anthropic-beta", "fine-grained-tool-streaming-2025-05-14")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
 
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         // Response relayed as-is in Anthropic format
         assert_eq!(String::from_utf8_lossy(&body_bytes), sse);
 
         let requests = mock.take_requests().await;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url, "https://api.anthropic.com/v1/messages");
-        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let sent: Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(sent, req_body);
         // Auth + client beta features forwarded
-        assert_eq!(requests[0].headers.get("x-api-key").unwrap(), "sk-test");
-        let beta = requests[0].headers.get("anthropic-beta").unwrap();
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-api-key")
+                .context("get(...) returned None or Err")?,
+            "sk-test"
+        );
+        let beta = requests[0]
+            .headers
+            .get("anthropic-beta")
+            .context("get(...) returned None or Err")?;
         assert!(beta
             .to_str()
-            .unwrap()
+            .context("unexpected None or Err")?
             .contains("fine-grained-tool-streaming-2025-05-14"));
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_native_google_generate_content_passthrough() {
+    async fn e2e_native_google_generate_content_passthrough() -> Result<(), anyhow::Error> {
         // pi (api=google-generative-ai) posts native Google bodies to
         // {eavs}/{provider}/v1/models/{model}:streamGenerateContent — the /v1
         // routing artifact must be dropped so the upstream sees
@@ -6286,10 +8602,15 @@ mod tests {
             .method("POST")
             .uri("/google/v1/models/gemini-2.5-pro:streamGenerateContent?alt=sse")
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_vec(&req_body).context("body(...) returned None or Err")?,
+            ))
+            .context("unexpected None or Err")?;
 
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let requests = mock.take_requests().await;
@@ -6298,12 +8619,19 @@ mod tests {
             requests[0].url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
         );
-        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let sent: Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(sent, req_body);
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn e2e_codex_sse_post_with_zstd_body() {
+    async fn e2e_codex_sse_post_with_zstd_body() -> Result<(), anyhow::Error> {
         // pi's Codex SSE fallback POSTs a zstd-compressed body to
         // {eavs}/{provider}/v1/codex/responses; it must be routed (not 405),
         // decompressed, and forwarded to {base}/codex/responses.
@@ -6337,17 +8665,25 @@ mod tests {
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "stream": true
         });
-        let compressed =
-            zstd::stream::encode_all(serde_json::to_vec(&req_body).unwrap().as_slice(), 0).unwrap();
+        let compressed = zstd::stream::encode_all(
+            serde_json::to_vec(&req_body)
+                .context("unexpected None or Err")?
+                .as_slice(),
+            0,
+        )
+        .context("as_slice(...) returned None or Err")?;
         let req = http::Request::builder()
             .method("POST")
             .uri("/codex/v1/codex/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(http::header::CONTENT_ENCODING, "zstd")
             .body(Body::from(compressed))
-            .unwrap();
+            .context("unexpected None or Err")?;
 
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app
+            .oneshot(req)
+            .await
+            .context("oneshot(...) returned None or Err")?;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let requests = mock.take_requests().await;
@@ -6356,13 +8692,16 @@ mod tests {
             requests[0].url,
             "https://chatgpt.com/backend-api/codex/responses"
         );
-        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let sent: Value =
+            serde_json::from_slice(&requests[0].body).context("unexpected None or Err")?;
         assert_eq!(sent, req_body);
+
+        Ok(())
     }
 
-    /// Helper: build an AppState with an in-memory key store wired into a
+    /// Helper: build an `AppState` with an in-memory key store wired into a
     /// validator and cost calculator, so usage recording debits real state.
-    async fn state_with_key_store() -> (AppState, Arc<KeyStore>) {
+    async fn state_with_key_store() -> Result<(AppState, Arc<KeyStore>), anyhow::Error> {
         let mut providers = HashMap::new();
         providers.insert(
             "default".to_string(),
@@ -6376,20 +8715,225 @@ mod tests {
             make_config(providers),
             Arc::new(MockUpstream::new(vec![])),
         );
-        let store = Arc::new(KeyStore::in_memory().await.unwrap());
+        let store = Arc::new(
+            KeyStore::in_memory()
+                .await
+                .context("unexpected None or Err")?,
+        );
         let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
-        state.key_validator.set(Arc::new(validator)).ok().unwrap();
+        state
+            .key_validator
+            .set(Arc::new(validator))
+            .ok()
+            .context("set(...) returned None or Err")?;
         state
             .cost_calculator
             .set(CostCalculator::new(state.pricing.clone()))
             .ok()
-            .unwrap();
-        (state, store)
+            .context("unexpected None or Err")?;
+        Ok((state, store))
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn ws_realtime_model_scope_is_enforced_on_actual_model() {
-        let store = Arc::new(KeyStore::in_memory().await.unwrap());
+    async fn fal_cannot_use_realtime_websocket_route() -> Result<(), anyhow::Error> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "fal".into(),
+            ProviderConfig {
+                type_: "fal".into(),
+                base_url: "http://up".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        let app = Router::new()
+            .route(
+                "/:provider/v1/realtime",
+                axum::routing::get(provider_ws_proxy_handler),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("unexpected None or Err")?;
+        let addr = listener
+            .local_addr()
+            .context("local_addr(...) returned None or Err")?;
+        let server =
+            tokio::spawn(async move { axum::serve(listener, app).await.context("server failed") });
+        let connect_result =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/fal/v1/realtime")).await;
+        let Err(err) = connect_result else {
+            return Err(anyhow::anyhow!("expected connect error, got ok"));
+        };
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+            other => return Err(anyhow::anyhow!("unexpected error: {other}")),
+        }
+        server.abort();
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[expect(
+        clippy::result_large_err,
+        reason = "tungstenite handshake callback error type is fixed by the library"
+    )]
+    #[tokio::test]
+    async fn elevenlabs_realtime_relay_preserves_binary_frames_and_provider_auth(
+    ) -> Result<(), anyhow::Error> {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("unexpected None or Err")?;
+        let upstream_addr = upstream_listener
+            .local_addr()
+            .context("local_addr(...) returned None or Err")?;
+        let upstream_task = tokio::spawn(async move {
+            let (tcp, _) = upstream_listener
+                .accept()
+                .await
+                .context("accept(...) returned None or Err")?;
+            let mut socket = tokio_tungstenite::accept_hdr_async(tcp,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(request.uri().path(), "/v1/speech-to-text/realtime");
+                    let key = request
+                        .headers()
+                        .get("xi-api-key")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("missing");
+                    assert_eq!(key, "upstream-secret");
+                    Ok(response)
+                }).await.context("unexpected None or Err")?;
+            let frame = socket
+                .next()
+                .await
+                .context("next(...) returned None or Err")?
+                .context("unwrap(...) returned None or Err")?;
+            assert_eq!(frame.into_data(), b"\xff\x00");
+            socket
+                .send(TungsteniteMessage::Binary(vec![0xfe, 0x01]))
+                .await
+                .context("unexpected None or Err")?;
+            socket
+                .close(None)
+                .await
+                .context("close(...) returned None or Err")?;
+            Ok::<(), anyhow::Error>(())
+        });
+        let mut providers = HashMap::new();
+        providers.insert(
+            "elevenlabs".into(),
+            ProviderConfig {
+                type_: "elevenlabs".into(),
+                base_url: format!("http://{upstream_addr}/v1"),
+                api_key: "upstream-secret".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        let app = Router::new()
+            .route(
+                "/:provider/v1/speech-to-text/realtime",
+                axum::routing::get(provider_ws_proxy_handler),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("unexpected None or Err")?;
+        let addr = listener
+            .local_addr()
+            .context("local_addr(...) returned None or Err")?;
+        let server =
+            tokio::spawn(async move { axum::serve(listener, app).await.context("server failed") });
+        let exchange = async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                "ws://{addr}/elevenlabs/v1/speech-to-text/realtime?model_id=scribe_v2_realtime"
+            ))
+            .await
+            .context("unexpected None or Err")?;
+            socket
+                .send(TungsteniteMessage::Binary(vec![0xff, 0x00]))
+                .await
+                .context("unexpected None or Err")?;
+            let frame = socket
+                .next()
+                .await
+                .context("next(...) returned None or Err")?
+                .context("unwrap(...) returned None or Err")?;
+            assert_eq!(frame.into_data(), b"\xfe\x01");
+            upstream_task.await.context("unexpected None or Err")??;
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+            .await
+            .context("unexpected None or Err")?
+            .context("unexpected None or Err")?;
+        server.abort();
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn virtual_key_cannot_start_unowned_native_video_job() -> Result<(), anyhow::Error> {
+        let (state, store) = state_with_key_store().await?;
+        let key = store
+            .create_key(CreateKeyRequest::default())
+            .await
+            .context("unexpected None or Err")?
+            .key;
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/videos")
+                    .header("authorization", format!("Bearer {key}"))
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model":"sora-2","prompt":"a bird"}).to_string(),
+                    ))
+                    .context("unexpected None or Err")?,
+            )
+            .await
+            .context("unexpected None or Err")?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn ws_realtime_model_scope_is_enforced_on_actual_model() -> Result<(), anyhow::Error> {
+        let store = Arc::new(
+            KeyStore::in_memory()
+                .await
+                .context("unexpected None or Err")?,
+        );
         let validator = KeyValidator::new(store.clone(), Arc::new(RateLimiter::new()));
 
         let permissions = KeyPermissions {
@@ -6404,34 +8948,44 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
 
         // The Realtime connection URI carries the actual requested model.
         let uri: http::Uri = "/v1/realtime?model=gpt-4o-realtime-preview"
             .parse()
-            .unwrap();
+            .context("unexpected None or Err")?;
         let model = extract_realtime_model(&uri);
         assert_eq!(model, "gpt-4o-realtime-preview");
 
         // Validating the *actual* model rejects a key that may not use it.
-        let err = validator
+        let validate_result = validator
             .validate(&resp.key, &model, "openai", Some(100))
-            .await
-            .unwrap_err();
+            .await;
+        let Err(err) = validate_result else {
+            return Err(anyhow::anyhow!("expected validation error, got ok"));
+        };
         assert_eq!(err.error_code(), "model_not_allowed");
 
         // An allowlisted model requested the same way passes.
-        let ok_uri: http::Uri = "/v1/realtime?model=gpt-3.5-turbo".parse().unwrap();
+        let ok_uri: http::Uri = "/v1/realtime?model=gpt-3.5-turbo"
+            .parse()
+            .context("parse(...) returned None or Err")?;
         let ok_model = extract_realtime_model(&ok_uri);
         assert!(validator
             .validate(&resp.key, &ok_model, "openai", Some(100))
             .await
             .is_ok());
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn ws_realtime_session_records_usage_and_debits_budget() {
-        let (state, store) = state_with_key_store().await;
+    async fn ws_realtime_session_records_usage_and_debits_budget() -> Result<(), anyhow::Error> {
+        let (state, store) = state_with_key_store().await?;
         let permissions = KeyPermissions {
             max_budget_usd: Some(0.0001),
             ..Default::default()
@@ -6444,7 +8998,7 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let hash = resp.key_hash.clone();
 
         // Simulate a Realtime session whose usage was parsed from response.done
@@ -6460,7 +9014,9 @@ mod tests {
         };
 
         record_usage_from_tracker(&state, &tracker).await;
-        let key = store.get_by_hash(&hash).unwrap();
+        let key = store
+            .get_by_hash(&hash)
+            .context("get_by_hash(...) returned None or Err")?;
         assert!(
             key.usage.window_spend_usd > 0.0,
             "Realtime session usage must debit the virtual key's budget"
@@ -6470,16 +9026,25 @@ mod tests {
         for _ in 0..8 {
             record_usage_from_tracker(&state, &tracker).await;
         }
-        let key = store.get_by_hash(&hash).unwrap();
+        let key = store
+            .get_by_hash(&hash)
+            .context("get_by_hash(...) returned None or Err")?;
         assert!(
             key.is_over_budget(),
             "Realtime usage must eventually trip a small-budget key"
         );
+
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[tokio::test]
-    async fn streaming_usage_is_recorded_at_terminal_not_construction() {
-        let (state, store) = state_with_key_store().await;
+    async fn streaming_usage_is_recorded_at_terminal_not_construction() -> Result<(), anyhow::Error>
+    {
+        let (state, store) = state_with_key_store().await?;
         let resp = store
             .create_key(CreateKeyRequest {
                 name: Some("stream".to_string()),
@@ -6488,7 +9053,7 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .context("unexpected None or Err")?;
         let hash = resp.key_hash.clone();
 
         let tracker = UsageTracker {
@@ -6515,7 +9080,7 @@ mod tests {
                     if let Ok(json) = serde_json::from_str::<Value>(body) {
                         if let Some(input) = json
                             .pointer("/usage/prompt_tokens")
-                            .and_then(|v| v.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                         {
                             parse_tracker
                                 .input_tokens
@@ -6523,7 +9088,7 @@ mod tests {
                         }
                         if let Some(output) = json
                             .pointer("/usage/completion_tokens")
-                            .and_then(|v| v.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                         {
                             parse_tracker
                                 .output_tokens
@@ -6541,17 +9106,23 @@ mod tests {
 
         // The debit is issued from the stream terminal; wait for the async task.
         for _ in 0..50 {
-            let key = store.get_by_hash(&hash).unwrap();
+            let key = store
+                .get_by_hash(&hash)
+                .context("get_by_hash(...) returned None or Err")?;
             if key.usage.window_spend_usd > 0.0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let key = store.get_by_hash(&hash).unwrap();
+        let key = store
+            .get_by_hash(&hash)
+            .context("get_by_hash(...) returned None or Err")?;
         assert!(
             key.usage.window_spend_usd > 0.0,
             "Streaming usage must be debited after the stream terminal, not 0"
         );
+
+        Ok(())
     }
 
     #[test]
@@ -6600,8 +9171,12 @@ mod tests {
         assert_eq!(conversation_namespace(conv, None), conv);
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
     #[test]
-    fn ws_session_injections_are_isolated_per_key() {
+    fn ws_session_injections_are_isolated_per_key() -> Result<(), anyhow::Error> {
         let mgr = crate::state::WsSessionManager::new();
         let conv = "shared";
         // Tenant A opens a Realtime session on its namespaced conversation.
@@ -6624,7 +9199,101 @@ mod tests {
             }]
         ));
 
-        let delivered = rx_a.try_recv().unwrap();
+        let delivered = rx_a
+            .try_recv()
+            .context("try_recv(...) returned None or Err")?;
         assert_eq!(delivered[0].content, "mid-stream secret");
+
+        Ok(())
+    }
+
+    /// A credential marked `Borrowed` whose token has expired must NOT be
+    /// refreshed by eavs. The resolver returns a typed `ExpiredBorrowed` error
+    /// (naming the owning CLI) instead of touching the refresh path or writing
+    /// back to the store. This exercises the real call site of
+    /// `resolve_oauth_access_token_with_account` with an injected OAuth store.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn borrowed_expired_credential_is_not_refreshed() -> Result<(), anyhow::Error> {
+        use crate::oauth::{CredentialProvenance, OAuthBackend, OAuthStore};
+
+        // Temp-file SQLite OAuth store so provenance survives a roundtrip.
+        let path =
+            std::env::temp_dir().join(format!("eavs-proxy-oauth-{}.db", uuid::Uuid::new_v4()));
+        let store = OAuthStore::new(&path, OAuthBackend::Sqlite)
+            .await
+            .context("unexpected None or Err")?;
+
+        let creds = OAuthCredentials {
+            user_id: "borrower".to_string(),
+            provider: OAuthProviderKind::OpenAICodex,
+            account_label: "default".to_string(),
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            expires_at: chrono::Utc::now().timestamp() - 100, // already expired
+            extra_data: None,
+            provenance: CredentialProvenance::Borrowed {
+                owner: "codex".to_string(),
+            },
+        };
+        store
+            .upsert_credentials(&creds)
+            .await
+            .context("upsert_credentials(...) returned None or Err")?;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "codex".to_string(),
+            ProviderConfig {
+                type_: "openai-codex".to_string(),
+                base_url: "http://up/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(
+            make_config(providers),
+            Arc::new(MockUpstream::new(vec![])),
+        );
+        state
+            .oauth_store
+            .set(Arc::new(store))
+            .context("set(...) returned None or Err")?;
+
+        let result =
+            resolve_oauth_access_token_with_account(&state, "codex", "borrower", None).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(OAuthResolveError::ExpiredBorrowed {
+                    ref owner,
+                    provider: OAuthProviderKind::OpenAICodex,
+                }) if owner == "codex"
+            ),
+            "expected ExpiredBorrowed, got {result:?}"
+        );
+
+        // The store must remain untouchable: no refresh, no write-back. Reload and
+        // confirm the credential is unchanged and still marked Borrowed.
+        let reloaded = state
+            .get_oauth_store()
+            .context("unexpected None or Err")?
+            .get_credentials("borrower", OAuthProviderKind::OpenAICodex)
+            .await
+            .context("unexpected None or Err")?
+            .context("unexpected None or Err")?;
+        assert_eq!(reloaded.access_token, "at");
+        assert_eq!(reloaded.expires_at, creds.expires_at);
+        assert_eq!(
+            reloaded.provenance,
+            CredentialProvenance::Borrowed {
+                owner: "codex".to_string()
+            }
+        );
+
+        Ok(())
     }
 }

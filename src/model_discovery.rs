@@ -36,7 +36,9 @@ pub async fn discover_provider_models(
         | ProviderType::XAI
         | ProviderType::Azure
         | ProviderType::OpenAIResponses
-        | ProviderType::OpenAICodex => {
+        | ProviderType::OpenAICodex
+        | ProviderType::OpenCode
+        | ProviderType::OpenCodeGo => {
             // Ollama exposes OpenAI-compat /v1/models but also native /api/tags.
             // Detect by URL and try the native endpoint first for richer metadata.
             if base_url.contains("11434") || base_url.contains("ollama") {
@@ -58,6 +60,14 @@ pub async fn discover_provider_models(
             Err("GitHub Copilot does not expose a models endpoint".to_string())
         }
 
+        ProviderType::TypeSafe
+        | ProviderType::ElevenLabs
+        | ProviderType::Cohere
+        | ProviderType::Voyage
+        | ProviderType::Fal
+        | ProviderType::Replicate => {
+            Err("Native provider model discovery is not supported by this endpoint".to_string())
+        }
         ProviderType::Mock => Err("Mock provider".to_string()),
     }
 }

@@ -1,3 +1,9 @@
+//! Eavs inference gateway and command-line entry point.
+//!
+//! Routes requests to configured providers and exposes authenticated control
+//! operations. See the repository usage reference for supported protocols and
+//! the architecture decisions for planned provisioning boundaries.
+
 mod api;
 mod aws_credentials;
 mod aws_sigv4;
@@ -7,6 +13,7 @@ mod config;
 mod delegated_fetch;
 mod egress;
 mod export;
+mod jobs;
 mod keys;
 mod logging;
 mod mock_provider;
@@ -40,8 +47,9 @@ use crate::cli::{
     run_secret_get, run_secret_list, run_secret_set, run_service_logs, run_service_restart,
     run_service_start, run_service_status, run_service_stop, run_test_bench, run_test_chat,
     run_test_health, run_test_image, run_test_oauth, run_test_rate_limit, run_test_routing,
-    run_test_tool_call, AuthCommands, Cli, Commands, EavsClient, KeyCommands, ModelCommands,
-    ProviderCommands, SecretCommands, ServiceCommands, SetupCommands, TestCommands,
+    run_test_tool_call, AuthCommands, BenchmarkArgs, Cli, Commands, EavsClient, KeyCommands,
+    ModelCommands, OAuthTestArgs, ProviderCommands, SecretCommands, ServiceCommands, SetupCommands,
+    TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -68,31 +76,31 @@ async fn main() {
         }
         Commands::Service { action } => {
             if let Err(e) = run_service_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Key { action } => {
             if let Err(e) = run_key_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Cost { action } => {
             if let Err(e) = run_cost_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Provider { action } => {
             if let Err(e) = run_provider_command(action) {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Test { action } => {
             if let Err(e) = run_test_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -103,37 +111,37 @@ async fn main() {
             config,
         } => {
             if let Err(e) = run_login(provider, user, callback_port, config.as_deref()).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Auth { action } => {
             if let Err(e) = run_auth_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Secret { action } => {
             if let Err(e) = run_secret_command(action) {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Setup { action } => {
             if let Err(e) = run_setup_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Models { action } => {
             if let Err(e) = run_models_command(action).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Quotas { json } => {
             if let Err(e) = run_quotas_command(json).await {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -160,24 +168,23 @@ async fn run_quotas_command(json_output: bool) -> Result<(), cli::CliError> {
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", master_key))
+        .header("Authorization", format!("Bearer {master_key}"))
         .send()
         .await
-        .map_err(|e| cli::CliError::Other(format!("Failed to fetch quotas: {}", e)))?;
+        .map_err(|e| cli::CliError::Other(format!("Failed to fetch quotas: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(cli::CliError::Other(format!(
-            "Server returned {}: {}",
-            status, body
+            "Server returned {status}: {body}"
         )));
     }
 
     let quotas: Vec<upstream_quota::QuotaSnapshot> = resp
         .json()
         .await
-        .map_err(|e| cli::CliError::Other(format!("Failed to parse response: {}", e)))?;
+        .map_err(|e| cli::CliError::Other(format!("Failed to parse response: {e}")))?;
 
     if quotas.is_empty() {
         eprintln!("No upstream quotas observed yet.");
@@ -201,17 +208,13 @@ async fn run_quotas_command(json_output: bool) -> Result<(), cli::CliError> {
                 q.provider,
                 q.account,
                 q.requests_remaining
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |v| v.to_string()),
                 q.requests_limit
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |v| v.to_string()),
                 q.tokens_remaining
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |v| v.to_string()),
                 q.tokens_limit
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |v| v.to_string()),
                 q.age_secs,
             );
         }
@@ -237,11 +240,11 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
         ModelCommands::List { provider, json } => {
             let catalog = ModelCatalog::load()
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {e}")))?;
 
             let models = catalog.catalog_models(&provider);
             if models.is_empty() {
-                eprintln!("No models found for provider '{}'", provider);
+                eprintln!("No models found for provider '{provider}'");
                 eprintln!("Available providers: {}", catalog.provider_ids().join(", "));
                 return Ok(());
             }
@@ -281,25 +284,24 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             use crate::model_discovery::discover_provider_models;
 
             let config = AppConfig::load()
-                .map_err(|e| cli::CliError::Other(format!("Failed to load config: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to load config: {e}")))?;
 
             let providers_to_show: Vec<(String, crate::config::ProviderConfig)> =
                 if let Some(p) = provider {
-                    match config.providers.get(&p) {
-                        Some(cfg) => vec![(p.clone(), cfg.clone())],
-                        None => {
-                            eprintln!("Provider '{}' not found in config", p);
-                            eprintln!(
-                                "Available: {}",
-                                config
-                                    .providers
-                                    .keys()
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                            return Ok(());
-                        }
+                    if let Some(cfg) = config.providers.get(&p) {
+                        vec![(p.clone(), cfg.clone())]
+                    } else {
+                        eprintln!("Provider '{p}' not found in config");
+                        eprintln!(
+                            "Available: {}",
+                            config
+                                .providers
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        return Ok(());
                     }
                 } else {
                     config
@@ -321,7 +323,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                                 }
                             }
                             Err(e) => {
-                                eprintln!("  Note: Could not discover models from {}: {}", name, e);
+                                eprintln!("  Note: Could not discover models from {name}: {e}");
                             }
                         }
                     }
@@ -414,7 +416,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                                 .context_window
                                 .map(|c| format!("{} ctx", format_num(c)))
                                 .unwrap_or_default();
-                            println!("    - {} {}", name_str, ctx_str);
+                            println!("    - {name_str} {ctx_str}");
                         }
                     }
                 }
@@ -422,7 +424,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                     .iter()
                     .map(|(_, cfg)| cfg.models.len())
                     .sum();
-                let total_discovered: usize = discovered.values().map(|v| v.len()).sum();
+                let total_discovered: usize = discovered.values().map(std::vec::Vec::len).sum();
                 println!(
                     "\nTotal: {} providers, {} configured, {} discovered",
                     providers_to_show.len(),
@@ -437,7 +439,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
         ModelCommands::Search { query, json } => {
             let catalog = ModelCatalog::load()
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {e}")))?;
 
             let query_lower = query.to_lowercase();
             let mut results: Vec<(String, crate::model_catalog::CatalogModel)> = Vec::new();
@@ -453,7 +455,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             }
 
             if results.is_empty() {
-                eprintln!("No models matching '{}'", query);
+                eprintln!("No models matching '{query}'");
                 return Ok(());
             }
 
@@ -498,7 +500,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             println!("Fetching model catalog from models.dev...");
             let catalog = ModelCatalog::refresh()
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to refresh: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to refresh: {e}")))?;
             println!(
                 "Cached {} models across {} providers",
                 catalog.total_models(),
@@ -516,39 +518,38 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             use crate::provider::ProviderType;
 
             // No adapter name -> list available adapters
-            let adapter_name = match adapter_name {
-                Some(name) => name,
-                None => {
-                    match export::list_adapters() {
-                        Ok(adapters) if !adapters.is_empty() => {
-                            println!("Available export adapters:");
-                            for name in &adapters {
-                                // Try to get info for each
-                                if let Ok(info) = export::adapter_info(name) {
-                                    let _display = info["displayName"].as_str().unwrap_or(name);
-                                    let desc = info["description"].as_str().unwrap_or("");
-                                    let file = info["outputFile"].as_str().unwrap_or("");
-                                    println!("  {:<12} {} ({})", name, desc, file);
-                                } else {
-                                    println!("  {}", name);
-                                }
-                            }
-                            println!(
-                                "\nUsage: eavs models export <adapter> [--api-key KEY] [--base-url URL]"
-                            );
-                        }
-                        Ok(_) => {
-                            eprintln!("No export adapters found.");
-                            if let Err(e) = export::adapters_dir() {
-                                eprintln!("{}", e);
+            let adapter_name = if let Some(name) = adapter_name {
+                name
+            } else {
+                match export::list_adapters() {
+                    Ok(adapters) if !adapters.is_empty() => {
+                        println!("Available export adapters:");
+                        for name in &adapters {
+                            // Try to get info for each
+                            if let Ok(info) = export::adapter_info(name) {
+                                let _display = info["displayName"].as_str().unwrap_or(name);
+                                let desc = info["description"].as_str().unwrap_or("");
+                                let file = info["outputFile"].as_str().unwrap_or("");
+                                println!("  {name:<12} {desc} ({file})");
+                            } else {
+                                println!("  {name}");
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Error discovering adapters: {}", e);
+                        println!(
+                            "\nUsage: eavs models export <adapter> [--api-key KEY] [--base-url URL]"
+                        );
+                    }
+                    Ok(_) => {
+                        eprintln!("No export adapters found.");
+                        if let Err(e) = export::adapters_dir() {
+                            eprintln!("{e}");
                         }
                     }
-                    return Ok(());
+                    Err(e) => {
+                        eprintln!("Error discovering adapters: {e}");
+                    }
                 }
+                return Ok(());
             };
 
             // Load eavs config to find configured providers
@@ -557,7 +558,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             } else {
                 crate::config::AppConfig::load()
             }
-            .map_err(|e| cli::CliError::Other(format!("Failed to load config: {}", e)))?;
+            .map_err(|e| cli::CliError::Other(format!("Failed to load config: {e}")))?;
 
             // Load catalog for enriching shortlists
             let catalog = ModelCatalog::load().await.ok();
@@ -607,14 +608,14 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             }
 
             // If --merge is specified, read the existing file and use merge mode
-            let existing =
-                if let Some(ref path) = merge_path {
-                    Some(std::fs::read_to_string(path).map_err(|e| {
-                        cli::CliError::Other(format!("Failed to read {}: {}", path, e))
-                    })?)
-                } else {
-                    None
-                };
+            let existing = if let Some(ref path) = merge_path {
+                Some(
+                    std::fs::read_to_string(path)
+                        .map_err(|e| cli::CliError::Other(format!("Failed to read {path}: {e}")))?,
+                )
+            } else {
+                None
+            };
 
             let output = export::run_adapter(
                 &adapter_name,
@@ -623,7 +624,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 &key,
                 existing.as_deref(),
             )
-            .map_err(|e| cli::CliError::Other(format!("{:#}", e)))?;
+            .map_err(|e| cli::CliError::Other(format!("{e:#}")))?;
 
             println!(
                 "{}",
@@ -633,7 +634,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
         ModelCommands::Stats => {
             let catalog = ModelCatalog::load()
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to load catalog: {e}")))?;
 
             if catalog.is_empty() {
                 println!("Catalog is empty. Run `eavs models update` to fetch.");
@@ -655,7 +656,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
             println!("{:<30} {:>8}", "PROVIDER", "MODELS");
             println!("{}", "-".repeat(40));
             for (id, count) in &providers {
-                println!("{:<30} {:>8}", id, count);
+                println!("{id:<30} {count:>8}");
             }
         }
     }
@@ -867,6 +868,19 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             "/:provider/v1/realtime",
             get(proxy::provider_ws_proxy_handler),
         )
+        // ElevenLabs native realtime STT and streaming TTS.
+        .route(
+            "/:provider/v1/speech-to-text/realtime",
+            get(proxy::provider_ws_proxy_handler),
+        )
+        .route(
+            "/:provider/v1/text-to-speech/:voice_id/stream-input",
+            get(proxy::provider_voice_ws_proxy_handler),
+        )
+        .route(
+            "/:provider/v1/text-to-speech/:voice_id/multi-stream-input",
+            get(proxy::provider_voice_ws_proxy_handler),
+        )
         // Codex Responses proxy - default route
         // GET is the WebSocket upgrade, POST the SSE transport (pi falls back
         // to SSE when the WebSocket is unavailable or connection-limited)
@@ -879,11 +893,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             "/:provider/v1/codex/responses",
             get(proxy::provider_codex_ws_handler).post(proxy::provider_codex_sse_handler),
         )
+        // Tenant-bound asynchronous inference jobs (fal and Replicate).
+        .route("/:provider/v1/eavs/jobs", post(jobs::submit))
+        .route("/:provider/v1/eavs/jobs/:handle", get(jobs::status))
+        .route("/:provider/v1/eavs/jobs/:handle/result", get(jobs::result))
+        .route("/:provider/v1/eavs/jobs/:handle/cancel", post(jobs::cancel))
         // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
         // This allows explicit provider selection via URL path
         .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
+        .route("/:provider/v2/*path", any(proxy::provider_proxy_handler))
         // Default proxy route with X-Provider header or auto-detection
         .route("/v1/*path", any(proxy::proxy_handler))
+        .route("/v2/*path", any(proxy::proxy_handler))
         .with_state(state)
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal
@@ -958,7 +979,7 @@ fn load_config(config_path: Option<&str>) -> crate::config::AppConfig {
 async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
     use crate::cli::{
         run_key_bind_direct, run_key_create_direct, run_key_info_direct, run_key_list_direct,
-        run_key_revoke_direct, run_key_usage_direct,
+        run_key_revoke_direct, run_key_usage_direct, CreateKeyArgs,
     };
     use crate::keys::KeyStore;
 
@@ -983,20 +1004,22 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             run_key_create_direct(
                 &store,
-                name,
-                owner,
-                oauth_user,
-                models,
-                blocked_models,
-                providers,
-                rpm,
-                tpm,
-                rpd,
-                budget,
-                expires,
+                CreateKeyArgs {
+                    name,
+                    owner,
+                    oauth_user,
+                    models,
+                    blocked_models,
+                    providers,
+                    rpm,
+                    tpm,
+                    rpd,
+                    budget,
+                    expires,
+                },
                 format,
             )
             .await
@@ -1011,7 +1034,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             run_key_list_direct(&store, all, format).await
         }
         KeyCommands::Info {
@@ -1024,7 +1047,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             run_key_info_direct(&store, &key, format).await
         }
         KeyCommands::Revoke {
@@ -1037,7 +1060,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             run_key_revoke_direct(&store, &key, yes).await
         }
         KeyCommands::Usage {
@@ -1051,7 +1074,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             run_key_usage_direct(&store, &key, days, format).await
         }
         KeyCommands::Bind {
@@ -1065,7 +1088,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             let db_path = app_config.keys.resolved_database_path();
             let store = KeyStore::new(&db_path)
                 .await
-                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))?;
+                .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))?;
             let oauth_user = if clear { None } else { oauth_user };
             if !clear && oauth_user.is_none() {
                 return Err(cli::CliError::Other(
@@ -1086,7 +1109,7 @@ async fn run_cost_command(action: cli::CostCommands) -> Result<(), cli::CliError
         let db_path = app_config.keys.resolved_database_path();
         KeyStore::new(&db_path)
             .await
-            .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {}", e)))
+            .map_err(|e| cli::CliError::Other(format!("Failed to open key database: {e}")))
     };
 
     match action {
@@ -1098,14 +1121,8 @@ async fn run_cost_command(action: cli::CostCommands) -> Result<(), cli::CliError
             config,
         } => {
             let store = open_store(config).await?;
-            run_cost_by_owner_direct(
-                &store,
-                owner.as_deref(),
-                breakdown.as_deref(),
-                days,
-                format,
-            )
-            .await
+            run_cost_by_owner_direct(&store, owner.as_deref(), breakdown.as_deref(), days, format)
+                .await
         }
         CostCommands::ByKey {
             days,
@@ -1124,7 +1141,10 @@ fn run_provider_command(action: ProviderCommands) -> Result<(), cli::CliError> {
     };
 
     match action {
-        ProviderCommands::Current => run_provider_current(),
+        ProviderCommands::Current => {
+            run_provider_current();
+            Ok(())
+        }
         ProviderCommands::Use { provider, config } => {
             run_provider_use(&provider, config.as_deref())
         }
@@ -1145,8 +1165,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            let client = EavsClient::with_url(server.url);
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url)?;
             run_test_chat(&client, message, model, provider, key, stream).await
         }
         TestCommands::Image {
@@ -1159,8 +1179,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             url,
             config,
         } => {
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            let client = EavsClient::with_url(server.url);
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url)?;
             run_test_image(&client, image, prompt, model, provider, key, stream).await
         }
         TestCommands::ToolCall {
@@ -1172,8 +1192,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             url,
             config,
         } => {
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            let client = EavsClient::with_url(server.url);
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url)?;
             run_test_tool_call(&client, prompt, model, provider, key, stream).await
         }
         TestCommands::RateLimit {
@@ -1183,8 +1203,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            let client = EavsClient::with_url(server.url);
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url)?;
             run_test_rate_limit(&client, count, key).await
         }
         TestCommands::Bench {
@@ -1203,21 +1223,21 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            run_test_bench(
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            run_test_bench(BenchmarkArgs {
                 count,
                 provider,
                 model,
-                key,
+                api_key: key,
                 compare_direct,
                 direct_url,
                 direct_key,
                 stream,
                 concurrent,
                 duration,
-                server.url,
+                eavs_url: server.url,
                 format,
-            )
+            })
             .await
         }
         TestCommands::Health {
@@ -1226,8 +1246,8 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
-            let client = EavsClient::with_url(server.url);
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
+            let client = EavsClient::with_url(server.url)?;
             run_test_health(&client, format).await
         }
         TestCommands::Routing {
@@ -1239,7 +1259,7 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
             run_test_routing(&server.url, &provider, model, key, format).await
         }
         TestCommands::Oauth {
@@ -1253,13 +1273,15 @@ async fn run_test_command(action: TestCommands) -> Result<(), cli::CliError> {
             config,
         } => {
             // Ensure server is running, auto-start if needed
-            let server = ensure_server_running(&url, config.as_deref()).await?;
+            let server = ensure_server_running(url.as_deref(), config.as_deref()).await?;
             run_test_oauth(
                 &user,
-                provider,
-                model,
-                message,
-                stream,
+                OAuthTestArgs {
+                    provider,
+                    model,
+                    message,
+                    stream,
+                },
                 &server.url,
                 format,
                 config.as_deref(),
