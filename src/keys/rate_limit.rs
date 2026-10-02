@@ -157,18 +157,15 @@ impl RateLimiter {
             rpm_remaining: self
                 .rpm_limiters
                 .get(key_id)
-                .map(|l| l.check().is_ok())
-                .unwrap_or(true),
+                .is_none_or(|l| l.check().is_ok()),
             tpm_remaining: self
                 .tpm_limiters
                 .get(key_id)
-                .map(|l| l.available())
-                .unwrap_or(u32::MAX),
+                .map_or(u32::MAX, |l| l.available()),
             rpd_remaining: self
                 .rpd_limiters
                 .get(key_id)
-                .map(|l| l.remaining())
-                .unwrap_or(u32::MAX),
+                .map_or(u32::MAX, |l| l.remaining()),
         }
     }
 }
@@ -353,13 +350,13 @@ impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RpmExceeded { limit, .. } => {
-                write!(f, "Rate limit exceeded: {} requests per minute", limit)
+                write!(f, "Rate limit exceeded: {limit} requests per minute")
             }
             Self::TpmExceeded { limit, .. } => {
-                write!(f, "Token limit exceeded: {} tokens per minute", limit)
+                write!(f, "Token limit exceeded: {limit} tokens per minute")
             }
             Self::RpdExceeded { limit, .. } => {
-                write!(f, "Daily limit exceeded: {} requests per day", limit)
+                write!(f, "Daily limit exceeded: {limit} requests per day")
             }
         }
     }
@@ -466,14 +463,12 @@ mod tests {
         // Should not exceed the limit of 100
         assert!(
             total_successes <= 100,
-            "Expected at most 100 successes, got {}",
-            total_successes
+            "Expected at most 100 successes, got {total_successes}"
         );
         // With 50 threads * 5 requests = 250 attempts, we should hit the limit
         assert_eq!(
             total_successes, 100,
-            "Expected exactly 100 successes, got {}",
-            total_successes
+            "Expected exactly 100 successes, got {total_successes}"
         );
     }
 
@@ -503,11 +498,7 @@ mod tests {
             "Available tokens should not exceed limit"
         );
         // With 2000 tokens consumed from 1000, we should be at 0
-        assert_eq!(
-            available, 0,
-            "Expected 0 available tokens, got {}",
-            available
-        );
+        assert_eq!(available, 0, "Expected 0 available tokens, got {available}");
     }
 
     #[test]
@@ -536,8 +527,7 @@ mod tests {
         // Total consumed should be at most the limit
         assert!(
             total_consumed <= 100,
-            "Total consumed should not exceed 100, got {}",
-            total_consumed
+            "Total consumed should not exceed 100, got {total_consumed}"
         );
     }
 
@@ -568,13 +558,11 @@ mod tests {
         // Should not exceed the daily limit of 50
         assert!(
             total_successes <= 50,
-            "Expected at most 50 successes, got {}",
-            total_successes
+            "Expected at most 50 successes, got {total_successes}"
         );
         assert_eq!(
             total_successes, 50,
-            "Expected exactly 50 successes, got {}",
-            total_successes
+            "Expected exactly 50 successes, got {total_successes}"
         );
     }
 }

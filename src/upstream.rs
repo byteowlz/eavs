@@ -18,10 +18,10 @@ pub struct UpstreamResponse {
 }
 
 pub trait Upstream: Send + Sync {
-    fn send<'a>(
-        &'a self,
+    fn send(
+        &self,
         request: UpstreamRequest,
-    ) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>>;
+    ) -> BoxFuture<'_, Result<UpstreamResponse, std::io::Error>>;
 
     fn get_bytes<'a>(
         &'a self,
@@ -53,8 +53,7 @@ pub trait Upstream: Send + Sync {
                 let chunk = chunk?;
                 if collected.len() + chunk.len() > max_bytes {
                     return Err(std::io::Error::other(format!(
-                        "body exceeds {} bytes limit",
-                        max_bytes
+                        "body exceeds {max_bytes} bytes limit"
                     )));
                 }
                 collected.extend_from_slice(&chunk);
@@ -70,16 +69,16 @@ pub struct ReqwestUpstream {
 }
 
 impl ReqwestUpstream {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub const fn new(client: reqwest::Client) -> Self {
         Self { client }
     }
 }
 
 impl Upstream for ReqwestUpstream {
-    fn send<'a>(
-        &'a self,
+    fn send(
+        &self,
         request: UpstreamRequest,
-    ) -> BoxFuture<'a, Result<UpstreamResponse, std::io::Error>> {
+    ) -> BoxFuture<'_, Result<UpstreamResponse, std::io::Error>> {
         Box::pin(async move {
             let method =
                 reqwest::Method::from_bytes(request.method.as_str().as_bytes()).map_err(|e| {

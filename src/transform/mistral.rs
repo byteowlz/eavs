@@ -17,7 +17,7 @@ use super::openai::OpenAITransformer;
 /// Mistral transformer with quirk handling.
 #[derive(Debug, Clone, Default)]
 pub struct MistralTransformer {
-    /// Inner OpenAI transformer for base functionality
+    /// Inner `OpenAI` transformer for base functionality
     inner: OpenAITransformer,
 }
 
@@ -29,6 +29,7 @@ impl MistralTransformer {
     }
 
     /// Generate a valid Mistral tool ID (9 alphanumeric characters).
+    #[cfg(test)]
     pub fn generate_tool_id() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp = SystemTime::now()
@@ -49,7 +50,7 @@ impl MistralTransformer {
             cleaned.chars().take(9).collect()
         } else {
             // Pad with zeros if too short
-            format!("{:0>9}", cleaned)
+            format!("{cleaned:0>9}")
         }
     }
 
@@ -69,10 +70,10 @@ impl MistralTransformer {
         for msg in &context.messages {
             match msg {
                 Message::User(user) => {
-                    let content = build_mistral_content(&user.content);
+                    let user_text = build_mistral_content(&user.content);
                     messages.push(json!({
                         "role": "user",
-                        "content": content
+                        "content": user_text
                     }));
                 }
                 Message::Assistant(assistant) => {
@@ -85,7 +86,7 @@ impl MistralTransformer {
                 }
                 Message::Tool(tool_result) => {
                     // Mistral requires name field in tool results
-                    let content_text: String = tool_result
+                    let result_content: String = tool_result
                         .content
                         .iter()
                         .map(|b| match b {
@@ -98,7 +99,7 @@ impl MistralTransformer {
                         "role": "tool",
                         "tool_call_id": Self::fix_tool_id(&tool_result.tool_call_id),
                         "name": tool_result.tool_name,
-                        "content": if content_text.is_empty() { " ".to_string() } else { content_text }
+                        "content": if result_content.is_empty() { " ".to_string() } else { result_content }
                     }));
                 }
                 Message::System(_) => {
@@ -137,7 +138,17 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
         .and_then(Value::as_array_mut)
         .ok_or_else(|| TransformError::MissingField("messages".to_string()))?;
 
-    // First pass: remove illegal name fields, fix tool_call IDs, and build (id -> name) map.
+    let (original_to_fixed_id, tool_name_by_fixed_id) = mistral_first_pass(messages);
+    mistral_second_pass(messages, &original_to_fixed_id, &tool_name_by_fixed_id);
+
+    Ok(())
+}
+
+/// First pass over messages: drop illegal `name` fields, normalize tool-call IDs,
+/// and build the original-to-fixed-id and fixed-id-to-tool-name maps.
+fn mistral_first_pass(
+    messages: &mut [Value],
+) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut original_to_fixed_id: HashMap<String, String> = HashMap::new();
     let mut tool_name_by_fixed_id: HashMap<String, String> = HashMap::new();
 
@@ -183,7 +194,15 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
         }
     }
 
-    // Second pass: filter empty assistant messages; normalize tool messages.
+    (original_to_fixed_id, tool_name_by_fixed_id)
+}
+
+/// Second pass over messages: filter empty assistant messages and normalize tool messages.
+fn mistral_second_pass(
+    messages: &mut Vec<Value>,
+    original_to_fixed_id: &HashMap<String, String>,
+    tool_name_by_fixed_id: &HashMap<String, String>,
+) {
     let mut updated = Vec::with_capacity(messages.len());
     for mut msg in messages.drain(..) {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -192,13 +211,11 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
                 let has_tool_calls = msg
                     .get("tool_calls")
                     .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
+                    .is_some_and(|a| !a.is_empty());
 
                 let content_blank = msg
                     .get("content")
-                    .map(mistral_value_is_blank_string_or_null)
-                    .unwrap_or(true);
+                    .is_none_or(mistral_value_is_blank_string_or_null);
 
                 // Filter empty assistant messages unless they contain tool calls.
                 if !has_tool_calls && content_blank {
@@ -223,8 +240,7 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
                     let name_missing = msg
                         .get("name")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.trim().is_empty())
-                        .unwrap_or(true);
+                        .is_none_or(|s| s.trim().is_empty());
                     if name_missing {
                         if let Some(name) = tool_name_by_fixed_id.get(&fixed) {
                             msg["name"] = Value::String(name.clone());
@@ -235,8 +251,7 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
                 // Ensure tool message content is a non-empty string.
                 let content_blank = msg
                     .get("content")
-                    .map(mistral_value_is_blank_string_or_null)
-                    .unwrap_or(true);
+                    .is_none_or(mistral_value_is_blank_string_or_null);
                 if content_blank {
                     msg["content"] = Value::String(" ".to_string());
                 }
@@ -254,8 +269,6 @@ pub fn transform_openai_request_for_mistral(body: &mut Value) -> Result<(), Tran
         updated.push(msg);
     }
     messages.extend(updated);
-
-    Ok(())
 }
 
 impl RequestTransformer for MistralTransformer {
@@ -318,10 +331,11 @@ impl RequestTransformer for MistralTransformer {
         Ok(request)
     }
 
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)> {
         vec![
             ("Content-Type".to_string(), "application/json".to_string()),
-            ("Authorization".to_string(), format!("Bearer {}", api_key)),
+            ("Authorization".to_string(), format!("Bearer {api_key}")),
         ]
     }
 
@@ -350,6 +364,7 @@ impl ResponseTransformer for MistralTransformer {
 // Internal helpers
 // ============================================================================
 
+#[cfg(test)]
 fn base36_encode(mut n: u64) -> String {
     const CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     if n == 0 {
@@ -481,14 +496,14 @@ mod tests {
     #[test]
     fn test_mistral_transformer_new() {
         let transformer = MistralTransformer::new();
-        assert!(transformer.inner.use_developer_role == false);
+        assert!(!transformer.inner.use_developer_role);
     }
 
     #[test]
     fn test_generate_tool_id() {
         let id = MistralTransformer::generate_tool_id();
         assert_eq!(id.len(), 9);
-        assert!(id.chars().all(|c| c.is_alphanumeric()));
+        assert!(id.chars().all(char::is_alphanumeric));
     }
 
     #[test]
@@ -510,7 +525,7 @@ mod tests {
         let id = MistralTransformer::fix_tool_id("call_123-abc");
         assert_eq!(id.len(), 9);
         // Should strip special chars
-        assert!(id.chars().all(|c| c.is_alphanumeric()));
+        assert!(id.chars().all(char::is_alphanumeric));
     }
 
     #[test]
@@ -530,27 +545,36 @@ mod tests {
         assert_eq!(transformer.endpoint_path(&ctx), "/v1/chat/completions");
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_transform_request_basic() {
+    fn test_mistral_transform_request_basic() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
         let ctx = Context::new("mistral-large")
             .with_system("Be helpful")
             .with_messages(vec![Message::user("Hello")])
             .with_max_tokens(1000);
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
         assert_eq!(request["model"], "mistral-large");
         assert_eq!(request["max_tokens"], 1000);
         assert!(request["messages"].is_array());
 
-        let messages = request["messages"].as_array().unwrap();
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "Be helpful");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_empty_content_handling() {
+    fn test_mistral_empty_content_handling() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         // Message with empty content
@@ -559,15 +583,20 @@ mod tests {
             timestamp: 0,
         })]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
-        let messages = request["messages"].as_array().unwrap();
+        let request = transformer.transform_request(&ctx)?;
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
 
         // Content should be a space, not empty or null
         assert_eq!(messages[0]["content"], " ");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_thinking_conversion() {
+    fn test_mistral_thinking_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         let ctx = Context::new("mistral-large").with_messages(vec![Message::Assistant(
@@ -580,18 +609,23 @@ mod tests {
             },
         )]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        let content = messages[0]["content"].as_str().unwrap();
+        let request = transformer.transform_request(&ctx)?;
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
+        let content = messages[0]["content"].as_str().ok_or("content missing")?;
 
         assert!(content.contains("<thinking>"));
         assert!(content.contains("Let me think..."));
         assert!(content.contains("</thinking>"));
         assert!(content.contains("Here's my answer"));
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_tool_call_id_fix() {
+    fn test_mistral_tool_call_id_fix() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         let ctx = Context::new("mistral-large").with_messages(vec![Message::Assistant(
@@ -605,35 +639,50 @@ mod tests {
             },
         )]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        let tool_calls = messages[0]["tool_calls"].as_array().unwrap();
+        let request = transformer.transform_request(&ctx)?;
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
+        let tool_calls = messages[0]["tool_calls"]
+            .as_array()
+            .ok_or("tool_calls missing")?;
 
         // ID should be fixed to 9 chars
-        let id = tool_calls[0]["id"].as_str().unwrap();
+        let id = tool_calls[0]["id"].as_str().ok_or("id missing")?;
         assert_eq!(id.len(), 9);
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_tool_result_with_name() {
+    fn test_mistral_tool_result_with_name() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         let ctx = Context::new("mistral-large").with_messages(vec![Message::Tool(
             ToolResultMessage::text("call_123456789", "get_weather", "Sunny, 72F"),
         )]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
-        let messages = request["messages"].as_array().unwrap();
+        let request = transformer.transform_request(&ctx)?;
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
 
         // Should have name field
         assert_eq!(messages[0]["name"], "get_weather");
         assert_eq!(messages[0]["content"], "Sunny, 72F");
         // ID should be fixed
-        assert_eq!(messages[0]["tool_call_id"].as_str().unwrap().len(), 9);
+        let id = messages[0]["tool_call_id"]
+            .as_str()
+            .ok_or("tool_call_id missing")?;
+        assert_eq!(id.len(), 9);
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_tool_result_empty_content() {
+    fn test_mistral_tool_result_empty_content() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         let ctx =
@@ -645,15 +694,20 @@ mod tests {
                 timestamp: 0,
             })]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
-        let messages = request["messages"].as_array().unwrap();
+        let request = transformer.transform_request(&ctx)?;
+        let messages = request["messages"].as_array().ok_or("messages missing")?;
 
         // Empty content should be a space
         assert_eq!(messages[0]["content"], " ");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_mistral_with_tools() {
+    fn test_mistral_with_tools() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = MistralTransformer::new();
 
         let ctx = Context::new("mistral-large")
@@ -667,11 +721,12 @@ mod tests {
                 }),
             )]);
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
         assert!(request["tools"].is_array());
-        let tools = request["tools"].as_array().unwrap();
+        let tools = request["tools"].as_array().ok_or("tools missing")?;
         assert_eq!(tools[0]["function"]["name"], "get_weather");
+        Ok(())
     }
 
     #[test]
@@ -682,19 +737,30 @@ mod tests {
         assert_eq!(base36_encode(1296), "100");
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn mistral_in_place_transforms_tool_choice_required_to_any() {
+    fn mistral_in_place_transforms_tool_choice_required_to_any(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut body = json!({
             "model": "mistral-large",
             "messages": [{"role":"user","content":"hi"}],
             "tool_choice": "required"
         });
-        transform_openai_request_for_mistral(&mut body).unwrap();
+        transform_openai_request_for_mistral(&mut body)?;
         assert_eq!(body["tool_choice"], "any");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn mistral_in_place_removes_name_from_non_tool_messages() {
+    fn mistral_in_place_removes_name_from_non_tool_messages(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut body = json!({
             "model": "mistral-large",
             "messages": [
@@ -702,14 +768,20 @@ mod tests {
                 {"role":"tool","name":"t","tool_call_id":"call_123","content":"ok"}
             ]
         });
-        transform_openai_request_for_mistral(&mut body).unwrap();
-        let msgs = body["messages"].as_array().unwrap();
+        transform_openai_request_for_mistral(&mut body)?;
+        let msgs = body["messages"].as_array().ok_or("messages missing")?;
         assert!(msgs[0].get("name").is_none());
         assert_eq!(msgs[1]["name"], "t");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn mistral_in_place_filters_empty_assistant_messages() {
+    fn mistral_in_place_filters_empty_assistant_messages() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut body = json!({
             "model": "mistral-large",
             "messages": [
@@ -717,14 +789,20 @@ mod tests {
                 {"role":"user","content":"hi"}
             ]
         });
-        transform_openai_request_for_mistral(&mut body).unwrap();
-        let msgs = body["messages"].as_array().unwrap();
+        transform_openai_request_for_mistral(&mut body)?;
+        let msgs = body["messages"].as_array().ok_or("messages missing")?;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn mistral_in_place_fixes_tool_call_ids_and_infers_tool_name() {
+    fn mistral_in_place_fixes_tool_call_ids_and_infers_tool_name(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut body = json!({
             "model": "mistral-large",
             "messages": [
@@ -732,16 +810,24 @@ mod tests {
                 {"role":"tool","tool_call_id":"call_very_long_id_12345","content":"ok"}
             ]
         });
-        transform_openai_request_for_mistral(&mut body).unwrap();
-        let msgs = body["messages"].as_array().unwrap();
-        let fixed_id = msgs[0]["tool_calls"][0]["id"].as_str().unwrap();
+        transform_openai_request_for_mistral(&mut body)?;
+        let msgs = body["messages"].as_array().ok_or("messages missing")?;
+        let fixed_id = msgs[0]["tool_calls"][0]["id"]
+            .as_str()
+            .ok_or("id missing")?;
         assert_eq!(fixed_id.len(), 9);
         assert_eq!(msgs[1]["tool_call_id"], fixed_id);
         assert_eq!(msgs[1]["name"], "get_weather");
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn mistral_in_place_cleans_tool_schema_restrictions() {
+    fn mistral_in_place_cleans_tool_schema_restrictions() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut body = json!({
             "model": "mistral-large",
             "messages": [{"role":"user","content":"hi"}],
@@ -762,7 +848,7 @@ mod tests {
                 }
             }]
         });
-        transform_openai_request_for_mistral(&mut body).unwrap();
+        transform_openai_request_for_mistral(&mut body)?;
         let params = &body["tools"][0]["function"]["parameters"];
         assert!(params.get("$schema").is_none());
         assert!(params.get("$id").is_none());
@@ -770,5 +856,6 @@ mod tests {
         assert!(params["properties"]["x"]
             .get("additionalProperties")
             .is_none());
+        Ok(())
     }
 }

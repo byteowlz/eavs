@@ -1,6 +1,6 @@
-//! Azure OpenAI transformer.
+//! Azure `OpenAI` transformer.
 //!
-//! Azure OpenAI uses the same request/response format as OpenAI, but with:
+//! Azure `OpenAI` uses the same request/response format as `OpenAI`, but with:
 //! - Different authentication (api-key header instead of Bearer token)
 //! - Different URL structure (deployment-based endpoints)
 //! - Required api-version query parameter
@@ -10,11 +10,13 @@ use crate::types::{Context, StreamEvent, StreamState};
 use serde_json::Value;
 
 // Re-use OpenAI parsing/building since format is identical
-use super::openai::{build_openai_sse, parse_openai_request, OpenAITransformer};
+use super::openai::OpenAITransformer;
+#[cfg(test)]
+use super::openai::{build_openai_sse, parse_openai_request};
 
-/// Azure OpenAI transformer.
+/// Azure `OpenAI` transformer.
 ///
-/// Azure uses the same request/response format as OpenAI, but with different
+/// Azure uses the same request/response format as `OpenAI`, but with different
 /// authentication and URL patterns.
 #[derive(Debug, Clone)]
 pub struct AzureTransformer {
@@ -22,7 +24,7 @@ pub struct AzureTransformer {
     pub api_version: String,
     /// The deployment name (model deployment in Azure)
     pub deployment: Option<String>,
-    /// Inner OpenAI transformer for format handling
+    /// Inner `OpenAI` transformer for format handling
     inner: OpenAITransformer,
 }
 
@@ -41,22 +43,26 @@ impl AzureTransformer {
         }
     }
 
+    #[cfg(test)]
     pub fn with_api_version(mut self, version: impl Into<String>) -> Self {
         self.api_version = version.into();
         self
     }
 
+    #[cfg(test)]
     pub fn with_deployment(mut self, deployment: impl Into<String>) -> Self {
         self.deployment = Some(deployment.into());
         self
     }
 
-    /// Parse an Azure OpenAI request (same format as OpenAI).
+    /// Parse an Azure `OpenAI` request (same format as `OpenAI`).
+    #[cfg(test)]
     pub fn parse_request(body: &Value) -> Result<Context, TransformError> {
         parse_openai_request(body)
     }
 
-    /// Build Azure SSE response (same format as OpenAI).
+    /// Build Azure SSE response (same format as `OpenAI`).
+    #[cfg(test)]
     pub fn build_sse(event: &StreamEvent, request_id: &str, model: &str) -> String {
         build_openai_sse(event, request_id, model)
     }
@@ -68,6 +74,7 @@ impl RequestTransformer for AzureTransformer {
         self.inner.transform_request(context)
     }
 
+    #[cfg(test)]
     fn headers(&self, api_key: &str) -> Vec<(String, String)> {
         vec![
             ("Content-Type".to_string(), "application/json".to_string()),
@@ -170,8 +177,12 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_azure_parse_request() {
+    fn test_azure_parse_request() -> Result<(), Box<dyn std::error::Error>> {
         let body = json!({
             "model": "gpt-4",
             "messages": [
@@ -181,29 +192,39 @@ mod tests {
             "stream": true
         });
 
-        let ctx = AzureTransformer::parse_request(&body).unwrap();
+        let ctx = AzureTransformer::parse_request(&body)?;
         assert_eq!(ctx.model, "gpt-4");
         assert_eq!(ctx.system_prompt, Some("You are helpful".to_string()));
         assert!(ctx.stream);
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_azure_transform_request() {
+    fn test_azure_transform_request() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = AzureTransformer::new();
         let ctx = Context::new("gpt-4")
             .with_system("Be helpful")
             .with_messages(vec![Message::user("Hi")])
             .with_max_tokens(1000);
 
-        let request = transformer.transform_request(&ctx).unwrap();
+        let request = transformer.transform_request(&ctx)?;
 
         assert_eq!(request["model"], "gpt-4");
         assert!(request["messages"].is_array());
         assert_eq!(request["max_completion_tokens"], 1000);
+        Ok(())
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
     #[test]
-    fn test_azure_parse_stream_chunk() {
+    fn test_azure_parse_stream_chunk() -> Result<(), Box<dyn std::error::Error>> {
         let transformer = AzureTransformer::new();
         let mut state = StreamState::default();
 
@@ -213,7 +234,7 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
 
 "#;
 
-        let events = transformer.parse_stream_chunk(chunk, &mut state).unwrap();
+        let events = transformer.parse_stream_chunk(chunk, &mut state)?;
 
         assert!(events
             .iter()
@@ -221,6 +242,7 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890
         assert!(events
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { delta, .. } if delta == "Hello")));
+        Ok(())
     }
 
     #[test]

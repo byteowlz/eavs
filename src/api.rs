@@ -254,7 +254,7 @@ pub struct ProviderDetail {
 }
 
 /// Whether a provider type authenticates via an eavs-managed OAuth flow.
-pub fn provider_uses_oauth(provider_type: &crate::provider::ProviderType) -> bool {
+pub const fn provider_uses_oauth(provider_type: &crate::provider::ProviderType) -> bool {
     use crate::provider::ProviderType;
     matches!(
         provider_type,
@@ -355,8 +355,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                 .config
                 .get("api_key")
                 .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
+                .is_some_and(|s| !s.is_empty());
 
             let models = if let Ok(m) = store.get_models(&entry.name).await {
                 m
@@ -378,7 +377,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                 .config
                 .get("api_version")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
 
             let compat =
                 serde_json::from_value::<crate::config::ProviderConfig>(entry.config.clone())
@@ -419,7 +418,7 @@ pub async fn provider_templates_handler(
 ///
 /// If the request body includes `"template": "provider-id"`, the provider config
 /// is pre-filled from the matching template. The caller only needs to supply
-/// the provider name and optionally an api_key override.
+/// the provider name and optionally an `api_key` override.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProviderFromTemplateRequest {
     /// Provider name (key in config, e.g., "my-anthropic")
@@ -434,7 +433,7 @@ pub struct ProviderFromTemplateRequest {
 }
 
 /// POST /admin/providers/from-template
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 ///
 /// Create a provider from a template with minimal input.
 pub async fn provider_from_template_handler(
@@ -491,7 +490,7 @@ pub async fn provider_from_template_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to create provider: {}", e),
+                format!("Failed to create provider: {e}"),
                 "upsert_failed",
             )),
         )
@@ -501,7 +500,9 @@ pub async fn provider_from_template_handler(
 }
 
 /// Map eavs provider type to Pi's API type string for models.json.
-pub fn pi_api_for_provider(provider_type: &crate::provider::ProviderType) -> Option<&'static str> {
+pub const fn pi_api_for_provider(
+    provider_type: &crate::provider::ProviderType,
+) -> Option<&'static str> {
     use crate::provider::ProviderType;
     match provider_type {
         ProviderType::OpenAI => Some("openai-responses"),
@@ -717,7 +718,7 @@ fn check_keys_enabled(state: &AppState) -> Result<(), (StatusCode, Json<KeyApiEr
 /// Create a new virtual API key.
 ///
 /// POST /admin/keys
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn create_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -759,7 +760,7 @@ pub async fn create_key_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to create key: {}", e),
+                format!("Failed to create key: {e}"),
                 "create_failed",
             )),
         )
@@ -784,7 +785,7 @@ pub struct CreateKeyApiRequest {
 /// List all virtual API keys.
 ///
 /// GET /admin/keys
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn list_keys_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -806,7 +807,7 @@ pub async fn list_keys_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to list keys: {}", e),
+                format!("Failed to list keys: {e}"),
                 "list_failed",
             )),
         )
@@ -817,8 +818,8 @@ pub async fn list_keys_handler(
 
 /// Get info about a specific key.
 ///
-/// GET /admin/keys/:key_hash
-/// Authorization: Bearer <master_key>
+/// GET /`admin/keys/:key_hash`
+/// Authorization: Bearer <`master_key`>
 pub async fn get_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -853,8 +854,8 @@ pub async fn get_key_handler(
 
 /// Disable a virtual API key.
 ///
-/// DELETE /admin/keys/:key_id_or_hash
-/// Authorization: Bearer <master_key>
+/// DELETE /`admin/keys/:key_id_or_hash`
+/// Authorization: Bearer <`master_key`>
 ///
 /// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn delete_key_handler(
@@ -886,7 +887,7 @@ pub async fn delete_key_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to disable key: {}", e),
+                format!("Failed to disable key: {e}"),
                 "delete_failed",
             )),
         )
@@ -906,8 +907,8 @@ pub async fn delete_key_handler(
 
 /// Get usage history for a key.
 ///
-/// GET /admin/keys/:key_id_or_hash/usage
-/// Authorization: Bearer <master_key>
+/// GET /`admin/keys/:key_id_or_hash/usage`
+/// Authorization: Bearer <`master_key`>
 ///
 /// Accepts either the human-readable key ID (e.g., "cold-lamp") or the key hash.
 pub async fn key_usage_handler(
@@ -942,7 +943,7 @@ pub async fn key_usage_handler(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(KeyApiError::new(
-                    format!("Failed to get usage: {}", e),
+                    format!("Failed to get usage: {e}"),
                     "usage_failed",
                 )),
             )
@@ -960,8 +961,8 @@ pub struct UpdateOwnerPayload {
 
 /// Set or clear the organizational owner/tag for a key.
 ///
-/// PUT /admin/keys/:key_id_or_hash/owner
-/// Authorization: Bearer <master_key>
+/// PUT /`admin/keys/:key_id_or_hash/owner`
+/// Authorization: Bearer <`master_key`>
 pub async fn update_key_owner_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -994,7 +995,7 @@ pub async fn update_key_owner_handler(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(KeyApiError::new(
-                    format!("Failed to update owner: {}", e),
+                    format!("Failed to update owner: {e}"),
                     "update_failed",
                 )),
             )
@@ -1050,7 +1051,7 @@ fn parse_owner_breakdown(value: Option<&str>) -> (bool, bool) {
 /// Aggregate usage/cost grouped by owner across all keys.
 ///
 /// `GET /admin/usage/by-owner[?owner=<name>]`
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 ///
 /// Rows with no owner are grouped under the empty-string bucket.
 pub async fn owner_usage_handler(
@@ -1086,7 +1087,7 @@ pub async fn owner_usage_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to get owner usage: {}", e),
+                format!("Failed to get owner usage: {e}"),
                 "usage_failed",
             )),
         )
@@ -1146,7 +1147,7 @@ pub async fn provision_key_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to create key: {}", e),
+                format!("Failed to create key: {e}"),
                 "create_failed",
             )),
         )
@@ -1177,7 +1178,7 @@ pub struct KeyStatsResponse {
 /// Get key system stats.
 ///
 /// GET /admin/keys/stats
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn key_stats_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1208,7 +1209,7 @@ pub async fn key_stats_handler(
 /// Get upstream rate limit quotas.
 ///
 /// GET /admin/quotas
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 ///
 /// Returns the latest observed upstream rate limit quotas for all provider/account
 /// pairs that have been seen recently.
@@ -1228,10 +1229,10 @@ pub async fn upstream_quotas_handler(
     Ok(Json(snapshots))
 }
 
-/// Update pricing from LiteLLM.
+/// Update pricing from `LiteLLM`.
 ///
 /// POST /admin/pricing/update
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn update_pricing_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1243,7 +1244,7 @@ pub async fn update_pricing_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(KeyApiError::new(
-                format!("Failed to update pricing: {}", e),
+                format!("Failed to update pricing: {e}"),
                 "update_failed",
             )),
         )
@@ -1268,7 +1269,7 @@ pub struct PricingUpdateResponse {
 /// Create or update a provider.
 ///
 /// POST /admin/providers
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn upsert_provider_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1296,11 +1297,10 @@ pub async fn upsert_provider_handler(
             )),
         ));
     }
-    if !config_json
+    if config_json
         .get("type")
         .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
+        .is_none_or(str::is_empty)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1315,7 +1315,7 @@ pub async fn upsert_provider_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to upsert provider: {}", e),
+                format!("Failed to upsert provider: {e}"),
                 "upsert_failed",
             )),
         )
@@ -1327,7 +1327,7 @@ pub async fn upsert_provider_handler(
 /// Probe an unsaved provider config with a bounded, side-effect-free request.
 ///
 /// POST /admin/providers/probe
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 ///
 /// Exercises the real routing/transformation path against the supplied draft
 /// config without persisting anything. Fail-closed input validation returns
@@ -1362,7 +1362,7 @@ pub async fn probe_provider_handler(
 /// Get a provider by name.
 ///
 /// GET /admin/providers/:name
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn get_provider_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1393,7 +1393,7 @@ pub async fn get_provider_handler(
 /// List all admin-managed providers.
 ///
 /// GET /admin/providers
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn list_providers_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1416,7 +1416,7 @@ pub async fn list_providers_handler(
 /// Delete a provider.
 ///
 /// DELETE /admin/providers/:name
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn delete_provider_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1438,7 +1438,7 @@ pub async fn delete_provider_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to delete provider: {}", e),
+                format!("Failed to delete provider: {e}"),
                 "delete_failed",
             )),
         )
@@ -1457,7 +1457,7 @@ pub async fn delete_provider_handler(
 /// Add a model to a provider's shortlist.
 ///
 /// POST /admin/providers/:name/models
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn add_model_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1480,7 +1480,7 @@ pub async fn add_model_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to add model: {}", e),
+                format!("Failed to add model: {e}"),
                 "add_model_failed",
             )),
         )
@@ -1492,7 +1492,7 @@ pub async fn add_model_handler(
 /// Get all models for a provider.
 ///
 /// GET /admin/providers/:name/models
-/// Authorization: Bearer <master_key>
+/// Authorization: Bearer <`master_key`>
 pub async fn get_models_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1514,7 +1514,7 @@ pub async fn get_models_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to get models: {}", e),
+                format!("Failed to get models: {e}"),
                 "get_models_failed",
             )),
         )
@@ -1525,8 +1525,8 @@ pub async fn get_models_handler(
 
 /// Remove a model from a provider's shortlist.
 ///
-/// DELETE /admin/providers/:name/models/:model_id
-/// Authorization: Bearer <master_key>
+/// DELETE /`admin/providers/:name/models/:model_id`
+/// Authorization: Bearer <`master_key`>
 pub async fn remove_model_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1548,7 +1548,7 @@ pub async fn remove_model_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ProviderApiError::new(
-                format!("Failed to remove model: {}", e),
+                format!("Failed to remove model: {e}"),
                 "remove_model_failed",
             )),
         )
@@ -1564,7 +1564,7 @@ pub async fn remove_model_handler(
     }
 }
 
-/// Check master key authorization, returning ProviderApiError on failure.
+/// Check master key authorization, returning `ProviderApiError` on failure.
 fn check_master_key_provider(
     headers: &HeaderMap,
     state: &AppState,
@@ -1610,7 +1610,7 @@ fn check_oauth_available(state: &AppState) -> Result<(), (StatusCode, Json<OAuth
     Ok(())
 }
 
-fn provider_requires_pkce(provider: OAuthProvider) -> bool {
+const fn provider_requires_pkce(provider: OAuthProvider) -> bool {
     matches!(
         provider,
         OAuthProvider::Anthropic | OAuthProvider::OpenAICodex
@@ -1662,7 +1662,7 @@ fn effective_oauth_user(
 fn split_oauth_code(code: &str) -> (String, Option<String>) {
     let mut parts = code.splitn(2, '#');
     let code_part = parts.next().unwrap_or_default().to_string();
-    let state_part = parts.next().map(|s| s.to_string());
+    let state_part = parts.next().map(std::string::ToString::to_string);
     (code_part, state_part)
 }
 
@@ -2198,7 +2198,7 @@ mod tests {
             .expect("temp OAuth store")
     }
 
-    /// An AppState with virtual keys enabled and an initialized OAuth store so
+    /// An `AppState` with virtual keys enabled and an initialized OAuth store so
     /// the OAuth handlers can pass `check_oauth_available`.
     async fn mock_oauth_state() -> AppState {
         let mut config = AppConfig {
@@ -2232,7 +2232,7 @@ mod tests {
     }
 
     /// The operator/auth principal is bound to the configured default user
-    /// (KeysConfig::default() -> "default"). `effective_oauth_user` rejects a
+    /// (`KeysConfig::default()` -> "default"). `effective_oauth_user` rejects a
     /// caller-supplied `user_id` that differs from that bound identity.
     #[test]
     fn effective_oauth_user_binds_to_principal() {
@@ -2307,7 +2307,7 @@ mod tests {
     /// When the caller uses the authenticated principal's own user id, the
     /// endpoints scope to that identity and proceed (rather than being rejected
     /// as cross-user). /auth/status lists only the principal's providers and
-    /// DELETE reaches the store (NOT_FOUND on an empty store), proving writes
+    /// DELETE reaches the store (`NOT_FOUND` on an empty store), proving writes
     /// and deletes are scoped to the authenticated principal.
     #[tokio::test]
     async fn oauth_operations_scope_to_authenticated_principal() {
@@ -2579,7 +2579,7 @@ mod tests {
         let messages: Vec<Injection> = (0..101)
             .map(|i| Injection {
                 role: "user".to_string(),
-                content: format!("Message {}", i),
+                content: format!("Message {i}"),
             })
             .collect();
         let payload = InjectionPayload { messages };

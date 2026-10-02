@@ -34,9 +34,9 @@ pub struct UsageStats {
 /// Calculator for estimating request costs.
 pub struct CostCalculator {
     pricing: SharedPricingTable,
-    /// Tokenizer for OpenAI models (cl100k_base for GPT-4, etc.)
+    /// Tokenizer for `OpenAI` models (`cl100k_base` for GPT-4, etc.)
     tokenizer_cl100k: Arc<CoreBPE>,
-    /// Tokenizer for newer OpenAI models (o200k_base for GPT-4o, o1, etc.)
+    /// Tokenizer for newer `OpenAI` models (`o200k_base` for GPT-4o, o1, etc.)
     tokenizer_o200k: Arc<CoreBPE>,
 }
 
@@ -158,9 +158,8 @@ impl CostCalculator {
         let estimated_output = body
             .get("max_tokens")
             .or_else(|| body.get("max_completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(1000); // Default estimate
+            .and_then(serde_json::Value::as_u64)
+            .map_or(1000, |v| v as u32); // Default estimate
 
         let pricing = self.pricing.get_or_default(model, provider).await;
         let cost = pricing.calculate_cost(input_tokens, estimated_output);
@@ -229,24 +228,21 @@ impl CostCalculator {
         let input_tokens = usage
             .get("prompt_tokens")
             .or_else(|| usage.get("input_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |v| v as u32);
 
         let output_tokens = usage
             .get("completion_tokens")
             .or_else(|| usage.get("output_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |v| v as u32);
 
         let cached_tokens = usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .or_else(|| usage.get("cache_read_input_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |v| v as u32);
 
         let pricing = self.pricing.get_or_default(model, provider).await;
         let cost = if cached_tokens > 0 {
@@ -297,7 +293,7 @@ impl Clone for CostCalculator {
 /// Whether a provider reports `input_tokens` *excluding* cache read/write tokens.
 ///
 /// Anthropic's Messages API reports uncached input only (cache reads/writes are
-/// separate fields), so cached tokens must not be subtracted again. OpenAI and
+/// separate fields), so cached tokens must not be subtracted again. `OpenAI` and
 /// Google report a prompt-token count that includes cached tokens.
 fn is_cache_exclusive_input(model: &str, provider: &str) -> bool {
     let hay = format!("{} {}", model.to_lowercase(), provider.to_lowercase());

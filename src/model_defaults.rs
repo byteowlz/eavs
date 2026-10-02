@@ -103,8 +103,7 @@ fn choose_fast_model(models: &[ModelShortlistEntry], default: &str) -> String {
         })
         .or_else(|| models.iter().find(|m| !m.reasoning))
         .or_else(|| models.first())
-        .map(|m| m.id.clone())
-        .unwrap_or_else(|| default.to_string())
+        .map_or_else(|| default.to_string(), |m| m.id.clone())
 }
 
 fn choose_reasoning_model(models: &[ModelShortlistEntry], default: &str) -> String {
@@ -120,6 +119,5 @@ fn choose_reasoning_model(models: &[ModelShortlistEntry], default: &str) -> Stri
             })
         })
         .or_else(|| models.first())
-        .map(|m| m.id.clone())
-        .unwrap_or_else(|| default.to_string())
+        .map_or_else(|| default.to_string(), |m| m.id.clone())
 }

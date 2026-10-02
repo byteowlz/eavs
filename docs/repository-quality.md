@@ -39,6 +39,30 @@ Compared against `../templates/rust-cli` and `../templates/rust-workspace`:
   is not copied. `just validate-config` uses pinned standard JSON Schema validation
   and a limited mapped-field scanner; it is not generated Rust/serde parity.
 
+## Latest implementation checkpoint
+
+Before committing the ownership/scope fixes and lint-cleanup batch:
+
+- `cargo test --locked`: **470 passed**, zero failures.
+- `cargo check --locked --all-targets --all-features`: **PASS**.
+- Formatting and `git diff --check`: **PASS**.
+- `just check-all`: **FAIL** at strict Clippy (685 test-target errors reported;
+  overlapping target summaries are not unique counts). Release remains blocked.
+- No dependency, package version, release tag, or lint threshold changes.
+- OAuth borrowed-credential tests cover zero refresh transport requests and
+  unchanged stored values; no native credential-file importer was added.
+- HTTP post-policy and Codex WebSocket per-frame model checks now deny scope
+  expansion. Full narrowing run grants and realtime/live revocation remain pending.
+
+CLI, transform, key-store and proxy test refactors preserve behavioral assertions.
+Three unused key-generation helpers and their three tests were removed; remaining
+suite counts reflect those removals plus the new security regressions. No blanket
+module suppression was accepted to make the transformed code pass.
+
+Local evidence: `/tmp/eavs-precommit-{tests,check,gates}.log`. These local tests
+are not live provider, deployment, cross-machine sync, or full subagent-isolation
+proof. The tables below are retained as the **historical tooling baseline**.
+
 ## Gates and observed results
 
 Local toolchain: rustc/Clippy 1.98.0; ast-grep 0.42.1. Counts are observations,

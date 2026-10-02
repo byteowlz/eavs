@@ -3,6 +3,7 @@
 - Read `CONTEXT.md` and relevant `docs/adr/` before architectural changes. Accepted direction is not proof of implemented enforcement.
 - Track substantial work and verification evidence in `trx`; decisions belong in ADRs, not issue prose alone. Competition research belongs in `~/wiki`, never product READMEs.
 - Use `just` for development commands; run `cargo check` after Rust changes and `just check-all` before significant commits. Report failing gates; do not blanket-suppress warnings to obtain green checks.
+- For fallible tests, prefer `Result`/`?` over unchecked setup. A per-test `#[expect(clippy::panic_in_result_fn, reason = "...")]` is appropriate where intentional assertions trigger that lint; retain every behavioral assertion. Any FFI exception needs a narrow expectation, safety argument and checked inputs. Never disable a lint for a whole module to hide existing debt.
 - No-inference adoption checks must not call `provider_probe` (it generates). Never execute imported credential commands or read referenced secret files implicitly.
 - Preserve native provider shapes and working Pi routing. Harness config is not authorization; enforce effective scope after route/alias/fallback resolution.
 - Never claim durable budget enforcement from process-local counters or sequential tests. Unsupported priced operations fail closed for capped keys.

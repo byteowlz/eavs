@@ -14,7 +14,7 @@ use crate::config::ModelShortlistEntry;
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 /// Re-fetch if cache is older than this
-const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60); // 24h
+const CACHE_MAX_AGE: Duration = Duration::from_hours(24); // 24h
 
 /// A provider entry from models.dev
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -25,7 +25,7 @@ pub struct CatalogProvider {
     /// API base URL (e.g., `https://api.minimax.io/anthropic/v1`)
     #[serde(default)]
     pub api: Option<String>,
-    /// Environment variable names for API keys (e.g., ["ANTHROPIC_API_KEY"])
+    /// Environment variable names for API keys (e.g., ["`ANTHROPIC_API_KEY`"])
     #[serde(default)]
     pub env: Vec<String>,
     /// npm package name — indicates the API protocol (e.g., "@ai-sdk/anthropic")
@@ -93,7 +93,7 @@ pub struct CatalogLimit {
 }
 
 impl CatalogModel {
-    /// Convert to our internal ModelShortlistEntry format.
+    /// Convert to our internal `ModelShortlistEntry` format.
     pub fn to_shortlist_entry(&self) -> ModelShortlistEntry {
         let input = if self.modalities.input.is_empty() {
             vec!["text".to_string()]
@@ -209,7 +209,7 @@ impl ModelCatalog {
             catalog_models.sort_by(|a, b| b.release_date.cmp(&a.release_date));
             catalog_models
                 .into_iter()
-                .map(|m| m.to_shortlist_entry())
+                .map(CatalogModel::to_shortlist_entry)
                 .collect()
         } else {
             Vec::new()
@@ -230,8 +230,12 @@ impl ModelCatalog {
 
     /// List all provider IDs in the catalog.
     pub fn provider_ids(&self) -> Vec<&str> {
-        let mut ids: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
-        ids.sort();
+        let mut ids: Vec<&str> = self
+            .providers
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+        ids.sort_unstable();
         ids
     }
 
@@ -241,7 +245,7 @@ impl ModelCatalog {
     }
 
     /// Get all providers (for template generation).
-    pub fn all_providers(&self) -> &HashMap<String, CatalogProvider> {
+    pub const fn all_providers(&self) -> &HashMap<String, CatalogProvider> {
         &self.providers
     }
 

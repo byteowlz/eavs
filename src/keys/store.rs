@@ -11,7 +11,10 @@
 //! - Configurable sync intervals
 
 use crate::keys::generation::{generate_human_id, generate_key, hash_key};
-use crate::keys::types::*;
+use crate::keys::types::{
+    BudgetWindow, CreateKeyRequest, CreateKeyResponse, KeyInfo, KeyPermissions, KeyUsage,
+    VirtualKey,
+};
 use chrono::{DateTime, Datelike, Utc};
 use dashmap::DashMap;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
@@ -33,9 +36,9 @@ enum SyncMessage {
 pub struct KeyStore {
     /// SQLite connection pool
     pool: Pool<Sqlite>,
-    /// In-memory cache for fast lookups (key_hash -> VirtualKey)
+    /// In-memory cache for fast lookups (`key_hash` -> `VirtualKey`)
     cache: Arc<DashMap<String, VirtualKey>>,
-    /// Secondary index for O(1) lookup by human ID (key_id -> key_hash)
+    /// Secondary index for O(1) lookup by human ID (`key_id` -> `key_hash`)
     human_id_index: Arc<DashMap<String, String>>,
     /// Pending usage updates counter (for batch syncing)
     pending_updates: Arc<AtomicU64>,
@@ -188,7 +191,7 @@ impl KeyStore {
 
     async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), KeyStoreError> {
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS virtual_keys (
                 key_hash TEXT PRIMARY KEY,
                 key_id TEXT NOT NULL UNIQUE,
@@ -207,7 +210,7 @@ impl KeyStore {
             CREATE INDEX IF NOT EXISTS idx_keys_created ON virtual_keys(created_at);
             CREATE INDEX IF NOT EXISTS idx_keys_disabled ON virtual_keys(disabled);
             CREATE INDEX IF NOT EXISTS idx_keys_key_id ON virtual_keys(key_id);
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -276,7 +279,7 @@ impl KeyStore {
         // initialization ("no such column: owner"), leaving the key store
         // non-functional. See eavs-64qn.
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS usage_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 key_hash TEXT NOT NULL,
@@ -291,7 +294,7 @@ impl KeyStore {
                 owner TEXT,
                 FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
             );
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -334,11 +337,11 @@ impl KeyStore {
         // index/constraint referencing a column must run after the ADD COLUMN
         // that guarantees it (eavs-64qn).
         sqlx::query(
-            r#"
+            r"
             CREATE INDEX IF NOT EXISTS idx_usage_key ON usage_history(key_hash);
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_history(timestamp);
             CREATE INDEX IF NOT EXISTS idx_usage_owner ON usage_history(owner);
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -346,7 +349,7 @@ impl KeyStore {
 
         // OAuth credentials table
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS oauth_credentials (
                 user_id TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -356,7 +359,7 @@ impl KeyStore {
                 extra_data TEXT,
                 PRIMARY KEY (user_id, provider)
             );
-            "#,
+            ",
         )
         .execute(pool)
         .await
@@ -426,10 +429,10 @@ impl KeyStore {
             .map_err(|e| KeyStoreError::Serialization(e.to_string()))?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO virtual_keys (key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, owner, oauth_user, oauth_account)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(&key_hash)
         .bind(&virtual_key.key_id)
@@ -437,7 +440,7 @@ impl KeyStore {
         .bind(virtual_key.created_at.to_rfc3339())
         .bind(virtual_key.expires_at.map(|t| t.to_rfc3339()))
         .bind(virtual_key.valid_after.map(|t| t.to_rfc3339()))
-        .bind(virtual_key.disabled as i32)
+        .bind(i32::from(virtual_key.disabled))
         .bind(&permissions_json)
         .bind(&usage_json)
         .bind(&metadata_json)
@@ -500,7 +503,7 @@ impl KeyStore {
         // Fallback: append timestamp suffix to guarantee uniqueness
         let base_id = generate_human_id();
         let suffix = Utc::now().timestamp_millis() % 10000;
-        format!("{}-{}", base_id, suffix)
+        format!("{base_id}-{suffix}")
     }
 
     /// Look up a key by its value.
@@ -617,7 +620,7 @@ impl KeyStore {
         let cutoff = cutoff_timestamp(days);
         let rows: Vec<OwnerUsageRow> = if let Some(owner) = owner {
             sqlx::query_as(
-                r#"
+                r"
                 SELECT COALESCE(owner, '') AS owner,
                        COUNT(*) AS requests,
                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -628,7 +631,7 @@ impl KeyStore {
                 FROM usage_history
                 WHERE COALESCE(owner, '') = ? AND timestamp >= ?
                 GROUP BY COALESCE(owner, '')
-                "#,
+                ",
             )
             .bind(owner)
             .bind(&cutoff)
@@ -636,7 +639,7 @@ impl KeyStore {
             .await
         } else {
             sqlx::query_as(
-                r#"
+                r"
                 SELECT COALESCE(owner, '') AS owner,
                        COUNT(*) AS requests,
                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -648,7 +651,7 @@ impl KeyStore {
                 WHERE timestamp >= ?
                 GROUP BY COALESCE(owner, '')
                 ORDER BY cost_usd DESC
-                "#,
+                ",
             )
             .bind(&cutoff)
             .fetch_all(&self.pool)
@@ -656,7 +659,7 @@ impl KeyStore {
         }
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        Ok(rows.into_iter().map(std::convert::Into::into).collect())
     }
 
     /// Aggregate usage/cost grouped by owner, optionally sub-aggregated by
@@ -698,7 +701,7 @@ impl KeyStore {
         };
 
         let sql = format!(
-            r#"
+            r"
             SELECT {select_dims},
                    COUNT(*) AS requests,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -710,10 +713,7 @@ impl KeyStore {
             WHERE timestamp >= ?{owner_filter}
             GROUP BY {group_dims}
             ORDER BY cost_usd DESC
-            "#,
-            select_dims = select_dims,
-            group_dims = group_dims,
-            owner_filter = owner_filter,
+            ",
         );
 
         let mut q = sqlx::query_as::<_, OwnerUsageRow>(&sql).bind(&cutoff);
@@ -741,7 +741,7 @@ impl KeyStore {
     pub async fn get_usage_by_key(&self, days: Option<u32>) -> Result<Vec<KeyCost>, KeyStoreError> {
         let cutoff = cutoff_timestamp(days);
         let rows: Vec<KeyCostRow> = sqlx::query_as(
-            r#"
+            r"
             SELECT h.key_hash AS key_hash,
                    COALESCE(k.key_id, '') AS key_id,
                    COALESCE(k.name, '') AS name,
@@ -757,14 +757,14 @@ impl KeyStore {
             WHERE h.timestamp >= ?
             GROUP BY h.key_hash
             ORDER BY cost_usd DESC
-            "#,
+            ",
         )
         .bind(&cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        Ok(rows.into_iter().map(std::convert::Into::into).collect())
     }
 
     /// Gracefully shutdown the key store, flushing any pending writes.
@@ -816,8 +816,8 @@ impl KeyStore {
         // Update cache first (hot path - O(1))
         if let Some(mut key) = self.cache.get_mut(key_hash) {
             key.usage.total_requests += 1;
-            key.usage.total_input_tokens += input_tokens as u64;
-            key.usage.total_output_tokens += output_tokens as u64;
+            key.usage.total_input_tokens += u64::from(input_tokens);
+            key.usage.total_output_tokens += u64::from(output_tokens);
             key.usage.total_spend_usd += cost_usd;
             key.usage.window_spend_usd += cost_usd;
             key.usage.last_request_at = Some(Utc::now());
@@ -867,19 +867,19 @@ impl KeyStore {
         let owner = self.cache.get(key_hash).and_then(|k| k.owner.clone());
         let timestamp = Utc::now().to_rfc3339();
         sqlx::query(
-            r#"
+            r"
             INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd, owner)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(key_hash)
         .bind(&timestamp)
         .bind(model)
         .bind(provider)
-        .bind(input_tokens as i64)
-        .bind(output_tokens as i64)
-        .bind(cached_tokens as i64)
-        .bind(cache_write_tokens as i64)
+        .bind(i64::from(input_tokens))
+        .bind(i64::from(output_tokens))
+        .bind(i64::from(cached_tokens))
+        .bind(i64::from(cache_write_tokens))
         .bind(cost_usd)
         .bind(&owner)
         .execute(&self.pool)
@@ -1018,12 +1018,12 @@ impl KeyStore {
             "SELECT timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cache_write_tokens, cost_usd FROM usage_history WHERE key_hash = ? ORDER BY timestamp DESC LIMIT ?",
         )
         .bind(key_hash)
-        .bind(limit as i64)
+        .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        Ok(rows.into_iter().map(std::convert::Into::into).collect())
     }
 
     /// Get the number of active keys.
@@ -1138,8 +1138,7 @@ impl From<UsageRow> for UsageRecord {
     fn from(row: UsageRow) -> Self {
         Self {
             timestamp: DateTime::parse_from_rfc3339(&row.timestamp)
-                .map(|t| t.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+                .map_or_else(|_| Utc::now(), |t| t.with_timezone(&Utc)),
             model: row.model,
             provider: row.provider,
             input_tokens: row.input_tokens as u32,
@@ -1259,7 +1258,7 @@ impl From<KeyCostRow> for KeyCost {
 /// RFC3339 lower bound for a `--days` window (epoch when `None`).
 fn cutoff_timestamp(days: Option<u32>) -> String {
     match days {
-        Some(d) => (Utc::now() - chrono::Duration::days(d as i64)).to_rfc3339(),
+        Some(d) => (Utc::now() - chrono::Duration::days(i64::from(d))).to_rfc3339(),
         None => "1970-01-01T00:00:00+00:00".to_string(),
     }
 }
@@ -1277,9 +1276,9 @@ pub enum KeyStoreError {
 impl std::fmt::Display for KeyStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Database(e) => write!(f, "Database error: {}", e),
-            Self::Serialization(e) => write!(f, "Serialization error: {}", e),
-            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Database(e) => write!(f, "Database error: {e}"),
+            Self::Serialization(e) => write!(f, "Serialization error: {e}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
             Self::NotFound => write!(f, "Key not found"),
         }
     }
@@ -1305,8 +1304,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_create_and_get_key() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_create_and_get_key() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let request = CreateKeyRequest {
             name: Some("Test Key".to_string()),
@@ -1317,38 +1320,50 @@ mod tests {
             ..Default::default()
         };
 
-        let response = store.create_key(request).await.unwrap();
+        let response = store.create_key(request).await?;
         assert!(response.key.starts_with("eavs-"));
 
         // Should be able to look up by key
-        let key = store.get_by_key(&response.key).unwrap();
+        let key = store
+            .get_by_key(&response.key)
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(key.name, Some("Test Key".to_string()));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_list_keys() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_list_keys() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         // Create a few keys
         for i in 0..3 {
             let request = CreateKeyRequest {
-                name: Some(format!("Key {}", i)),
+                name: Some(format!("Key {i}")),
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
                 oauth_user: None,
                 ..Default::default()
             };
-            store.create_key(request).await.unwrap();
+            store.create_key(request).await?;
         }
 
-        let keys = store.list_keys().await.unwrap();
+        let keys = store.list_keys().await?;
         assert_eq!(keys.len(), 3);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_disable_key() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_disable_key() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let request = CreateKeyRequest {
             name: Some("To Disable".to_string()),
@@ -1359,22 +1374,27 @@ mod tests {
             ..Default::default()
         };
 
-        let response = store.create_key(request).await.unwrap();
+        let response = store.create_key(request).await?;
         let key_hash = crate::keys::generation::hash_key(&response.key);
 
         // Should find key before disabling
         assert!(store.get_by_key(&response.key).is_some());
 
         // Disable
-        store.disable_key(&key_hash).await.unwrap();
+        store.disable_key(&key_hash).await?;
 
         // Should not find key after disabling
         assert!(store.get_by_key(&response.key).is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_update_usage() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_update_usage() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let request = CreateKeyRequest {
             name: Some("Usage Test".to_string()),
@@ -1385,25 +1405,31 @@ mod tests {
             ..Default::default()
         };
 
-        let response = store.create_key(request).await.unwrap();
+        let response = store.create_key(request).await?;
         let key_hash = crate::keys::generation::hash_key(&response.key);
 
         // Record some usage
         store
             .update_usage(&key_hash, 100, 50, 0, 0, 0.001, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
 
         // Check usage was recorded
-        let key = store.get_by_key(&response.key).unwrap();
+        let key = store
+            .get_by_key(&response.key)
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(key.usage.total_requests, 1);
         assert_eq!(key.usage.total_input_tokens, 100);
         assert_eq!(key.usage.total_output_tokens, 50);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn legacy_accounting_fixture_roundtrip() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn legacy_accounting_fixture_roundtrip() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
         // Key with a $1.00 budget.
         let response = store
             .create_key(CreateKeyRequest {
@@ -1413,43 +1439,50 @@ mod tests {
                 },
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         let key_hash = crate::keys::generation::hash_key(&response.key);
 
         // Sequential legacy fixture operations; this does not test concurrency.
-        assert!(store.reserve_budget(&key_hash, 0.60).await.unwrap());
-        assert!(!store.reserve_budget(&key_hash, 0.60).await.unwrap());
+        assert!(store.reserve_budget(&key_hash, 0.60).await?);
+        assert!(!store.reserve_budget(&key_hash, 0.60).await?);
 
         // A third reservation that would exceed the cap is also rejected.
-        assert!(!store.reserve_budget(&key_hash, 0.50).await.unwrap());
+        assert!(!store.reserve_budget(&key_hash, 0.50).await?);
 
         // Exercise the old serialization shape with a synthetic $0.55 charge.
         // This is not evidence of provider billing or safe settlement.
         store
             .reconcile_reservation(&key_hash, 0.60, 0.55, "fal-ai/x", "fal")
-            .await
-            .unwrap();
-        let key = store.get_by_key(&response.key).unwrap();
+            .await?;
+        let key = store
+            .get_by_key(&response.key)
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(key.usage.reserved_spend_usd, 0.0);
         assert!((key.usage.window_spend_usd - 0.55).abs() < 1e-9);
         assert!(!key.is_over_budget());
-        assert!(store.reserve_budget(&key_hash, 0.40).await.unwrap());
+        assert!(store.reserve_budget(&key_hash, 0.40).await?);
 
         // Release the second reservation without charging.
-        store.release_reservation(&key_hash, 0.40).await.unwrap();
-        let key = store.get_by_key(&response.key).unwrap();
+        store.release_reservation(&key_hash, 0.40).await?;
+        let key = store
+            .get_by_key(&response.key)
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(key.usage.reserved_spend_usd, 0.0);
         assert!((key.usage.window_spend_usd - 0.55).abs() < 1e-9);
 
         // A reservation that, combined with already spent window, exceeds the
         // budget is rejected.
-        assert!(!store.reserve_budget(&key_hash, 0.60).await.unwrap());
+        assert!(!store.reserve_budget(&key_hash, 0.60).await?);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_human_readable_key_id() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_human_readable_key_id() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let request = CreateKeyRequest {
             name: Some("Human ID Test".to_string()),
@@ -1460,7 +1493,7 @@ mod tests {
             ..Default::default()
         };
 
-        let response = store.create_key(request).await.unwrap();
+        let response = store.create_key(request).await?;
 
         // Key should be the long eavs- format
         assert!(response.key.starts_with("eavs-"));
@@ -1468,25 +1501,35 @@ mod tests {
 
         // key_id should be human-readable (adjective-noun format)
         assert!(response.key_id.contains('-'));
-        let parts: Vec<_> = response.key_id.split('-').collect();
-        assert_eq!(parts.len(), 2, "key_id should be adjective-noun format");
+        assert_eq!(
+            response.key_id.split('-').count(),
+            2,
+            "key_id should be adjective-noun format"
+        );
 
         // Should be able to look up by human ID
-        let key = store.get_by_human_id(&response.key_id).unwrap();
+        let key = store
+            .get_by_human_id(&response.key_id)
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(key.name, Some("Human ID Test".to_string()));
         assert_eq!(key.key_id, response.key_id);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_unique_human_ids() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_unique_human_ids() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let mut ids = std::collections::HashSet::new();
 
         // Create several keys and verify unique IDs
         for i in 0..10 {
             let request = CreateKeyRequest {
-                name: Some(format!("Key {}", i)),
+                name: Some(format!("Key {i}")),
                 expires_at: None,
                 permissions: KeyPermissions::default(),
                 metadata: serde_json::Value::Null,
@@ -1494,17 +1537,22 @@ mod tests {
                 ..Default::default()
             };
 
-            let response = store.create_key(request).await.unwrap();
+            let response = store.create_key(request).await?;
             assert!(
                 ids.insert(response.key_id.clone()),
                 "Duplicate key_id generated"
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_owner_usage_rollup() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_owner_usage_rollup() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         // Two keys owned by "alice", one by "bob", one unassigned.
         let mut hashes = std::collections::HashMap::new();
@@ -1519,30 +1567,26 @@ mod tests {
                 owner: owner.map(str::to_string),
                 ..Default::default()
             };
-            let resp = store.create_key(request).await.unwrap();
+            let resp = store.create_key(request).await?;
             hashes.insert(name, resp.key_hash);
         }
 
         // Record usage: alice across both keys, bob once, unassigned once.
         store
             .update_usage(&hashes["a1"], 100, 50, 0, 0, 0.10, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
         store
             .update_usage(&hashes["a2"], 200, 80, 0, 0, 0.20, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
         store
             .update_usage(&hashes["b1"], 10, 5, 0, 0, 0.01, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
         store
             .update_usage(&hashes["u1"], 1, 1, 0, 0, 0.001, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
 
         // Filtered to alice: rolled up across both her keys.
-        let alice = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        let alice = store.get_usage_by_owner(Some("alice"), None).await?;
         assert_eq!(alice.len(), 1);
         assert_eq!(alice[0].owner, "alice");
         assert_eq!(alice[0].requests, 2);
@@ -1551,23 +1595,24 @@ mod tests {
         assert!((alice[0].cost_usd - 0.30).abs() < 1e-9);
 
         // All owners, including the empty-string (unassigned) bucket.
-        let all = store.get_usage_by_owner(None, None).await.unwrap();
+        let all = store.get_usage_by_owner(None, None).await?;
         assert_eq!(all.len(), 3);
         assert!(all.iter().any(|o| o.owner == "alice" && o.requests == 2));
         assert!(all.iter().any(|o| o.owner == "bob" && o.requests == 1));
         assert!(all.iter().any(|o| o.owner.is_empty() && o.requests == 1));
 
         // Per-key rollup: one bucket per key, carrying owner + cost.
-        let by_key = store.get_usage_by_key(None).await.unwrap();
+        let by_key = store.get_usage_by_key(None).await?;
         assert_eq!(by_key.len(), 4);
         let a1 = by_key
             .iter()
             .find(|k| k.key_hash == hashes["a1"])
-            .expect("a1 present");
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(a1.owner, "alice");
         assert_eq!(a1.requests, 1);
         assert_eq!(a1.input_tokens, 100);
         assert!((a1.cost_usd - 0.10).abs() < 1e-9);
+        Ok(())
     }
 
     /// Optional model/provider breakdown for the owner rollup (eavs-5gf3).
@@ -1577,8 +1622,12 @@ mod tests {
     /// dimensions while the plain `get_usage_by_owner` still returns a single
     /// owner-level bucket.
     #[tokio::test]
-    async fn test_owner_usage_breakdown() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_owner_usage_breakdown() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let resp = store
             .create_key(CreateKeyRequest {
@@ -1586,26 +1635,22 @@ mod tests {
                 owner: Some("alice".to_string()),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         let h = resp.key_hash;
 
         // Alice uses two models across two providers.
         store
             .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
         store
             .update_usage(&h, 200, 20, 0, 0, 0.20, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
         store
             .update_usage(&h, 50, 5, 0, 0, 0.05, "claude-3", "anthropic")
-            .await
-            .unwrap();
+            .await?;
 
         // Plain rollup: one bucket for alice.
-        let plain = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        let plain = store.get_usage_by_owner(Some("alice"), None).await?;
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].requests, 3);
         assert_eq!(plain[0].input_tokens, 350);
@@ -1615,8 +1660,7 @@ mod tests {
         // Breakdown by model only: two buckets (gpt-4, claude-3).
         let by_model = store
             .get_usage_by_owner_breakdown(Some("alice"), true, false, None)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(by_model.len(), 2);
         let gpt = by_model
             .iter()
@@ -1624,8 +1668,8 @@ mod tests {
         let claude = by_model
             .iter()
             .find(|r| r.model.as_deref() == Some("claude-3"));
-        let gpt = gpt.expect("gpt-4 bucket");
-        let claude = claude.expect("claude-3 bucket");
+        let gpt = gpt.ok_or(KeyStoreError::NotFound)?;
+        let claude = claude.ok_or(KeyStoreError::NotFound)?;
         assert_eq!(gpt.requests, 2);
         assert_eq!(gpt.input_tokens, 300);
         assert!((gpt.cost_usd - 0.30).abs() < 1e-9);
@@ -1638,20 +1682,18 @@ mod tests {
         // each model maps to exactly one provider.
         let by_both = store
             .get_usage_by_owner_breakdown(Some("alice"), true, true, None)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(by_both.len(), 2);
         let gpt = by_both
             .iter()
             .find(|r| r.model.as_deref() == Some("gpt-4"))
-            .expect("gpt-4 bucket");
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(gpt.provider.as_deref(), Some("openai"));
 
         // Breakdown by provider only: two buckets (openai, anthropic).
         let by_provider = store
             .get_usage_by_owner_breakdown(Some("alice"), false, true, None)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(by_provider.len(), 2);
         assert!(by_provider
             .iter()
@@ -1662,7 +1704,8 @@ mod tests {
         assert!(by_provider.iter().all(|r| r.model.is_none()));
 
         // JSON shape: omitted fields must not appear when not requested.
-        let json = serde_json::to_string(&plain).unwrap();
+        let json = serde_json::to_string(&plain)
+            .map_err(|e| KeyStoreError::Serialization(e.to_string()))?;
         assert!(
             !json.contains("model"),
             "model must be omitted in plain rollup"
@@ -1671,12 +1714,13 @@ mod tests {
             !json.contains("provider"),
             "provider must be omitted in plain rollup"
         );
+        Ok(())
     }
 
     /// Rollups survive key revocation (eavs-5gf3).
     ///
     /// The issue scope requires that owner is denormalized onto each
-    /// usage_history row so rollups "need no join and survive key deletion".
+    /// `usage_history` row so rollups "need no join and survive key deletion".
     /// This guards the **production** path — `disable_key` (soft delete), used
     /// by `DELETE /admin/keys/:id` — against a refactor that re-introduces a
     /// join on `virtual_keys` (which would drop a revoked key's historical
@@ -1685,56 +1729,55 @@ mod tests {
     /// Note: the hard-delete path (`delete_key`, currently dead code) does NOT
     /// preserve history — its `ON DELETE CASCADE` foreign key fires because
     /// sqlx enables `PRAGMA foreign_keys = ON`. That is tracked separately as
-    /// eavs-yxp7; it is orthogonal to owner labels (affects all usage_history)
+    /// eavs-yxp7; it is orthogonal to owner labels (affects all `usage_history`)
     /// and out of scope for the owner feature.
     #[tokio::test]
-    async fn test_owner_rollup_survives_key_deletion() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_owner_rollup_survives_key_deletion() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
         let resp = store
             .create_key(CreateKeyRequest {
                 name: Some("soft-doomed".to_string()),
                 owner: Some("alice".to_string()),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         let h = resp.key_hash;
 
         store
             .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
 
         // Sanity before revocation.
         assert_eq!(
-            store
-                .get_usage_by_owner(Some("alice"), None)
-                .await
-                .unwrap()
-                .len(),
+            store.get_usage_by_owner(Some("alice"), None).await?.len(),
             1
         );
 
         // Soft-delete (revoke): removes the key from the in-memory cache but
         // must NOT remove its historical usage from the owner rollup.
-        assert!(store.disable_key(&h).await.unwrap());
+        assert!(store.disable_key(&h).await?);
         assert!(store.get_by_hash(&h).is_none(), "key removed from cache");
 
         // Owner rollup reads usage_history directly -> survives.
-        let after = store.get_usage_by_owner(Some("alice"), None).await.unwrap();
+        let after = store.get_usage_by_owner(Some("alice"), None).await?;
         assert_eq!(after.len(), 1, "alice bucket must survive revocation");
         assert_eq!(after[0].requests, 1);
         assert_eq!(after[0].input_tokens, 100);
         assert!((after[0].cost_usd - 0.10).abs() < 1e-9);
 
         // Per-key rollup: row still present (disabled=1), so key_id resolves.
-        let by_key = store.get_usage_by_key(None).await.unwrap();
+        let by_key = store.get_usage_by_key(None).await?;
         assert_eq!(by_key.len(), 1);
         assert_eq!(by_key[0].owner, "alice");
         assert_eq!(
             by_key[0].key_id, resp.key_id,
             "key_id preserved on soft delete (row retained, disabled)"
         );
+        Ok(())
     }
 
     /// `update_owner` mutates cache + DB and the denormalized owner on
@@ -1745,8 +1788,12 @@ mod tests {
     /// one. A broken setter (e.g. cache not updated) would attribute new usage
     /// to the stale owner.
     #[tokio::test]
-    async fn test_update_owner_and_denormalization() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_update_owner_and_denormalization() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let resp = store
             .create_key(CreateKeyRequest {
@@ -1754,57 +1801,64 @@ mod tests {
                 owner: Some("alice".to_string()),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         let h = resp.key_hash;
 
         // Usage while owned by alice.
         store
             .update_usage(&h, 100, 10, 0, 0, 0.10, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
 
         // Reassign to bob.
         assert!(
-            store
-                .update_owner(&h, Some("bob".to_string()))
-                .await
-                .unwrap(),
+            store.update_owner(&h, Some("bob".to_string())).await?,
             "update_owner returns true for existing key"
         );
         // Cache must reflect the new owner immediately.
         assert_eq!(
-            store.get_by_hash(&h).unwrap().owner.as_deref(),
+            store
+                .get_by_hash(&h)
+                .ok_or(KeyStoreError::NotFound)?
+                .owner
+                .as_deref(),
             Some("bob"),
             "cache must reflect updated owner"
         );
         // Usage recorded after the change must be attributed to bob.
         store
             .update_usage(&h, 200, 20, 0, 0, 0.20, "gpt-4", "openai")
-            .await
-            .unwrap();
+            .await?;
 
         // Both buckets present, each with its own slice of history.
-        let all = store.get_usage_by_owner(None, None).await.unwrap();
+        let all = store.get_usage_by_owner(None, None).await?;
         let alice = all
             .iter()
             .find(|r| r.owner == "alice")
-            .expect("alice bucket");
-        let bob = all.iter().find(|r| r.owner == "bob").expect("bob bucket");
+            .ok_or(KeyStoreError::NotFound)?;
+        let bob = all
+            .iter()
+            .find(|r| r.owner == "bob")
+            .ok_or(KeyStoreError::NotFound)?;
         assert_eq!(alice.requests, 1);
         assert!((alice.cost_usd - 0.10).abs() < 1e-9);
         assert_eq!(bob.requests, 1);
         assert!((bob.cost_usd - 0.20).abs() < 1e-9);
 
         // Clearing the owner is also supported.
-        assert!(store.update_owner(&h, None).await.unwrap());
-        assert!(store.get_by_hash(&h).unwrap().owner.is_none());
+        assert!(store.update_owner(&h, None).await?);
+        assert!(store
+            .get_by_hash(&h)
+            .ok_or(KeyStoreError::NotFound)?
+            .owner
+            .is_none());
 
         // Nonexistent key: setter returns false, not an error.
-        assert!(!store
-            .update_owner("nonexistent-hash", Some("x".to_string()))
-            .await
-            .unwrap());
+        assert!(
+            !store
+                .update_owner("nonexistent-hash", Some("x".to_string()))
+                .await?
+        );
+        Ok(())
     }
 
     /// Owner round-trips through `refresh_cache` (DB -> cache) (eavs-5gf3).
@@ -1813,8 +1867,12 @@ mod tests {
     /// If either ever drops `owner`, the cache loses it on restart and every
     /// subsequent usage row gets a NULL owner, silently breaking rollups.
     #[tokio::test]
-    async fn test_owner_survives_refresh_cache() {
-        let store = KeyStore::in_memory().await.unwrap();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_owner_survives_refresh_cache() -> Result<(), KeyStoreError> {
+        let store = KeyStore::in_memory().await?;
 
         let resp = store
             .create_key(CreateKeyRequest {
@@ -1822,26 +1880,30 @@ mod tests {
                 owner: Some("alice".to_string()),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         let h = resp.key_hash;
 
         // Owner present in cache before refresh.
         assert_eq!(
-            store.get_by_hash(&h).unwrap().owner.as_deref(),
+            store
+                .get_by_hash(&h)
+                .ok_or(KeyStoreError::NotFound)?
+                .owner
+                .as_deref(),
             Some("alice")
         );
 
         // Reload cache straight from the DB.
-        store.refresh_cache().await.unwrap();
+        store.refresh_cache().await?;
 
         // Owner must survive the DB round-trip.
-        let reloaded = store.get_by_hash(&h).expect("key reloaded");
+        let reloaded = store.get_by_hash(&h).ok_or(KeyStoreError::NotFound)?;
         assert_eq!(
             reloaded.owner.as_deref(),
             Some("alice"),
             "owner must survive refresh_cache (DB -> cache)"
         );
+        Ok(())
     }
 
     /// Regression test for eavs-64qn.
@@ -1854,7 +1916,11 @@ mod tests {
     /// the key store was left uninitialized. This test fails on 0.8.1 and
     /// passes once the column-additions run before the index creation.
     #[tokio::test]
-    async fn test_migration_handles_legacy_usage_history() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Test assertions intentionally fail the test while fallible setup propagates errors"
+    )]
+    async fn test_migration_handles_legacy_usage_history() -> Result<(), KeyStoreError> {
         // A unique temp file for this test.
         let tmp_dir = std::env::temp_dir();
         let db_path = tmp_dir.join(format!(
@@ -1863,7 +1929,6 @@ mod tests {
             unique_suffix()
         ));
         let _ = std::fs::remove_file(&db_path);
-
         // Hand-craft a legacy database: the schema that 0.8.0-era EAVS would
         // have written, i.e. WITHOUT the `owner` and `cache_write_tokens`
         // columns on usage_history.
@@ -1872,60 +1937,24 @@ mod tests {
                 .max_connections(1)
                 .connect(&format!("sqlite:{}?mode=rwc", db_path.display()))
                 .await
-                .unwrap();
-            sqlx::query(
-                r#"
-                CREATE TABLE virtual_keys (
-                    key_hash TEXT PRIMARY KEY,
-                    key_id TEXT NOT NULL UNIQUE,
-                    name TEXT,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT,
-                    valid_after TEXT,
-                    disabled INTEGER NOT NULL DEFAULT 0,
-                    permissions TEXT NOT NULL,
-                    usage TEXT NOT NULL,
-                    metadata TEXT
-                );
-                CREATE TABLE usage_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key_hash TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    input_tokens INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    cached_tokens INTEGER NOT NULL DEFAULT 0,
-                    cost_usd REAL NOT NULL,
-                    FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
-                );
-                "#,
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
+                .map_err(db_err)?;
+            sqlx::query(LEGACY_SCHEMA_SQL)
+                .execute(&pool)
+                .await
+                .map_err(db_err)?;
             // Insert one legacy row so we exercise a populated table.
-            sqlx::query(
-                "INSERT INTO virtual_keys (key_hash, key_id, name, created_at, permissions, usage) \
-                 VALUES ('legacy-hash', 'legacy-id', 'Legacy', '2026-01-01T00:00:00Z', '{}', '{}')",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd) \
-                 VALUES ('legacy-hash', '2026-01-01T00:00:00Z', 'gpt-4', 'openai', 10, 5, 0, 0.01)",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
+            sqlx::query(LEGACY_VIRTUAL_KEY_SQL)
+                .execute(&pool)
+                .await
+                .map_err(db_err)?;
+            sqlx::query(LEGACY_USAGE_HISTORY_SQL)
+                .execute(&pool)
+                .await
+                .map_err(db_err)?;
             pool.close().await;
         }
-
         // Now run the real migration on the legacy database.
-        let store = KeyStore::new(&db_path)
-            .await
-            .expect("migration must succeed on a legacy usage_history table (eavs-64qn)");
+        let store = KeyStore::new(&db_path).await?;
 
         // Both optional columns must now exist on usage_history.
         let has_owner: i32 = sqlx::query_scalar(
@@ -1933,7 +1962,7 @@ mod tests {
         )
         .fetch_one(&store.pool)
         .await
-        .unwrap();
+        .map_err(db_err)?;
         assert_eq!(has_owner, 1, "owner column should have been added");
 
         let has_cache_write: i32 = sqlx::query_scalar(
@@ -1941,7 +1970,7 @@ mod tests {
         )
         .fetch_one(&store.pool)
         .await
-        .unwrap();
+        .map_err(db_err)?;
         assert_eq!(
             has_cache_write, 1,
             "cache_write_tokens column should have been added"
@@ -1953,7 +1982,7 @@ mod tests {
         )
         .fetch_one(&store.pool)
         .await
-        .unwrap();
+        .map_err(db_err)?;
         assert_eq!(idx_count, 1, "idx_usage_owner should have been created");
 
         // The legacy row must still be present (migration is non-destructive).
@@ -1961,7 +1990,7 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM usage_history WHERE key_hash = 'legacy-hash'")
                 .fetch_one(&store.pool)
                 .await
-                .unwrap();
+                .map_err(db_err)?;
         assert_eq!(
             row_count, 1,
             "legacy usage_history row must survive migration"
@@ -1975,13 +2004,11 @@ mod tests {
                 owner: Some("post-upgrade".to_string()),
                 ..Default::default()
             })
-            .await
-            .expect("create_key must work after migration");
+            .await?;
         store
             .update_usage(&resp.key_hash, 7, 3, 0, 4, 0.02, "gpt-4", "openai")
-            .await
-            .expect("update_usage must work after migration");
-        let rollup = store.get_usage_by_owner(None, None).await.unwrap();
+            .await?;
+        let rollup = store.get_usage_by_owner(None, None).await?;
         assert!(
             rollup.iter().any(|o| o.owner == "post-upgrade"),
             "post-upgrade owner bucket should be present in usage rollup"
@@ -1990,7 +2017,51 @@ mod tests {
         // Cleanup.
         drop(store);
         let _ = std::fs::remove_file(&db_path);
+        Ok(())
     }
+
+    /// Map a `sqlx`/I/O error to a `KeyStoreError::Database` for the migration
+    /// and legacy-schema assertions below.
+    fn db_err<E: std::fmt::Display>(e: E) -> KeyStoreError {
+        KeyStoreError::Database(e.to_string())
+    }
+
+    /// Legacy schema (0.8.0-era) used by `test_migration_handles_legacy_usage_history`,
+    /// matching a `usage_history` table WITHOUT the later `owner` and
+    /// `cache_write_tokens` columns, plus one populated row per table.
+    const LEGACY_SCHEMA_SQL: &str = r"
+        CREATE TABLE virtual_keys (
+            key_hash TEXT PRIMARY KEY,
+            key_id TEXT NOT NULL UNIQUE,
+            name TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            valid_after TEXT,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            permissions TEXT NOT NULL,
+            usage TEXT NOT NULL,
+            metadata TEXT
+        );
+        CREATE TABLE usage_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_hash TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            model TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL,
+            FOREIGN KEY (key_hash) REFERENCES virtual_keys(key_hash) ON DELETE CASCADE
+        );
+    ";
+
+    const LEGACY_VIRTUAL_KEY_SQL: &str =
+        "INSERT INTO virtual_keys (key_hash, key_id, name, created_at, permissions, usage) \
+         VALUES ('legacy-hash', 'legacy-id', 'Legacy', '2026-01-01T00:00:00Z', '{}', '{}')";
+
+    const LEGACY_USAGE_HISTORY_SQL: &str = "INSERT INTO usage_history (key_hash, timestamp, model, provider, input_tokens, output_tokens, cached_tokens, cost_usd) \
+         VALUES ('legacy-hash', '2026-01-01T00:00:00Z', 'gpt-4', 'openai', 10, 5, 0, 0.01)";
 
     /// Monotonic unique suffix for temp file names (avoids pulling in an
     /// extra uuid dependency just for tests).
@@ -1998,6 +2069,6 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrdering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, AOrdering::SeqCst);
-        format!("{}", n)
+        format!("{n}")
     }
 }

@@ -6,4 +6,7 @@ pub mod storage;
 pub mod types;
 
 pub use storage::{OAuthBackend, OAuthStore};
-pub use types::{OAuthCredentials, OAuthLoginResponse, OAuthPendingAuth, OAuthProvider};
+pub use types::{
+    CredentialProvenance, OAuthCredentials, OAuthLoginResponse, OAuthPendingAuth, OAuthProvider,
+    OAuthResolveError,
+};

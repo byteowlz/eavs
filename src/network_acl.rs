@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 ///
 /// Returns `Ok(())` if allowed, `Err(reason)` if blocked.
 pub fn check_url_allowed(config: &NetworkConfig, url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
     let host = parsed
         .host_str()
@@ -46,8 +46,7 @@ pub fn check_egress_allowed(
 
     if config.block_private_ips && is_private_ip(&destination.ip()) && !trusted {
         return Err(format!(
-            "Destination '{}' is a private IP address (blocked by network policy)",
-            destination
+            "Destination '{destination}' is a private IP address (blocked by network policy)"
         ));
     }
 
@@ -76,7 +75,7 @@ fn check_host_matches_destination(host: &str, destination: SocketAddr) -> Result
     // addresses. Fail closed on resolution failure so an allowed name cannot
     // conceal a different destination.
     let mut resolved = std::net::ToSocketAddrs::to_socket_addrs(&(host, destination.port()))
-        .map_err(|e| format!("Host '{}' could not be resolved: {}", host, e))?;
+        .map_err(|e| format!("Host '{host}' could not be resolved: {e}"))?;
     if !resolved.any(|a| unmap_ip(&a.ip()) == dest_ip) {
         return Err(format!(
             "Host '{}' does not resolve to destination '{}'",
@@ -94,8 +93,7 @@ pub fn check_host_allowed(config: &NetworkConfig, host: &str) -> Result<(), Stri
         for pattern in &config.deny_domains {
             if glob_match(pattern, host) {
                 return Err(format!(
-                    "Host '{}' is denied by network policy (matches '{}')",
-                    host, pattern
+                    "Host '{host}' is denied by network policy (matches '{pattern}')"
                 ));
             }
         }
@@ -106,16 +104,18 @@ pub fn check_host_allowed(config: &NetworkConfig, host: &str) -> Result<(), Stri
         if let Ok(ip) = host.parse::<IpAddr>() {
             if is_private_ip(&ip) {
                 return Err(format!(
-                    "Host '{}' is a private IP address (blocked by network policy)",
-                    host
+                    "Host '{host}' is a private IP address (blocked by network policy)"
                 ));
             }
         }
         // Also check common private hostnames
-        if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+        if host.eq_ignore_ascii_case("localhost")
+            || host.rsplit_once('.').is_some_and(|(_, suffix)| {
+                suffix.eq_ignore_ascii_case("local") || suffix.eq_ignore_ascii_case("internal")
+            })
+        {
             return Err(format!(
-                "Host '{}' resolves to a private address (blocked by network policy)",
-                host
+                "Host '{host}' resolves to a private address (blocked by network policy)"
             ));
         }
     }
@@ -127,10 +127,7 @@ pub fn check_host_allowed(config: &NetworkConfig, host: &str) -> Result<(), Stri
             .iter()
             .any(|pattern| glob_match(pattern, host));
         if !allowed {
-            return Err(format!(
-                "Host '{}' is not in the allowed domains list",
-                host
-            ));
+            return Err(format!("Host '{host}' is not in the allowed domains list"));
         }
     }
 
@@ -144,46 +141,48 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), text.as_bytes())
 }
 
-fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
+const fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pattern_index = 0;
+    let mut cursor = 0;
+    let mut wildcard = usize::MAX;
+    let mut retry_position = 0;
 
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
+    while cursor < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[cursor])
+        {
+            pattern_index += 1;
+            cursor += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            wildcard = pattern_index;
+            retry_position = cursor;
+            pattern_index += 1;
+        } else if wildcard != usize::MAX {
+            pattern_index = wildcard + 1;
+            retry_position += 1;
+            cursor = retry_position;
         } else {
             return false;
         }
     }
 
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
     }
 
-    pi == pattern.len()
+    pattern_index == pattern.len()
 }
 
 /// Map an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4 counterpart
 /// so that private-IP classification and host/destination comparisons treat it
 /// as the IPv4 address it really is. Non-mapped addresses are unchanged.
-fn unmap_ip(ip: &IpAddr) -> IpAddr {
+const fn unmap_ip(ip: &IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
             None => IpAddr::V6(*v6),
         },
-        _ => *ip,
+        IpAddr::V4(_) => *ip,
     }
 }
 
@@ -215,7 +214,10 @@ mod tests {
 
     fn config_allow(domains: &[&str]) -> NetworkConfig {
         NetworkConfig {
-            allow_domains: domains.iter().map(|s| s.to_string()).collect(),
+            allow_domains: domains
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             deny_domains: vec![],
             trusted_private_endpoints: vec![],
             block_private_ips: true,
@@ -225,7 +227,10 @@ mod tests {
     fn config_deny(domains: &[&str]) -> NetworkConfig {
         NetworkConfig {
             allow_domains: vec![],
-            deny_domains: domains.iter().map(|s| s.to_string()).collect(),
+            deny_domains: domains
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             trusted_private_endpoints: vec![],
             block_private_ips: false,
         }
@@ -233,8 +238,8 @@ mod tests {
 
     fn config_both(allow: &[&str], deny: &[&str]) -> NetworkConfig {
         NetworkConfig {
-            allow_domains: allow.iter().map(|s| s.to_string()).collect(),
-            deny_domains: deny.iter().map(|s| s.to_string()).collect(),
+            allow_domains: allow.iter().map(std::string::ToString::to_string).collect(),
+            deny_domains: deny.iter().map(std::string::ToString::to_string).collect(),
             trusted_private_endpoints: vec![],
             block_private_ips: true,
         }
@@ -280,6 +285,9 @@ mod tests {
         assert!(check_url_allowed(&config, "http://10.0.0.1/internal").is_err());
         assert!(check_url_allowed(&config, "http://192.168.1.1/admin").is_err());
         assert!(check_url_allowed(&config, "http://localhost:3000/api").is_err());
+        for host in ["LOCALHOST", "MODEL.LOCAL", "service.INTERNAL"] {
+            assert!(check_host_allowed(&config, host).is_err());
+        }
         assert!(check_url_allowed(&config, "https://api.openai.com/v1/chat").is_ok());
     }
 
@@ -317,7 +325,7 @@ mod tests {
             allow_domains: vec!["zgx".into()],
             trusted_private_endpoints: vec![TrustedPrivateEndpoint {
                 host: "zgx".into(),
-                address: "100.64.0.18".parse().unwrap(),
+                address: std::net::Ipv4Addr::new(100, 64, 0, 18).into(),
                 port: 8080,
             }],
             block_private_ips: true,
@@ -328,24 +336,31 @@ mod tests {
     #[test]
     fn exact_trusted_private_endpoint_is_allowed() {
         let config = trusted_zgx();
-        let destination = "100.64.0.18:8080".parse().unwrap();
+        let destination = SocketAddr::from(([100, 64, 0, 18], 8080));
         assert!(check_egress_allowed(&config, "zgx", destination).is_ok());
     }
 
     #[test]
     fn trusted_endpoint_does_not_authorise_adjacent_targets() {
         let config = trusted_zgx();
-        assert!(check_egress_allowed(&config, "zgx", "100.64.0.18:8081".parse().unwrap()).is_err());
-        assert!(check_egress_allowed(&config, "zgx", "100.64.0.19:8080".parse().unwrap()).is_err());
         assert!(
-            check_egress_allowed(&config, "other", "100.64.0.18:8080".parse().unwrap()).is_err()
+            check_egress_allowed(&config, "zgx", SocketAddr::from(([100, 64, 0, 18], 8081)))
+                .is_err()
+        );
+        assert!(
+            check_egress_allowed(&config, "zgx", SocketAddr::from(([100, 64, 0, 19], 8080)))
+                .is_err()
+        );
+        assert!(
+            check_egress_allowed(&config, "other", SocketAddr::from(([100, 64, 0, 18], 8080)))
+                .is_err()
         );
     }
 
     #[test]
     fn allowed_public_host_cannot_conceal_private_destination() {
         let config = config_allow(&["api.openai.com"]);
-        let destination = "127.0.0.1:8080".parse().unwrap();
+        let destination = SocketAddr::from(([127, 0, 0, 1], 8080));
         assert!(check_egress_allowed(&config, "api.openai.com", destination).is_err());
     }
 
@@ -353,24 +368,25 @@ mod tests {
     fn deny_rule_overrides_trusted_private_endpoint() {
         let mut config = trusted_zgx();
         config.deny_domains = vec!["zgx".into()];
-        let destination = "100.64.0.18:8080".parse().unwrap();
+        let destination = SocketAddr::from(([100, 64, 0, 18], 8080));
         assert!(check_egress_allowed(&config, "zgx", destination).is_err());
     }
 
     #[test]
-    fn ipv4_mapped_ipv6_private_is_classified_private() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions fail the test while address parsing propagates fixture errors"
+    )]
+    fn ipv4_mapped_ipv6_private_is_classified_private() -> Result<(), std::net::AddrParseError> {
         // ::ffff:10.0.0.1 and ::ffff:192.168.1.1 encode private IPv4 addresses
         // via the IPv4-mapped IPv6 representation; they must be classified as
         // private so private-IP blocking holds.
-        assert!(is_private_ip(&"::ffff:10.0.0.1".parse::<IpAddr>().unwrap()));
-        assert!(is_private_ip(
-            &"::ffff:192.168.1.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(is_private_ip(
-            &"::ffff:127.0.0.1".parse::<IpAddr>().unwrap()
-        ));
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse::<IpAddr>()?));
+        assert!(is_private_ip(&"::ffff:192.168.1.1".parse::<IpAddr>()?));
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse::<IpAddr>()?));
         // A non-mapped global IPv6 address is not private.
-        assert!(!is_private_ip(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(&"2001:db8::1".parse::<IpAddr>()?));
+        Ok(())
     }
 
     #[test]
@@ -378,7 +394,10 @@ mod tests {
         // An allowed public host cannot conceal an IPv4-mapped IPv6 private
         // destination: check_egress_allowed must reject it.
         let config = config_allow(&["api.openai.com"]);
-        let dest: SocketAddr = "[::ffff:10.0.0.1]:8080".parse().unwrap();
+        let dest = SocketAddr::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped().into(),
+            8080,
+        );
         assert!(check_egress_allowed(&config, "api.openai.com", dest).is_err());
     }
 
@@ -388,7 +407,7 @@ mod tests {
         // different (here: another public) host. The host->destination binding
         // must reject it so an allowed name cannot reach an arbitrary host.
         let config = config_allow(&["api.openai.com"]);
-        let dest: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        let dest = SocketAddr::from(([8, 8, 8, 8], 443));
         assert!(check_egress_allowed(&config, "api.openai.com", dest).is_err());
     }
 
@@ -397,7 +416,7 @@ mod tests {
         // Deterministic (no DNS): an allowed IP-literal host must equal the
         // destination; a different destination is rejected.
         let config = config_allow(&["1.2.3.4"]);
-        let dest: SocketAddr = "5.6.7.8:443".parse().unwrap();
+        let dest = SocketAddr::from(([5, 6, 7, 8], 443));
         assert!(check_egress_allowed(&config, "1.2.3.4", dest).is_err());
     }
 }

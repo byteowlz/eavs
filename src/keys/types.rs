@@ -263,7 +263,7 @@ impl VirtualKey {
         }
     }
 
-    /// Check if the key is currently valid (not expired, not before valid_after).
+    /// Check if the key is currently valid (not expired, not before `valid_after`).
     pub fn is_valid(&self) -> bool {
         if self.disabled {
             return false;
@@ -299,13 +299,13 @@ impl VirtualKey {
 
     /// Get the key ID for display.
     ///
-    /// Since key_id is now a human-readable ID (e.g., "cold-lamp"),
+    /// Since `key_id` is now a human-readable ID (e.g., "cold-lamp"),
     /// we return it as-is without masking.
     pub fn display_key_id(&self) -> String {
         self.key_id.clone()
     }
 
-    /// Convert to KeyInfo for listing.
+    /// Convert to `KeyInfo` for listing.
     pub fn to_info(&self) -> KeyInfo {
         KeyInfo {
             key_id: self.display_key_id(),
