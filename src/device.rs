@@ -11,6 +11,7 @@ use std::{
 
 #[cfg(test)]
 mod e2e_tests;
+mod invitation;
 #[cfg(test)]
 mod listener_tests;
 mod pi_config;
@@ -32,6 +33,8 @@ pub struct DeviceArgs {
 }
 #[derive(Subcommand)]
 pub enum DeviceCommand {
+    /// Issue a one-time typed Oqto invitation into private JSON/QR files (never stdout).
+    Invite(invitation::InviteArgs),
     /// Secret-free declarations and explicit selection plans, not serving authority.
     Portable {
         #[command(subcommand)]
@@ -400,6 +403,7 @@ async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
         DeviceCommand::Portable { command } => {
             portable::cli::execute(command, args.candidate_revision.as_deref()).await
         }
+        DeviceCommand::Invite(_) => bail!("device invite is a CLI-only administrator operation"),
         DeviceCommand::Status { .. } => {
             let mut statuses = Vec::new();
             for c in &registry.connections {
@@ -574,6 +578,16 @@ struct Inventory {
 }
 
 pub async fn run_cli(args: DeviceArgs) -> Result<()> {
+    let args = match args.command {
+        DeviceCommand::Invite(options) => {
+            return invitation::run_cli(
+                options,
+                args.config.is_some() || args.candidate_revision.is_some(),
+            )
+            .await;
+        }
+        command => DeviceArgs { command, ..args },
+    };
     let human = matches!(args.command, DeviceCommand::Status { json: false });
     match execute(args).await {
         Ok(value) => {
