@@ -1,0 +1,12 @@
+# Local registry only. Store admin keys in your secret manager/environment,
+# never in this file. Use HTTPS or a localhost tunnel; redirects are rejected.
+
+[[instances]]
+name = "dev-east"
+url = "https://eavs-east.example.com"
+admin_key_env = "EAVS_EAST_ADMIN"
+
+[[instances]]
+name = "dev-west"
+url = "https://eavs-west.example.com"
+admin_key_env = "EAVS_WEST_ADMIN"

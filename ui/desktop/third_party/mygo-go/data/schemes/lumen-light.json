@@ -1,0 +1,37 @@
+{
+	"id": "lumen-light",
+	"name": "Lumen Light",
+	"mode": "light",
+	"system": "base24",
+	"slots": {
+		"base00": "#fbf9f7",
+		"base01": "#ffffff",
+		"base02": "#f0efec",
+		"base03": "#c0bdb9",
+		"base04": "#676460",
+		"base05": "#191714",
+		"base06": "#0f0e0c",
+		"base07": "#080706",
+		"base08": "#e54d45",
+		"base09": "#c66a28",
+		"base0A": "#8f700f",
+		"base0B": "#af5600",
+		"base0C": "#417a79",
+		"base0D": "#416e8d",
+		"base0E": "#a75463",
+		"base0F": "#7f624c",
+		"base10": "#f7f5f3",
+		"base11": "#f4f2ef",
+		"base12": "#ef675c",
+		"base13": "#ac8e44",
+		"base14": "#c67712",
+		"base15": "#599291",
+		"base16": "#5886a6",
+		"base17": "#ba6c78"
+	},
+	"overrides": {
+		"--terminal-bg": "#151412",
+		"--code-bg": "#f7f5f3",
+		"--code-border": "#f0efec"
+	}
+}

@@ -1,0 +1,138 @@
+"""Zero-dependency color parsing to sRGB, mirroring oqto-design's color.rs.
+
+Slot strings may be #rgb/#rrggbb/#rrggbbaa, rgb()/rgba(), or oklch(L C H [/ A]).
+The gpui and omarchy adapters need concrete hex; the web adapter passes the
+authored strings through verbatim (browsers resolve them natively).
+
+The desktop reference computes in f32; we round through f32 at the same steps
+so emitted hex is bit-for-bit identical to the Rust crate.
+"""
+from __future__ import annotations
+
+import math
+import struct
+
+
+def f32(x: float) -> float:
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+class Rgba(tuple):
+    __slots__ = ()
+
+    def __new__(cls, r: float, g: float, b: float, a: float = 1.0):
+        return super().__new__(cls, (f32(r), f32(g), f32(b), f32(a)))
+
+    r = property(lambda s: s[0])
+    g = property(lambda s: s[1])
+    b = property(lambda s: s[2])
+    a = property(lambda s: s[3])
+
+    def with_alpha(self, a: float) -> "Rgba":
+        return Rgba(self.r, self.g, self.b, a)
+
+    def mix(self, other: "Rgba", t: float) -> "Rgba":
+        t = f32(t)
+        lerp = lambda x, y: f32(x + f32(f32(y - x) * t))
+        return Rgba(lerp(self.r, other.r), lerp(self.g, other.g),
+                    lerp(self.b, other.b), lerp(self.a, other.a))
+
+    def to_hex(self) -> str:
+        c = lambda v: _round_half_away(f32(min(1.0, max(0.0, v)) * 255.0))
+        if self.a >= f32(0.999):
+            return "#{:02x}{:02x}{:02x}".format(c(self.r), c(self.g), c(self.b))
+        return "#{:02x}{:02x}{:02x}{:02x}".format(c(self.r), c(self.g), c(self.b), c(self.a))
+
+    def luminance(self) -> float:
+        lin = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        return 0.2126 * lin(self.r) + 0.7152 * lin(self.g) + 0.0722 * lin(self.b)
+
+
+def _round_half_away(v: float) -> int:
+    return int(math.floor(v + 0.5)) if v >= 0 else -int(math.floor(-v + 0.5))
+
+
+BLACK = Rgba(0, 0, 0, 1)
+WHITE = Rgba(1, 1, 1, 1)
+
+
+def parse_color(value: str) -> Rgba:
+    s = value.strip()
+    try:
+        if s.startswith("#"):
+            return _hex(s[1:])
+        if s.startswith("oklch(") and s.endswith(")"):
+            return _oklch(s[6:-1])
+        for p in ("rgba(", "rgb("):
+            if s.startswith(p) and s.endswith(")"):
+                return _rgb(s[len(p):-1])
+    except (ValueError, IndexError) as e:
+        raise ValueError(f"invalid color {value!r}: {e}") from None
+    raise ValueError(f"unsupported color syntax {value!r}")
+
+
+def is_color(value: str) -> bool:
+    try:
+        parse_color(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _hex(h: str) -> Rgba:
+    if len(h) == 3:
+        return Rgba(*(f32(int(ch, 16) * 17 / 255.0) for ch in h), 1.0)
+    if len(h) in (6, 8):
+        vals = [f32(int(h[i:i + 2], 16) / 255.0) for i in range(0, len(h), 2)]
+        return Rgba(*vals) if len(vals) == 4 else Rgba(*vals, 1.0)
+    raise ValueError("expected 3, 6 or 8 hex digits")
+
+
+def _num(s: str, scale: float) -> float:
+    return f32(float(s[:-1]) / 100.0) if s.endswith("%") else f32(float(s) / scale)
+
+
+def _rgb(body: str) -> Rgba:
+    parts = [p for p in body.replace(",", " ").replace("/", " ").split() if p]
+    if len(parts) < 3:
+        raise ValueError("expected at least three components")
+    a = _num(parts[3], 1.0) if len(parts) > 3 else 1.0
+    return Rgba(_num(parts[0], 255.0), _num(parts[1], 255.0), _num(parts[2], 255.0), a)
+
+
+def _oklch(body: str) -> Rgba:
+    lch, _, alpha = body.partition("/")
+    parts = lch.split()
+    if len(parts) != 3:
+        raise ValueError("expected L C H")
+    l = _num(parts[0], 1.0)
+    c = f32(float(parts[1]))
+    h = f32(float(parts[2].removesuffix("deg")))
+    a = _num(alpha.strip(), 1.0) if alpha.strip() else 1.0
+    return Rgba(*_oklch_to_srgb(l, c, h), a)
+
+
+def _oklch_to_srgb(l: float, c: float, h_deg: float):
+    F = f32
+    h = F(h_deg * F(F(math.pi) / F(180.0)))  # f32::to_radians
+    a = F(c * F(math.cos(h)))
+    b = F(c * F(math.sin(h)))
+    l_ = F(F(l + F(F(0.39633778) * a)) + F(F(0.21580376) * b))
+    m_ = F(F(l - F(F(0.105561346) * a)) - F(F(0.06385417) * b))
+    s_ = F(F(l - F(F(0.08948418) * a)) - F(F(1.2914855) * b))
+    l3, m3, s3 = F(F(l_ * l_) * l_), F(F(m_ * m_) * m_), F(F(s_ * s_) * s_)
+    r = F(F(F(F(4.0767417) * l3) - F(F(3.3077116) * m3)) + F(F(0.23096994) * s3))
+    g = F(F(F(F(-1.268438) * l3) + F(F(2.6097574) * m3)) - F(F(0.34131938) * s3))
+    bl = F(F(F(F(-0.004196086) * l3) - F(F(0.7034186) * m3)) + F(F(1.7076147) * s3))
+    return _gamma(r), _gamma(g), _gamma(bl)
+
+
+def _gamma(lin: float) -> float:
+    lin = min(1.0, max(0.0, lin))
+    if lin <= f32(0.0031308):
+        return f32(f32(12.92) * lin)
+    return f32(f32(f32(1.055) * f32(lin ** f32(1.0 / 2.4))) - f32(0.055))
+
+
+def to_hex(value: str) -> str:
+    return parse_color(value).to_hex()

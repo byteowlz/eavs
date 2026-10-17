@@ -58,6 +58,12 @@ Configuration can also live at `~/.config/eavs/config.toml` (or under
 `XDG_CONFIG_HOME`). See the [example configuration](config/config.example.toml)
 for options. The schema is manually maintained and [checked against fixtures](docs/repository-quality.md).
 
+Provider-store changes resolve live. The current source also supports explicit
+[provider hot reload](docs/provider-reload.md) for TOML declarations via an
+administrator preview/apply API, without restarting accepted streams. Automatic
+watching and a dedicated CLI adapter are not included; existing installed binaries
+need an authorized upgrade before using it.
+
 ## Scope and limitations
 
 - Streaming HTTP and selected WebSocket routes, provider configuration, virtual
@@ -75,6 +81,16 @@ for options. The schema is manually maintained and [checked against fixtures](do
 ## Documentation
 
 - [Configuration, CLI and API reference](docs/usage.md)
+- [Remote instance administration and credential rotation](docs/remote-administration.md)
+- [Scoped running-instance serving catalog](docs/serving-catalog.md) — authenticated, versioned chat candidates
+- [Configure Pi from a connected gateway](docs/pi-device-configuration.md) — safe preview/CAS file handoff or optional dynamic startup discovery
+- [Additional Pi messages interface](docs/pi-messages.md) — experimental native streaming with bounded thinking/signature/cache translation; native APIs unchanged
+- [Explicit device connections](docs/device-connections.md) — scoped metadata observation and preview/CAS inventory sync, not automatic routing or credential replication
+- [Native MyGo Connection Desk](ui/desktop/README.md) — Connect device/Connect Pi preview forms; native build and software-rendered X11 proof
+- [One-time enrollment API](src/enrollment/README.md) — root-approved invitations and atomic independent scoped-key issuance
+- [Portable device declarations](docs/portable-device-declarations.md) — local binding and connectivity plans, not automatic serving-route installation
+- [Device/desktop rollout and remaining milestones](docs/device-rollout.md) — distinguishes inventory sync from declaration distribution and automatic inference routing
+- [Fleet CLI and TUI: setup, previews and keyboard controls](docs/fleet-tui.md)
 - [Domain glossary](CONTEXT.md) and [architecture decisions](docs/adr/README.md)
 - [Provisioning plan](docs/scoped-provisioning.md)
 - [Release process](docs/RELEASE.md)
@@ -98,4 +114,4 @@ Strict quality gates currently report existing lint debt; see
 Model metadata comes from [models.dev](https://models.dev/). Some provider
 handling was informed by [pi-mono](https://github.com/badlogic/pi-mono).
 
-MIT.
+Licensed under the [MIT License](LICENSE).

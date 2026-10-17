@@ -1,0 +1,36 @@
+{
+	"id": "moss-light",
+	"name": "Moss Light",
+	"mode": "light",
+	"system": "base24",
+	"slots": {
+		"base00": "#f7f2e6",
+		"base01": "#fcf9f1",
+		"base02": "#ece6d8",
+		"base03": "#b9b09f",
+		"base04": "#6e6352",
+		"base05": "#3d352d",
+		"base06": "#2d251d",
+		"base07": "#211912",
+		"base08": "#c67c63",
+		"base09": "#b77d56",
+		"base0A": "#846b34",
+		"base0B": "#547850",
+		"base0C": "#557e73",
+		"base0D": "#4c6f7d",
+		"base0E": "#9f696d",
+		"base0F": "#856d52",
+		"base10": "#f4eee0",
+		"base11": "#f0ebdc",
+		"base12": "#d6917a",
+		"base13": "#a68f60",
+		"base14": "#71946d",
+		"base15": "#70958a",
+		"base16": "#708f9c",
+		"base17": "#b48486"
+	},
+	"overrides": {
+		"--terminal-bg": "#2d251d",
+		"--code-bg": "#f4eee0"
+	}
+}

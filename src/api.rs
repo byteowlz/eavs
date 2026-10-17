@@ -181,6 +181,7 @@ pub struct DefaultsResponse {
     pub fast: String,
     pub reasoning: String,
     pub fallback: String,
+    pub file_routing_generation: String,
 }
 
 /// Zero-config model defaults for alias-based clients.
@@ -190,23 +191,34 @@ pub async fn defaults_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<DefaultsQuery>,
 ) -> Result<Json<DefaultsResponse>, StatusCode> {
+    let state = state.pin_routes();
     let runtime_default_provider = crate::runtime_state::load_runtime_state()
         .and_then(|s| s.default_provider)
         .unwrap_or_default();
 
+    let selected_provider = query
+        .provider
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| (!runtime_default_provider.is_empty()).then_some(runtime_default_provider))
+        .or_else(|| state.default_provider_hint())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    // Missing explicit or removed catalog defaults must not silently select a
+    // newly added provider. Selection metadata is not gateway authorization.
+    if state.config.resolve_provider(&selected_provider).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let defaults = crate::model_defaults::resolve_model_defaults(
         &state.config,
         state.catalog(),
-        query.provider.as_deref(),
-        if runtime_default_provider.is_empty() {
-            None
-        } else {
-            Some(runtime_default_provider.as_str())
-        },
+        Some(&selected_provider),
+        None,
     )
     .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(DefaultsResponse {
+        file_routing_generation: state.file_routing_generation(),
         provider: defaults.provider,
         default: defaults.default,
         fast: defaults.fast,
@@ -216,14 +228,33 @@ pub async fn defaults_handler(
 }
 
 /// List available providers.
-pub async fn providers_handler(State(state): State<AppState>) -> Json<Vec<String>> {
-    let providers: Vec<String> = state.config.providers.keys().cloned().collect();
-    Json(providers)
+pub async fn providers_handler(State(state): State<AppState>) -> (HeaderMap, Json<Vec<String>>) {
+    let state = state.pin_routes();
+    let mut providers: Vec<String> = state.config.providers.keys().cloned().collect();
+    if let Some(store) = state.get_provider_store() {
+        for entry in store.list_providers() {
+            if state.config.resolve_provider(&entry.name).is_none()
+                && state.resolve_provider(&entry.name).is_some()
+            {
+                providers.push(entry.name);
+            }
+        }
+    }
+    providers.sort();
+    providers.dedup();
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = state.file_routing_generation().parse() {
+        headers.insert("x-eavs-file-routing-generation", value);
+    }
+    (headers, Json(providers))
 }
 
 /// Detailed provider info for external integrations (e.g., generating models.json for Pi).
 #[derive(Serialize)]
 pub struct ProviderDetail {
+    /// File declarations only; admin-store/catalog updates are independently live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_routing_generation: Option<String>,
     /// Provider name as configured in eavs (e.g., "openai", "anthropic")
     pub name: String,
     /// Provider type (e.g., "openai", "anthropic", "openai-codex")
@@ -290,6 +321,7 @@ pub fn provider_compat_json(config: &crate::config::ProviderConfig) -> Option<se
 /// Returns provider types, Pi API mappings, and model lists for models.json generation.
 /// Model list logic: config shortlist non-empty = only those models; empty = full models.dev catalog.
 pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec<ProviderDetail>> {
+    let state = state.pin_routes();
     use crate::model_catalog::eavs_to_catalog_id;
     use crate::provider::ProviderType;
 
@@ -325,6 +357,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
             }
 
             ProviderDetail {
+                file_routing_generation: Some(state.file_routing_generation()),
                 name: name.clone(),
                 type_: config.type_.clone(),
                 pi_api: pi_api_for_provider(&provider_type),
@@ -341,16 +374,19 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
     // Merge admin-added providers from the provider store (config takes precedence)
     if let Some(store) = state.get_provider_store() {
         for entry in store.list_providers() {
-            if state.config.providers.contains_key(&entry.name) {
+            if state.config.resolve_provider(&entry.name).is_some() {
                 continue; // config providers take precedence
             }
 
-            let type_str = entry
-                .config
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("openai");
-            let provider_type = ProviderType::from_str(type_str);
+            let Ok(config) =
+                serde_json::from_value::<crate::config::ProviderConfig>(entry.config.clone())
+            else {
+                continue;
+            };
+            let Some(provider_type) = ProviderType::try_from_str(&config.type_) else {
+                continue;
+            };
+            let type_str = config.type_.as_str();
             let has_api_key = entry
                 .config
                 .get("api_key")
@@ -385,6 +421,7 @@ pub async fn providers_detail_handler(State(state): State<AppState>) -> Json<Vec
                     .and_then(|c| provider_compat_json(&c));
 
             details.push(ProviderDetail {
+                file_routing_generation: Some(state.file_routing_generation()),
                 name: entry.name,
                 type_: type_str.to_string(),
                 pi_api: pi_api_for_provider(&provider_type),
@@ -470,33 +507,16 @@ pub async fn provider_from_template_handler(
         }
     }
 
-    let store = state.get_provider_store().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(
-                "Provider store not initialized (enable [keys] in config)",
-                "internal_error",
-            )),
-        )
-    })?;
-
-    let request = crate::provider_store::ProviderRequest {
-        name: payload.name,
-        config,
-        enabled: true,
-    };
-
-    let entry = store.upsert_provider(request).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProviderApiError::new(
-                format!("Failed to create provider: {e}"),
-                "upsert_failed",
-            )),
-        )
-    })?;
-
-    Ok(Json(entry))
+    upsert_provider_handler(
+        State(state),
+        headers,
+        Json(crate::provider_store::ProviderRequest {
+            name: payload.name,
+            config,
+            enabled: true,
+        }),
+    )
+    .await
 }
 
 /// Map eavs provider type to Pi's API type string for models.json.
@@ -1266,6 +1286,12 @@ pub struct PricingUpdateResponse {
 // Admin Provider/Model Management Endpoints
 // ============================================================================
 
+pub mod credentials;
+#[cfg(test)]
+mod fleet_tests;
+pub mod routing;
+pub mod serving_catalog;
+
 /// Create or update a provider.
 ///
 /// POST /admin/providers
@@ -1275,7 +1301,27 @@ pub async fn upsert_provider_handler(
     headers: HeaderMap,
     Json(payload): Json<crate::provider_store::ProviderRequest>,
 ) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
+    save_provider(state, headers, payload, false).await
+}
+
+pub async fn create_provider_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::provider_store::ProviderRequest>,
+) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
+    save_provider(state, headers, payload, true).await
+}
+
+async fn save_provider(
+    state: AppState,
+    headers: HeaderMap,
+    payload: crate::provider_store::ProviderRequest,
+    create_only: bool,
+) -> Result<Json<crate::provider_store::ProviderEntry>, (StatusCode, Json<ProviderApiError>)> {
     check_master_key_provider(&headers, &state)?;
+    let coordinator = state.routing.clone();
+    let _guard = coordinator.changes.lock().await;
+    let file_config = coordinator.snapshot().config;
 
     let store = state.get_provider_store().ok_or_else(|| {
         (
@@ -1287,6 +1333,15 @@ pub async fn upsert_provider_handler(
         )
     })?;
 
+    if file_config.resolve_provider(&payload.name).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ProviderApiError::new(
+                "Provider is TOML-managed; migrate it explicitly before remote updates",
+                "provider_source_conflict",
+            )),
+        ));
+    }
     let config_json = &payload.config;
     if !config_json.is_object() {
         return Err((
@@ -1311,12 +1366,53 @@ pub async fn upsert_provider_handler(
         ));
     }
 
-    let entry = store.upsert_provider(payload).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
+    if payload
+        .config
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::provider::ProviderType::try_from_str)
+        .is_none()
+        || serde_json::from_value::<crate::config::ProviderConfig>(payload.config.clone()).is_err()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
             Json(ProviderApiError::new(
-                format!("Failed to upsert provider: {e}"),
-                "upsert_failed",
+                "Invalid provider configuration",
+                "invalid_config",
+            )),
+        ));
+    }
+    if payload.name.is_empty()
+        || payload.name != payload.name.to_ascii_lowercase()
+        || !payload
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProviderApiError::new(
+                "Provider names must be lowercase letters, digits, hyphens or underscores",
+                "invalid_name",
+            )),
+        ));
+    }
+    let saved = if create_only {
+        store.create_provider(payload).await
+    } else {
+        store.upsert_provider(payload).await
+    };
+    let entry = saved.map_err(|error| {
+        let status = if matches!(error, crate::provider_store::ProviderStoreError::Conflict) {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (
+            status,
+            Json(ProviderApiError::new(
+                "Provider update failed or name already exists",
+                "provider_update_failed",
             )),
         )
     })?;
@@ -1338,6 +1434,7 @@ pub async fn probe_provider_handler(
     Json(mut payload): Json<crate::provider_probe::ProbeRequest>,
 ) -> Result<Json<crate::provider_probe::ProbeResponse>, (StatusCode, Json<ProviderApiError>)> {
     check_master_key_provider(&headers, &state)?;
+    let state = state.pin_routes();
 
     // Edit probes may intentionally omit the secret. Resolve it inside EAVS
     // from the already-active provider so credentials never need to travel
@@ -1423,6 +1520,8 @@ pub async fn delete_provider_handler(
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ProviderApiError>)> {
     check_master_key_provider(&headers, &state)?;
+    let coordinator = state.routing.clone();
+    let _guard = coordinator.changes.lock().await;
 
     let store = state.get_provider_store().ok_or_else(|| {
         (
@@ -2202,6 +2301,7 @@ mod tests {
     /// the OAuth handlers can pass `check_oauth_available`.
     async fn mock_oauth_state() -> AppState {
         let mut config = AppConfig {
+            reload_restart_input: None,
             server: ServerConfig::default(),
             providers: HashMap::new(),
             upstream: HashMap::new(),
@@ -2328,6 +2428,7 @@ mod tests {
     }
     fn mock_state() -> AppState {
         let config = AppConfig {
+            reload_restart_input: None,
             server: ServerConfig::default(),
             providers: HashMap::new(),
             upstream: HashMap::new(),
@@ -2369,6 +2470,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            reload_restart_input: None,
             server: ServerConfig::default(),
             providers,
             upstream: HashMap::new(),

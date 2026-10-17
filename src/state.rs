@@ -12,9 +12,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, OnceCell};
 
+/// Immutable per-request provider snapshot. TOML declarations take precedence
+/// over admin-managed provider declarations with the same name.
+pub struct RuntimeProvider {
+    pub config: crate::config::ProviderConfig,
+    pub resolved_name: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
+    pub routing: Arc<crate::routing::RoutingState>,
+    file_routing_generation: Option<String>,
+    default_provider_hint: Option<String>,
     pub upstream: Arc<dyn Upstream>,
     /// Conversation state store with TTL support
     pub conversations: Arc<ConversationStore>,
@@ -409,6 +419,59 @@ pub enum AnalysisEvent {
 }
 
 impl AppState {
+    /// Capture file routing once; further clones in this operation retain it.
+    /// Authorization/credential-owner stores and accounting remain live shared objects.
+    pub fn pin_routes(&self) -> Self {
+        if self.file_routing_generation.is_some() {
+            return self.clone();
+        }
+        let snapshot = self.routing.snapshot();
+        let mut state = self.clone();
+        state.config = snapshot.config;
+        state.file_routing_generation = Some(snapshot.generation);
+        state.default_provider_hint = snapshot.default_provider_hint;
+        state
+    }
+
+    pub fn default_provider_hint(&self) -> Option<String> {
+        if self.file_routing_generation.is_some() {
+            self.default_provider_hint.clone()
+        } else {
+            self.routing.snapshot().default_provider_hint
+        }
+    }
+
+    pub fn file_routing_generation(&self) -> String {
+        self.file_routing_generation
+            .clone()
+            .unwrap_or_else(|| self.routing.snapshot().generation)
+    }
+
+    pub fn resolve_provider(&self, name: &str) -> Option<RuntimeProvider> {
+        let config = if self.file_routing_generation.is_some() {
+            self.config.clone()
+        } else {
+            self.routing.snapshot().config
+        };
+        if let Some(lookup) = config.resolve_provider(name) {
+            return Some(RuntimeProvider {
+                config: lookup.config.clone(),
+                resolved_name: lookup.resolved_name,
+            });
+        }
+        let entry = self
+            .get_provider_store()?
+            .list_providers()
+            .into_iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))?;
+        let config: crate::config::ProviderConfig = serde_json::from_value(entry.config).ok()?;
+        crate::provider::ProviderType::try_from_str(&config.type_)?;
+        Some(RuntimeProvider {
+            config,
+            resolved_name: entry.name,
+        })
+    }
+
     pub fn new(config: AppConfig) -> Self {
         let client = reqwest::Client::new();
         Self::new_with_upstream(config, Arc::new(ReqwestUpstream::new(client)))
@@ -419,8 +482,12 @@ impl AppState {
         let conversations = Arc::new(ConversationStore::new(config.state.clone()));
         let pricing = SharedPricingTable::new();
 
+        let config = Arc::new(config);
         Self {
-            config: Arc::new(config),
+            routing: Arc::new(crate::routing::RoutingState::new(config.clone())),
+            file_routing_generation: None,
+            default_provider_hint: None,
+            config,
             upstream,
             conversations,
             ws_sessions: Arc::new(WsSessionManager::new()),
@@ -601,6 +668,76 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
 
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify runtime source precedence and snapshot isolation; fixture errors propagate"
+    )]
+    async fn runtime_provider_resolution_preserves_sources_and_snapshots(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::new(mock_config());
+        let store = Arc::new(ProviderStore::in_memory().await?);
+        for name in ["default", "managed"] {
+            store
+                .upsert_provider(crate::provider_store::ProviderRequest {
+                    name: name.into(),
+                    config: serde_json::json!({"type":"openai", "api_key":"synthetic-old"}),
+                    enabled: true,
+                })
+                .await?;
+        }
+        state
+            .provider_store
+            .set(store.clone())
+            .map_err(|_| "already initialized")?;
+        assert_eq!(
+            state
+                .resolve_provider("DEFAULT")
+                .ok_or("missing TOML provider")?
+                .config
+                .api_key,
+            "env:OPENAI_API_KEY"
+        );
+        let snapshot = state
+            .resolve_provider("MANAGED")
+            .ok_or("missing managed provider")?;
+        assert_eq!(snapshot.resolved_name, "managed");
+        let initial = store
+            .get_provider("managed")
+            .ok_or("missing metadata")?
+            .updated_at
+            .to_rfc3339();
+        store
+            .rotate_api_key("managed", &initial, "synthetic-new")
+            .await?;
+        assert_eq!(snapshot.config.api_key, "synthetic-old");
+        assert_eq!(
+            state
+                .resolve_provider("managed")
+                .ok_or("missing new snapshot")?
+                .config
+                .api_key,
+            "synthetic-new"
+        );
+        store
+            .upsert_provider(crate::provider_store::ProviderRequest {
+                name: "managed".into(),
+                config: serde_json::json!({"type":"openai"}),
+                enabled: false,
+            })
+            .await?;
+        assert!(state.resolve_provider("managed").is_none());
+        store
+            .upsert_provider(crate::provider_store::ProviderRequest {
+                name: "invalid".into(),
+                config: serde_json::json!({"type":42}),
+                enabled: true,
+            })
+            .await?;
+        assert!(state.resolve_provider("invalid").is_none());
+        Ok(())
+    }
+
     fn mock_config() -> AppConfig {
         let mut providers = HashMap::new();
         providers.insert(
@@ -614,6 +751,7 @@ mod tests {
         );
 
         AppConfig {
+            reload_restart_input: None,
             server: ServerConfig::default(),
             providers,
             upstream: HashMap::new(),
