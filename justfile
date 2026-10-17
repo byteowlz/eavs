@@ -42,6 +42,10 @@ test-device:
     cargo test --locked device::
 
 # Dedicated phone ingress: authority separation, revocation and bounded claims.
+# Typed invitation CLI/private QR publication; synthetic operator only
+test-device-invitations:
+    cargo test --locked device::invitation::tests
+
 test-device-ingress:
     cargo test --locked device_ingress::
 
