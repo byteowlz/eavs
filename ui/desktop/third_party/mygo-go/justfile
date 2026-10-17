@@ -1,0 +1,16 @@
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
+default:
+    @just --list
+
+build:
+    go build ./...
+
+test:
+    go test -race ./...
+
+check:
+    test -z "$(gofmt -l *.go)"
+    go vet ./...
+    go test -race ./...
+    go build ./...

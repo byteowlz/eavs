@@ -77,8 +77,12 @@ fn expand_path(input: &str) -> PathBuf {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct AppConfig {
+    /// Effective raw restart-only input, including unknown nested settings. Internal
+    /// comparison only: never returned by reload or resolved as secret references.
+    #[serde(skip)]
+    pub(crate) reload_restart_input: Option<serde_json::Value>,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -127,6 +131,7 @@ impl AppConfig {
     /// Create a config with all default values
     pub fn with_defaults() -> Self {
         Self {
+            reload_restart_input: None,
             server: ServerConfig::default(),
             providers: HashMap::new(),
             upstream: HashMap::new(),
@@ -155,7 +160,7 @@ impl AppConfig {
 /// - Otherwise: ALLOWED
 ///
 /// Empty lists = no restriction for that list.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 pub struct NetworkConfig {
     /// Allowed upstream domains (glob patterns). Empty = allow all.
     /// Examples: ["api.openai.com", "*.anthropic.com", "api.groq.com"]
@@ -200,6 +205,7 @@ const fn default_true() -> bool {
 /// Disabled by default; front-end agnostic.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct EgressConfig {
     /// Enable the egress firewall (listener + DNS relay).
     pub enabled: bool,
@@ -234,6 +240,7 @@ impl Default for EgressConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -394,7 +401,7 @@ fn redact_prefixed_key(input: &str, prefix: &str) -> String {
     result
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ProviderConfig {
     /// Provider type: openai, anthropic, google, azure, mistral, groq, cerebras, xai, openrouter, ollama, etc.
     #[serde(rename = "type", default)]
@@ -451,7 +458,7 @@ pub struct ProviderConfig {
 }
 
 /// A model entry in a provider's shortlist.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ModelShortlistEntry {
     /// Model ID as sent to the API (e.g., "gpt-5.2-codex", "claude-opus-4-6")
     pub id: String,
@@ -501,7 +508,7 @@ const fn default_max_tokens() -> u64 {
 /// 'fal-ai/flux/schnell' = 0.003
 /// 'replicate/example/model' = 0.01
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct NativePricingConfig {
     /// Ignored legacy per-model job prices, retained only to parse old configs.
     /// Not actual billing evidence; setting these never enables capped jobs.
@@ -510,7 +517,7 @@ pub struct NativePricingConfig {
 }
 
 /// Cost per million tokens.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ModelCost {
     #[serde(default)]
     pub input: f64,
@@ -658,6 +665,7 @@ impl ProviderConfig {
 /// Logging configuration with multiple backend support.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct LoggingConfig {
     /// Default logging backend: "stdout", "file", "none"
     pub default: String,
@@ -701,6 +709,7 @@ impl LoggingConfig {
 /// Individual logging backend configuration.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
+#[derive(PartialEq)]
 pub enum LogBackend {
     /// Standard output logging
     #[serde(rename = "stdout")]
@@ -773,6 +782,7 @@ fn default_service_name() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct AnalysisConfig {
     pub enabled: bool,
     pub broadcast_channel_size: usize,
@@ -792,6 +802,7 @@ impl Default for AnalysisConfig {
 /// Analysis plugin configuration.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct AnalysisPluginConfig {
     /// Unique name for the plugin (for logs/observability).
     pub name: String,
@@ -815,6 +826,7 @@ pub struct AnalysisPluginConfig {
 /// modified JSON on stdout.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct TransformConfig {
     /// Enable transform plugins
     pub enabled: bool,
@@ -825,6 +837,7 @@ pub struct TransformConfig {
 /// Transform plugin configuration.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct TransformPluginConfig {
     /// Unique name for the plugin (for logs/observability).
     pub name: String,
@@ -853,6 +866,7 @@ const fn default_transform_timeout() -> u64 {
 /// Configuration for conversation state storage.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct StateConfig {
     /// Enable conversation state storage
     pub enabled: bool,
@@ -881,6 +895,7 @@ impl Default for StateConfig {
 /// Configuration for virtual API keys.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct KeysConfig {
     /// Enable virtual API key support
     pub enabled: bool,
@@ -970,6 +985,7 @@ impl Default for KeysConfig {
 ///   arguments = '{"location": "NYC"}'
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct MockResponsesConfig {
     /// Map of response name -> response definition
     #[serde(flatten)]
@@ -979,6 +995,7 @@ pub struct MockResponsesConfig {
 /// A single predefined mock response.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct MockResponse {
     /// Response content (for normal text responses)
     pub content: String,
@@ -1003,6 +1020,7 @@ pub struct MockResponse {
 /// `eavs_capture.py` addon to intercept LLM API traffic.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct CaptureConfig {
     /// Enable automatic mitmproxy capture mode
     pub enabled: bool,
@@ -1194,7 +1212,7 @@ impl AppConfig {
     }
 
     pub fn load() -> Result<Self, ConfigError> {
-        Self::load_with_override_path(None)
+        Self::load_with_override_path(None, false)
     }
 
     pub fn load_or_init() -> Result<Self, ConfigError> {
@@ -1208,13 +1226,65 @@ impl AppConfig {
 
     /// Load configuration from a specific file path.
     pub fn load_from(path: &str) -> Result<Self, ConfigError> {
-        Self::load_with_override_path(Some(path))
+        Self::load_with_override_path(Some(path), false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_isolated_reload(path: &std::path::Path) -> Result<Self, ConfigError> {
+        Self::finalize_config(Config::builder().add_source(File::from(path)), true)
+    }
+
+    pub fn apply_server_overrides(&mut self, host: Option<&str>, port: Option<u16>) {
+        if let Some(host) = host {
+            self.server.host = host.into();
+        }
+        if let Some(port) = port {
+            self.server.port = port;
+        }
+        if host.is_none() && port.is_none() {
+            return;
+        }
+        if let Some(root) = self
+            .reload_restart_input
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let server = root
+                .entry("server")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(server) = server.as_object_mut() {
+                if let Some(host) = host {
+                    server.insert("host".into(), serde_json::json!(host));
+                }
+                if let Some(port) = port {
+                    server.insert("port".into(), serde_json::json!(port));
+                }
+            }
+        }
+    }
+
+    /// Reload uses startup precedence without scaffolding or an implicit default route.
+    pub fn load_for_reload(path: Option<&str>) -> Result<Self, ConfigError> {
+        Self::load_with_override_path(path, true)
     }
 
     fn finalize_config(
         builder: config::ConfigBuilder<config::builder::DefaultState>,
+        strict_reload: bool,
     ) -> Result<Self, ConfigError> {
-        let mut config: Self = builder.build()?.try_deserialize()?;
+        let built = builder.build()?;
+        let mut raw: serde_json::Value = built.clone().try_deserialize()?;
+        if strict_reload {
+            crate::routing::validate_input(&raw).map_err(|_| {
+                ConfigError::Message("Candidate configuration has unsupported fields".into())
+            })?;
+        }
+        let mut config: Self = built.try_deserialize()?;
+        if let Some(root) = raw.as_object_mut() {
+            root.remove("providers");
+            root.remove("upstream");
+        }
+        config.reload_restart_input = Some(raw);
 
         if !config.native_pricing.jobs.is_empty() {
             tracing::warn!(
@@ -1231,7 +1301,9 @@ impl AppConfig {
         // Warn about unrecognized provider types instead of silently treating
         // them as OpenAI (which mis-advertises the API, e.g. to pi via pi_api).
         for (name, provider) in &config.providers {
-            if crate::provider::ProviderType::try_from_str(&provider.type_).is_none() {
+            if !strict_reload
+                && crate::provider::ProviderType::try_from_str(&provider.type_).is_none()
+            {
                 tracing::warn!(
                     provider = %name,
                     r#type = %provider.type_,
@@ -1242,7 +1314,7 @@ impl AppConfig {
         }
 
         // Ensure we have at least a default provider
-        if config.providers.is_empty() {
+        if !strict_reload && config.providers.is_empty() {
             config.providers.insert(
                 "default".to_string(),
                 ProviderConfig {
@@ -1256,7 +1328,10 @@ impl AppConfig {
         Ok(config)
     }
 
-    fn load_with_override_path(override_path: Option<&str>) -> Result<Self, ConfigError> {
+    fn load_with_override_path(
+        override_path: Option<&str>,
+        strict_reload: bool,
+    ) -> Result<Self, ConfigError> {
         let mut builder = Config::builder();
 
         // Global config (XDG)
@@ -1272,9 +1347,19 @@ impl AppConfig {
             tracing::info!("Loading config from local path: eavs.toml");
             builder = builder.add_source(File::from(std::path::Path::new("eavs.toml")));
         } else if std::path::Path::new("eavs.yaml").exists() {
+            if strict_reload {
+                return Err(ConfigError::Message(
+                    "Provider reload requires TOML sources".into(),
+                ));
+            }
             tracing::info!("Loading config from local path: eavs.yaml");
             builder = builder.add_source(File::from(std::path::Path::new("eavs.yaml")));
         } else if std::path::Path::new("eavs.yml").exists() {
+            if strict_reload {
+                return Err(ConfigError::Message(
+                    "Provider reload requires TOML sources".into(),
+                ));
+            }
             tracing::info!("Loading config from local path: eavs.yml");
             builder = builder.add_source(File::from(std::path::Path::new("eavs.yml")));
         }
@@ -1289,11 +1374,20 @@ impl AppConfig {
         // Explicit config path (highest priority among file/env sources)
         if let Some(path) = override_path {
             let expanded = expand_path(path);
+            if strict_reload
+                && !std::path::Path::new(&expanded)
+                    .extension()
+                    .is_some_and(|extension| extension == "toml")
+            {
+                return Err(ConfigError::Message(
+                    "Provider reload requires TOML sources".into(),
+                ));
+            }
             tracing::info!("Loading config from explicit path: {:?}", expanded);
             builder = builder.add_source(File::from(expanded));
         }
 
-        Self::finalize_config(builder)
+        Self::finalize_config(builder, strict_reload)
     }
 
     fn get_xdg_config_path() -> Option<PathBuf> {

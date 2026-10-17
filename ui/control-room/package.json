@@ -1,0 +1,17 @@
+{
+  "name": "@byteowlz/eavs-control-room",
+  "version": "0.8.3",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Reusable design-system-backed inference-access planning UI; no live write adapter",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/control-room.js" },
+    "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js" }
+  },
+  "files": ["dist", "README.md"],
+  "dependencies": { "@byteowlz/design-system": "file:../../../design-system/impls/shadcn-ts" },
+  "peerDependencies": { "react": ">=18 <20" },
+  "peerDependenciesMeta": { "react": { "optional": true } },
+  "scripts": { "build": "bun run build.js", "test": "bun test tests" }
+}

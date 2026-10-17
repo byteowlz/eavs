@@ -1,0 +1,18 @@
+{
+  "foreground": "base05",
+  "muted-foreground": "base04",
+  "background": "base00",
+  "surface": "base01",
+  "surface-sunken": "base11",
+  "primary": "base0B",
+  "secondary": "base02",
+  "muted": "base02",
+  "accent": "base02",
+  "success": "base0B",
+  "warning": "base0A",
+  "danger": "base08",
+  "info": "base0D",
+  "border": "base01",
+  "ring": "base0B",
+  "input": "base01"
+}

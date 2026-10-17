@@ -161,7 +161,6 @@ async fn context(
     skip_budget: bool,
 ) -> Result<JobContext, Box<Response>> {
     let lookup = state
-        .config
         .resolve_provider(provider)
         .ok_or_else(|| Box::new(error(StatusCode::BAD_REQUEST, "Unknown job provider")))?;
     let kind = lookup.config.provider_type();
@@ -381,6 +380,7 @@ pub async fn submit(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let state = state.pin_routes();
     let limit = if state.config.server.max_body_size == 0 {
         1024 * 1024
     } else {
@@ -529,9 +529,10 @@ async fn lifecycle(
     headers: HeaderMap,
     action: Action,
 ) -> Response {
+    let state = state.pin_routes();
     // Verify MAC and owner before constructing any upstream URL. `model` is
     // authenticated by the handle and rechecked against current key scopes.
-    let lookup = match state.config.resolve_provider(&provider) {
+    let lookup = match state.resolve_provider(&provider) {
         Some(p)
             if matches!(
                 p.config.provider_type(),

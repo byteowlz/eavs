@@ -186,6 +186,7 @@ mod tests {
         );
 
         AppConfig {
+            reload_restart_input: None,
             server: Default::default(),
             providers,
             upstream: HashMap::new(),

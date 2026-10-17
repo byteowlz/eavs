@@ -6,6 +6,10 @@
 //! - `eavs setup test-all` -- batch-test every provider in the config
 //! - `eavs setup show`     -- display the effective (resolved) config for a provider
 
+mod config_write;
+#[cfg(test)]
+mod tests;
+
 use crate::cli::{CliError, OutputFormat};
 use crate::config::{AppConfig, ProviderConfig};
 use crate::provider::ProviderType;
@@ -176,9 +180,9 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
         .map_err(|e| CliError::Other(format!("Cannot read import file {import_path}: {e}")))?;
 
     // Parse the import file to extract provider sections
-    let import_toml: toml::Value = import_content
-        .parse()
-        .map_err(|e| CliError::Other(format!("Invalid TOML in {import_path}: {e}")))?;
+    let import_toml: toml::Value = import_content.parse().map_err(|_| {
+        CliError::Other("Invalid import TOML; no configuration changes made".into())
+    })?;
 
     let providers = import_toml
         .get("providers")
@@ -187,41 +191,10 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
             CliError::Other(format!("No [providers.*] sections found in {import_path}"))
         })?;
 
-    // Read existing config to check for duplicates
-    let existing = std::fs::read_to_string(config_file).unwrap_or_default();
-    let mut appended = Vec::new();
-
-    for (name, config) in providers {
-        if name == "default" {
-            continue;
-        }
-        let section = format!("[providers.{name}]");
-        if existing.contains(&section) {
-            println!("  {name} -- already configured, skipping");
-            continue;
-        }
-
-        // Serialize the provider config as TOML and append
-        let mut lines = vec![String::new(), section];
-        if let Some(table) = config.as_table() {
-            for (key, value) in table {
-                lines.push(format!("{} = {}", key, format_toml_value(value)));
-            }
-        }
-
-        let block = lines.join("\n");
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(config_file)
-            .map_err(|e| {
-                CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
-            })?;
-        use std::io::Write;
-        writeln!(file, "{block}").map_err(|e| {
-            CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
-        })?;
-
-        appended.push(name.clone());
+    let mut incoming = providers.clone();
+    incoming.remove("default");
+    let appended = config_write::add(config_file, &incoming, true)?;
+    for name in &appended {
         println!("  Imported provider: {name}");
     }
 
@@ -230,77 +203,13 @@ fn import_providers_from_toml(config_file: &PathBuf, import_path: &str) -> Resul
     } else {
         println!("  Imported {} provider(s)", appended.len());
 
-        // Set default if there isn't one already
-        if !existing.contains("[providers.default]") {
-            if let Some(first_name) = appended.first() {
-                if let Some(first_config) = providers.get(first_name) {
-                    set_default_from_imported(config_file, first_name, first_config)?;
-                }
+        if let Some(first_name) = appended.first() {
+            if config_write::default_from(config_file, first_name, false)? {
+                println!("  Set default provider: {first_name}");
             }
         }
     }
 
-    Ok(())
-}
-
-/// Format a TOML value for writing to config.
-fn format_toml_value(value: &toml::Value) -> String {
-    match value {
-        toml::Value::String(s) => format!("\"{s}\""),
-        toml::Value::Integer(i) => i.to_string(),
-        toml::Value::Float(f) => f.to_string(),
-        toml::Value::Boolean(b) => b.to_string(),
-        toml::Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(format_toml_value).collect();
-            format!("[{}]", items.join(", "))
-        }
-        toml::Value::Table(t) => {
-            let items: Vec<String> = t
-                .iter()
-                .map(|(k, v)| format!("{} = {}", k, format_toml_value(v)))
-                .collect();
-            format!("{{ {} }}", items.join(", "))
-        }
-        toml::Value::Datetime(d) => d.to_string(),
-    }
-}
-
-/// Set the default provider from an imported provider config.
-fn set_default_from_imported(
-    config_file: &PathBuf,
-    name: &str,
-    config: &toml::Value,
-) -> Result<(), CliError> {
-    let table = match config.as_table() {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-
-    let type_ = table
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("openai");
-    let api_key = table.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-
-    if api_key.is_empty() {
-        return Ok(());
-    }
-
-    let default_block =
-        format!("\n[providers.default]\ntype = \"{type_}\"\napi_key = \"{api_key}\"\n");
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(config_file)
-        .map_err(|e| {
-            CliError::Other(format!("Cannot append to {}: {}", config_file.display(), e))
-        })?;
-    use std::io::Write;
-    write!(file, "{default_block}").map_err(|e| {
-        CliError::Other(format!("Cannot write to {}: {}", config_file.display(), e))
-    })?;
-
-    println!("  Set default provider: {name}");
     Ok(())
 }
 
@@ -334,7 +243,6 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
     println!("Scanning environment for API keys...");
     println!();
 
-    let existing = std::fs::read_to_string(config_file).unwrap_or_default();
     let mut added_count = 0;
     let mut first_provider: Option<String> = None;
 
@@ -345,8 +253,7 @@ async fn run_batch_add(config_file: &PathBuf) -> Result<(), CliError> {
         }
 
         // Skip if already in config
-        let section = format!("[providers.{provider_name}]");
-        if existing.contains(&section) {
+        if config_write::contains_provider(config_file, provider_name)? {
             println!("  {display_name} -- already configured, skipping");
             continue;
         }
@@ -511,6 +418,9 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
     )?;
 
     let provider_name = provider_name.trim().to_lowercase().replace(' ', "-");
+    if config_write::contains_provider(config_file, &provider_name)? {
+        return Err(CliError::Other("Provider name already exists. Choose a different name or explicitly edit the existing provider; file unchanged".into()));
+    }
     if provider_name.is_empty() {
         return Err(CliError::Other("Provider name cannot be empty".to_string()));
     }
@@ -557,20 +467,6 @@ async fn add_single_provider(config_file: &PathBuf) -> Result<(), CliError> {
 /// Ensure the config file has a base scaffold (server, logging, keys sections).
 /// Does nothing if the file already exists and has content.
 fn ensure_base_config(config_file: &PathBuf) -> Result<(), CliError> {
-    if config_file.exists() {
-        let content = std::fs::read_to_string(config_file).unwrap_or_default();
-        if content.contains("[server]") {
-            return Ok(()); // Already has base config
-        }
-    }
-
-    // Create parent dirs
-    if let Some(parent) = config_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliError::Other(format!("Failed to create {}: {}", parent.display(), e))
-        })?;
-    }
-
     let scaffold = r#""$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/eavs/eavs.config.schema.json"
 
 # EAVS Configuration
@@ -603,53 +499,16 @@ default_budget_usd = 50.0
 update_pricing_on_startup = true
 "#;
 
-    std::fs::write(config_file, scaffold).map_err(|e| {
-        CliError::Other(format!("Failed to write {}: {}", config_file.display(), e))
-    })?;
-
-    println!("Created base config: {}", config_file.display());
+    if config_write::initialize(config_file, scaffold)? {
+        println!("Created base config: {}", config_file.display());
+    }
 
     Ok(())
 }
 
 /// Set the default provider in the config (copies type + `api_key` from an existing provider).
 fn set_default_provider(config_file: &PathBuf, provider_name: &str) -> Result<(), CliError> {
-    let content = std::fs::read_to_string(config_file).unwrap_or_default();
-
-    // Already has a default? Skip.
-    if content.contains("[providers.default]") {
-        return Ok(());
-    }
-
-    // Find the provider's type and api_key
-    let section = format!("[providers.{provider_name}]");
-    if let Some(start) = content.find(&section) {
-        let block = &content[start..];
-        let type_val = block
-            .lines()
-            .find(|l| l.starts_with("type = "))
-            .unwrap_or("type = \"openai\"");
-        let key_val = block
-            .lines()
-            .find(|l| l.starts_with("api_key = "))
-            .unwrap_or("api_key = \"\"");
-
-        // Insert default provider before the first [providers.*] section
-        let default_block = format!("\n[providers.default]\n{type_val}\n{key_val}\n");
-
-        // Find insertion point: just before the first [providers.*]
-        if let Some(pos) = content.find("[providers.") {
-            let mut new_content = String::with_capacity(content.len() + default_block.len());
-            new_content.push_str(&content[..pos]);
-            new_content.push_str(&default_block);
-            new_content.push_str(&content[pos..]);
-
-            std::fs::write(config_file, new_content).map_err(|e| {
-                CliError::Other(format!("Failed to write {}: {}", config_file.display(), e))
-            })?;
-        }
-    }
-
+    config_write::default_from(config_file, provider_name, true)?;
     Ok(())
 }
 
@@ -1142,8 +1001,8 @@ fn build_test_request(
             });
             (url, body, headers)
         }
-        ProviderType::OpenAIResponses | ProviderType::OpenAICodex => {
-            // OpenAI Responses API format
+        ProviderType::OpenAI | ProviderType::OpenAIResponses | ProviderType::OpenAICodex => {
+            // OpenAI Responses API format; modern GPT models do not accept chat max_tokens.
             let url = format!("{}/responses", base_url.trim_end_matches('/'));
             if !api_key.is_empty() {
                 headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
@@ -1268,17 +1127,17 @@ fn resolve_pi_models_path() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Hardcoded default test models per provider type.
+/// Maintained smoke-test defaults; explicit model choices remain authoritative.
 fn suggest_test_model_default(provider_type: ProviderType) -> String {
     match provider_type {
-        ProviderType::OpenAI | ProviderType::OpenAIResponses => "gpt-4o-mini".to_string(),
-        ProviderType::Anthropic => "claude-sonnet-4-20250514".to_string(),
-        ProviderType::Google | ProviderType::GoogleVertex => "gemini-2.0-flash".to_string(),
+        ProviderType::OpenAI | ProviderType::OpenAIResponses => "gpt-5.4-mini".to_string(),
+        ProviderType::Anthropic => "claude-haiku-5-5".to_string(),
+        ProviderType::Google | ProviderType::GoogleVertex => "gemini-3.8-flash".to_string(),
         ProviderType::Mistral => "mistral-small-latest".to_string(),
-        ProviderType::Groq => "llama-3.3-70b-versatile".to_string(),
-        ProviderType::Cerebras => "llama-3.3-70b".to_string(),
-        ProviderType::XAI => "grok-2-latest".to_string(),
-        ProviderType::OpenRouter => "openai/gpt-4o-mini".to_string(),
+        ProviderType::Groq => "openai/gpt-oss-20b".to_string(),
+        ProviderType::Cerebras => "gpt-oss-120b".to_string(),
+        ProviderType::XAI => "grok-4.20-non-reasoning".to_string(),
+        ProviderType::OpenRouter => "openai/gpt-5.4-mini".to_string(),
         ProviderType::Azure => "gpt-4o-mini".to_string(),
         ProviderType::OpenAICompatible => "default".to_string(),
         _ => "default".to_string(),
@@ -1658,92 +1517,24 @@ fn save_provider_to_config(
     provider_name: &str,
     config: &SetupProviderConfig,
 ) -> Result<(), CliError> {
-    if let Some(parent) = config_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliError::Other(format!(
-                "Failed to create config directory {}: {}",
-                parent.display(),
-                e
-            ))
-        })?;
+    let mut provider = toml::Value::try_from(config)
+        .map_err(|_| CliError::Other("Cannot serialize provider configuration".into()))?;
+    let table = provider
+        .as_table_mut()
+        .ok_or_else(|| CliError::Other("Invalid provider configuration".into()))?;
+    let mut compat = toml::Table::new();
+    if let Some(value) = table.remove("compat_supports_store") {
+        compat.insert("supports_store".into(), value);
     }
-
-    let mut toml_lines = Vec::new();
-    toml_lines.push(String::new());
-    toml_lines.push(format!("[providers.{provider_name}]"));
-    toml_lines.push(format!("type = \"{}\"", config.type_));
-
-    if !config.api_key.is_empty() {
-        toml_lines.push(format!("api_key = \"{}\"", config.api_key));
+    if let Some(value) = table.remove("compat_max_tokens_field") {
+        compat.insert("max_tokens_field".into(), value);
     }
-    if let Some(ref url) = config.base_url {
-        toml_lines.push(format!("base_url = \"{url}\""));
+    if !compat.is_empty() {
+        table.insert("compat".into(), toml::Value::Table(compat));
     }
-    if let Some(ref v) = config.api_version {
-        toml_lines.push(format!("api_version = \"{v}\""));
-    }
-    if let Some(ref d) = config.deployment {
-        toml_lines.push(format!("deployment = \"{d}\""));
-    }
-    if let Some(ref r) = config.aws_region {
-        toml_lines.push(format!("aws_region = \"{r}\""));
-    }
-    if let Some(ref k) = config.aws_access_key_id {
-        toml_lines.push(format!("aws_access_key_id = \"{k}\""));
-    }
-    if let Some(ref k) = config.aws_secret_access_key {
-        toml_lines.push(format!("aws_secret_access_key = \"{k}\""));
-    }
-    if let Some(ref t) = config.aws_session_token {
-        toml_lines.push(format!("aws_session_token = \"{t}\""));
-    }
-    if let Some(ref p) = config.gcp_project {
-        toml_lines.push(format!("gcp_project = \"{p}\""));
-    }
-    if let Some(ref l) = config.gcp_location {
-        toml_lines.push(format!("gcp_location = \"{l}\""));
-    }
-
-    if config.compat_supports_store.is_some() || config.compat_max_tokens_field.is_some() {
-        toml_lines.push(format!("[providers.{provider_name}.compat]"));
-        if let Some(supports_store) = config.compat_supports_store {
-            toml_lines.push(format!("supports_store = {supports_store}"));
-        }
-        if let Some(ref field) = config.compat_max_tokens_field {
-            toml_lines.push(format!("max_tokens_field = \"{field}\""));
-        }
-    }
-
-    let snippet = toml_lines.join("\n");
-
-    let existing = std::fs::read_to_string(config_file).unwrap_or_default();
-
-    let section_header = format!("[providers.{provider_name}]");
-    if existing.contains(&section_header) {
-        println!(
-            "  Warning: Provider '{provider_name}' already exists in config. Appending new entry."
-        );
-        println!(
-            "  You may need to manually remove the old entry from {}",
-            config_file.display()
-        );
-    }
-
-    let mut new_content = existing;
-    if !new_content.ends_with('\n') && !new_content.is_empty() {
-        new_content.push('\n');
-    }
-    new_content.push_str(&snippet);
-    new_content.push('\n');
-
-    std::fs::write(config_file, new_content).map_err(|e| {
-        CliError::Other(format!(
-            "Failed to write config file {}: {}",
-            config_file.display(),
-            e
-        ))
-    })?;
-
+    let mut providers = toml::Table::new();
+    providers.insert(provider_name.into(), provider);
+    config_write::add(config_file, &providers, false)?;
     Ok(())
 }
 
@@ -1810,8 +1601,9 @@ fn mask_secret(value: &str) -> String {
 // Intermediate config used during the "add" wizard
 // =============================================================================
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct SetupProviderConfig {
+    #[serde(rename = "type")]
     pub type_: String,
     pub api_key: String,
     pub base_url: Option<String>,
