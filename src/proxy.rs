@@ -336,6 +336,34 @@ async fn proxy_handler_inner(
     req: Request<Body>,
     path_provider: Option<String>,
 ) -> Result<Response, Response> {
+    let state = state.pin_routes();
+    let generation = state.file_routing_generation();
+    let mut result = if crate::pi_messages::matches(req.uri().path(), path_provider.as_deref()) {
+        Ok(crate::pi_messages::handle(state, req, path_provider).await)
+    } else {
+        proxy_handler_pinned(state, req, path_provider).await
+    };
+    let response = match &mut result {
+        Ok(response) | Err(response) => response,
+    };
+    if let Ok(value) = generation.parse() {
+        response
+            .headers_mut()
+            .insert("x-eavs-file-routing-generation", value);
+    }
+    result
+}
+
+pub async fn proxy_handler_pinned(
+    state: AppState,
+    req: Request<Body>,
+    path_provider: Option<String>,
+) -> Result<Response, Response> {
+    let state = state.pin_routes();
+    let pi_interface = req
+        .extensions()
+        .get::<crate::pi_messages::Interface>()
+        .is_some();
     // 1. Generate Correlation ID
     let correlation_id = Uuid::new_v4().to_string();
 
@@ -518,11 +546,10 @@ async fn proxy_handler_inner(
         && runtime_default_provider.is_none()
         && model_detected_provider.is_some();
     let provider_lookup = state
-        .config
         .resolve_provider(&provider_name_requested)
         .or_else(|| {
             if provider_selected_by_model {
-                state.config.resolve_provider("default")
+                state.resolve_provider("default")
             } else {
                 None
             }
@@ -541,7 +568,7 @@ async fn proxy_handler_inner(
                 .into_response()
         })?;
 
-    let provider_config = provider_lookup.config;
+    let provider_config = &provider_lookup.config;
     if matches!(
         provider_config.provider_type(),
         ProviderType::Fal | ProviderType::Replicate
@@ -1055,10 +1082,11 @@ async fn proxy_handler_inner(
     // Check if we need format translation
     // Skip transformation for pass-through endpoints, native Responses API
     // requests, and native-format requests
-    let needs_transform = provider_type.needs_transform()
-        && !is_passthrough_endpoint
-        && !is_responses_api_request
-        && !is_native_format_request;
+    let needs_transform = pi_interface
+        || provider_type.needs_transform()
+            && !is_passthrough_endpoint
+            && !is_responses_api_request
+            && !is_native_format_request;
 
     // Resolve compat settings for OpenAI-compatible providers
     let resolved_compat = provider_config.resolved_compat();
@@ -1088,7 +1116,12 @@ async fn proxy_handler_inner(
     let mut beta_scan_body: Option<Value> = None;
     let (request_body, model_name) = if needs_transform {
         // Parse incoming OpenAI-format request to canonical Context
-        let mut context = parse_incoming_request(&json_body).map_err(|e| {
+        let parsed = if pi_interface {
+            crate::pi_messages::canonical::context(&json_body, &provider_name, provider_type)
+        } else {
+            parse_incoming_request(&json_body)
+        };
+        let mut context = parsed.map_err(|e| {
             tracing::error!("Failed to parse request: {}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -1157,6 +1190,24 @@ async fn proxy_handler_inner(
             (status, Json(ProxyError::new(format!("{e}"), error_type))).into_response()
         })?;
 
+        if pi_interface {
+            crate::pi_messages::canonical::finish(
+                &mut transformed,
+                &context,
+                &provider_name,
+                provider_type,
+            )
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ProxyError::new(
+                        "Pi request cannot be represented by this route",
+                        "unsupported_pi_request",
+                    )),
+                )
+                    .into_response()
+            })?;
+        }
         if is_anthropic_oauth {
             prefix_anthropic_oauth_tools(&mut transformed);
             apply_anthropic_oauth_body_transforms(&mut transformed);
@@ -1630,6 +1681,27 @@ async fn proxy_handler_inner(
     }
 
     // Execute Upstream Request
+    let pi_pricing = if pi_interface {
+        Some(
+            state
+                .pricing
+                .get(&model_name)
+                .await
+                .filter(crate::pi_messages::valid_pricing)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ProxyError::new(
+                            "Pi effective pricing unavailable",
+                            "pi_pricing_unavailable",
+                        )),
+                    )
+                        .into_response()
+                })?,
+        )
+    } else {
+        None
+    };
     let upstream_res = state.upstream.send(upstream_req).await.map_err(|e| {
         tracing::error!("Upstream request failed: {}", e);
         (
@@ -1809,6 +1881,32 @@ async fn proxy_handler_inner(
         cached_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         cache_write_tokens: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     });
+
+    if pi_interface {
+        let pricing = pi_pricing.ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ProxyError::new(
+                    "Pi effective pricing unavailable",
+                    "pi_pricing_unavailable",
+                )),
+            )
+                .into_response()
+        })?;
+        return Ok(crate::pi_messages::stream::response(
+            crate::pi_messages::stream::Admission {
+                state,
+                key: validated_key,
+                provider: resolved_provider,
+                model: model_name,
+                kind: provider_type,
+                pricing,
+                oauth_tools: is_anthropic_oauth,
+            },
+            stream,
+            &headers,
+        ));
+    }
 
     if needs_transform {
         // Transform response from provider format back to OpenAI format
@@ -2706,6 +2804,7 @@ async fn ws_proxy_handler_inner(
     uri: http::Uri,
     path_provider: Option<String>,
 ) -> Response {
+    let state = state.pin_routes();
     let conversation_id = headers
         .get("X-Conversation-ID")
         .and_then(|h| h.to_str().ok())
@@ -2865,7 +2964,7 @@ async fn ws_proxy_handler_inner(
             });
     }
 
-    let provider_lookup = if let Some(v) = state.config.resolve_provider(&provider_name) {
+    let provider_lookup = if let Some(v) = state.resolve_provider(&provider_name) {
         v
     } else {
         let available = state.config.provider_names();
@@ -3238,6 +3337,7 @@ async fn codex_ws_handler_inner(
     uri: http::Uri,
     path_provider: Option<String>,
 ) -> Response {
+    let state = state.pin_routes();
     // --- Auth & provider resolution (shared with realtime WS handler) ---
 
     let header_provider = headers
@@ -3315,7 +3415,7 @@ async fn codex_ws_handler_inner(
             .into_response();
     }
 
-    let provider_lookup = if let Some(v) = state.config.resolve_provider(&provider_name) {
+    let provider_lookup = if let Some(v) = state.resolve_provider(&provider_name) {
         v
     } else {
         let available = state.config.provider_names();
@@ -4141,7 +4241,6 @@ async fn resolve_oauth_access_token_using_client(
     // differs from provider type, e.g., [providers.my-claude] with type = "anthropic").
     // Falls back to matching on the config section name for backward compatibility.
     let provider = state
-        .config
         .resolve_provider(provider_name)
         .and_then(|lookup| OAuthProviderKind::from_str(&lookup.config.type_))
         .or_else(|| OAuthProviderKind::from_str(provider_name))
@@ -5463,6 +5562,7 @@ mod tests {
 
     fn make_config(providers: HashMap<String, ProviderConfig>) -> AppConfig {
         AppConfig {
+            reload_restart_input: None,
             server: crate::config::ServerConfig::default(),
             providers,
             upstream: HashMap::new(),
@@ -8163,6 +8263,148 @@ mod tests {
         }
         assert_eq!(stripped, 6); // Four inbound strips, two policy reinjections.
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Assertions verify admin auth, CAS and actual forwarded credentials; fixture errors propagate"
+    )]
+    async fn admin_rotation_changes_live_credentials_without_restart() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(
+            (0..3)
+                .map(|_| ResponseSpec {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    chunks: vec![Bytes::from_static(b"{}")],
+                })
+                .collect(),
+        );
+        let mut config = make_config(HashMap::new());
+        config.keys.master_key = Some("synthetic-admin".into());
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+        let store = Arc::new(crate::provider_store::ProviderStore::in_memory().await?);
+        state
+            .provider_store
+            .set(store.clone())
+            .map_err(|_| anyhow::anyhow!("store already initialized"))?;
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .route(
+                "/admin/providers",
+                axum::routing::post(crate::api::upsert_provider_handler),
+            )
+            .route(
+                "/admin/providers/:name/credentials",
+                axum::routing::post(crate::api::credentials::rotate),
+            )
+            .route(
+                "/admin/providers/:name/credentials/rollback",
+                axum::routing::post(crate::api::credentials::rollback),
+            )
+            .with_state(state);
+        let created = app.clone().oneshot(http::Request::builder().method("POST")
+            .uri("/admin/providers").header("content-type", "application/json")
+            .header("authorization", "Bearer synthetic-admin")
+            .body(Body::from(json!({"name":"managed", "config":{"type":"openai-compatible", "base_url":"http://up/v1", "api_key":"synthetic-old"}}).to_string()))?).await?;
+        assert_eq!(created.status(), StatusCode::OK);
+        let metadata = axum::body::to_bytes(created.into_body(), usize::MAX).await?;
+        assert!(!String::from_utf8_lossy(&metadata).contains("synthetic-old"));
+        let metadata: Value = serde_json::from_slice(&metadata)?;
+        let revision = metadata["updated_at"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing revision"))?;
+        for (token, secret, expected) in [
+            ("wrong-admin", "synthetic-new", StatusCode::UNAUTHORIZED),
+            ("synthetic-admin", "", StatusCode::BAD_REQUEST),
+            ("synthetic-admin", "synthetic-new", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    http::Request::builder()
+                        .method("POST")
+                        .uri("/admin/providers/managed/credentials")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(
+                            json!({"expected_revision":revision, "api_key":secret}).to_string(),
+                        ))?,
+                )
+                .await?;
+            assert_eq!(response.status(), expected);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+            assert!(!String::from_utf8_lossy(&bytes).contains("synthetic-new"));
+            if expected != StatusCode::OK {
+                assert_eq!(
+                    store
+                        .get_provider("managed")
+                        .ok_or_else(|| anyhow::anyhow!("missing provider"))?
+                        .config["api_key"],
+                    "synthetic-old"
+                );
+            }
+        }
+        let conflict_response = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/providers/managed/credentials")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer synthetic-admin")
+                    .body(Body::from(
+                        json!({"expected_revision":revision, "api_key":"synthetic-stale"})
+                            .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
+        for expected_key in ["synthetic-new", "synthetic-old"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    http::Request::builder()
+                        .method("POST")
+                        .uri("/managed/v1/responses")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"model":"gpt-fixture", "input":"offline fixture"}).to_string(),
+                        ))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let requests = mock.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0]
+                    .headers
+                    .get("authorization")
+                    .and_then(|header| header.to_str().ok()),
+                Some(format!("Bearer {expected_key}").as_str())
+            );
+            if expected_key == "synthetic-new" {
+                let current = store
+                    .get_provider("managed")
+                    .ok_or_else(|| anyhow::anyhow!("missing provider"))?
+                    .updated_at
+                    .to_rfc3339();
+                let response = app
+                    .clone()
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri("/admin/providers/managed/credentials/rollback")
+                            .header("content-type", "application/json")
+                            .header("authorization", "Bearer synthetic-admin")
+                            .body(Body::from(json!({"expected_revision":current}).to_string()))?,
+                    )
+                    .await?;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
         Ok(())
     }
 

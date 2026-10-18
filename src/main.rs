@@ -11,8 +11,12 @@ mod capture;
 mod cli;
 mod config;
 mod delegated_fetch;
+mod device;
+mod device_ingress;
 mod egress;
+mod enrollment;
 mod export;
+mod fleet;
 mod jobs;
 mod keys;
 mod logging;
@@ -23,18 +27,22 @@ mod model_discovery;
 mod network_acl;
 mod oauth;
 mod paths;
+mod pi_messages;
 mod plugins;
 mod policy;
+mod program_status;
 mod provider;
 mod provider_probe;
 mod provider_store;
 mod provider_templates;
 mod proxy;
+mod routing;
 mod runtime_state;
 mod setup;
 mod state;
 mod transform;
 mod transform_plugins;
+mod tui;
 mod types;
 mod upstream;
 mod upstream_quota;
@@ -71,8 +79,39 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { host, port, config } => {
-            run_server(host, port, config).await;
+        Commands::Device(args) => {
+            if let Err(error) = device::run_cli(args).await {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Fleet(args) => {
+            if let Err(error) = fleet::run_cli(args).await {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Tui { fleet } => {
+            let result = async {
+                let path = match fleet {
+                    Some(path) => path,
+                    None => paths::config_dir()?.join("eavs").join("fleet.toml"),
+                };
+                tui::run(&path).await
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Serve {
+            host,
+            port,
+            config,
+            device_listen,
+        } => {
+            run_server(host, port, config, device_listen).await;
         }
         Commands::Service { action } => {
             if let Err(e) = run_service_command(action).await {
@@ -595,6 +634,7 @@ async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> 
                 }
 
                 details.push(ProviderDetail {
+                    file_routing_generation: None,
                     name: name.clone(),
                     type_: provider_config.type_.clone(),
                     pi_api: pi_api_for_provider(&provider_type),
@@ -696,7 +736,16 @@ async fn run_auth_command(action: AuthCommands) -> Result<(), cli::CliError> {
     }
 }
 
-async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option<String>) {
+async fn run_server(
+    host: Option<String>,
+    port: Option<u16>,
+    config_path: Option<String>,
+    device_listen: Option<std::net::SocketAddr>,
+) {
+    if device_listen.is_some_and(|address| !address.ip().is_loopback()) {
+        eprintln!("Device ingress must bind loopback; expose it through an explicit HTTPS proxy");
+        return;
+    }
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -706,19 +755,14 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         .init();
 
     // Load config
-    let mut config = if let Some(path) = config_path {
-        AppConfig::load_from(&path).expect("Failed to load configuration")
+    let mut config = if let Some(path) = config_path.as_deref() {
+        AppConfig::load_from(path).expect("Failed to load configuration")
     } else {
         AppConfig::load_or_init().expect("Failed to load configuration")
     };
 
     // Override with CLI args
-    if let Some(h) = host {
-        config.server.host = h;
-    }
-    if let Some(p) = port {
-        config.server.port = p;
-    }
+    config.apply_server_overrides(host.as_deref(), port);
 
     let listener_token = config.resolved_listener_auth_token().unwrap_or_else(|| {
         panic!(
@@ -752,6 +796,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
 
     // Initialize state
     let state = AppState::new(config);
+    if state
+        .routing
+        .configure(move || {
+            let mut candidate = AppConfig::load_for_reload(config_path.as_deref())
+                .map_err(|_| crate::routing::Failure::InvalidConfiguration)?;
+            candidate.apply_server_overrides(host.as_deref(), port);
+            Ok(candidate)
+        })
+        .is_err()
+    {
+        tracing::error!("File routing reload unavailable; startup routing remains active");
+    }
 
     // Initialize key store if enabled
     if keys_enabled {
@@ -785,12 +841,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
 
     // Build router
     let app = Router::new()
+        .route("/admin/routing", get(api::routing::metadata))
+        .route(
+            "/admin/routing/reload",
+            post(api::routing::reload).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
         // Health check
         .route("/health", get(api::health_handler))
         .route("/defaults", get(api::defaults_handler))
         // Control API - Providers
         .route("/providers", get(api::providers_handler))
         .route("/providers/detail", get(api::providers_detail_handler))
+        .route("/v1/eavs/catalog", get(api::serving_catalog::handler))
         .route("/providers/templates", get(api::provider_templates_handler))
         // Control API - Conversations
         .route("/conversations", get(api::conversations_handler))
@@ -809,6 +871,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Control API - Logs
         .route("/logs/stream", get(api::logs_stream_handler))
         // Admin API - Virtual Keys
+        .route(
+            "/admin/device-invitations",
+            post(enrollment::http::issue).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/admin/device-invitations/revoke",
+            post(enrollment::http::revoke).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/device-enrollment/redeem",
+            post(enrollment::http::redeem).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
         .route("/admin/keys", post(api::create_key_handler))
         .route("/admin/keys", get(api::list_keys_handler))
         .route("/admin/keys/stats", get(api::key_stats_handler))
@@ -822,6 +896,19 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         )
         // Admin API - Providers
         .route("/admin/providers", post(api::upsert_provider_handler))
+        .route(
+            "/admin/providers/create",
+            post(api::create_provider_handler),
+        )
+        .route("/admin/providers/sources", get(api::credentials::sources))
+        .route(
+            "/admin/providers/:name/credentials",
+            post(api::credentials::rotate),
+        )
+        .route(
+            "/admin/providers/:name/credentials/rollback",
+            post(api::credentials::rollback),
+        )
         .route("/admin/providers", get(api::list_providers_handler))
         .route(
             "/admin/providers/from-template",
@@ -905,7 +992,7 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
         // Default proxy route with X-Provider header or auto-detection
         .route("/v1/*path", any(proxy::proxy_handler))
         .route("/v2/*path", any(proxy::proxy_handler))
-        .with_state(state)
+        .with_state(state.clone())
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal
         // configuration or process requests.
@@ -913,6 +1000,18 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
             api::ListenerAuth::new(listener_token),
             api::require_listener_auth,
         ));
+
+    let device_listener = if let Some(address) = device_listen {
+        match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => Some(listener),
+            Err(_) => {
+                tracing::error!("Device listener bind failed; server not started");
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     // Start mitmproxy capture if enabled
     let _capture_handle = if capture_config.enabled {
@@ -941,7 +1040,20 @@ async fn run_server(host: Option<String>, port: Option<u16>, config_path: Option
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    if let Some(device_listener) = device_listener {
+        let device_app = device_ingress::router(state);
+        tracing::info!("Device-only listener enabled; external HTTPS remains required");
+        tokio::select! {
+            result = async {axum::serve(listener, app).await} => {
+                if result.is_err() {tracing::error!("Operator listener stopped with an error");}
+            }
+            result = async {axum::serve(device_listener, device_app).await} => {
+                if result.is_err() {tracing::error!("Device listener stopped with an error");}
+            }
+        }
+    } else {
+        axum::serve(listener, app).await.unwrap();
+    }
 
     // Clean up capture on shutdown (handle will be dropped automatically)
     if let Some(handle) = _capture_handle {

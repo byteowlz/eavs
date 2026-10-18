@@ -11,18 +11,50 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::path::Path;
 use std::sync::Arc;
 
+mod credentials;
+#[cfg(test)]
+mod credentials_tests;
+pub use credentials::CredentialRevision;
+
+fn serialize_provider_metadata<S: serde::Serializer>(
+    config: &serde_json::Value,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // Config can contain credentials in URLs, headers or arbitrary nested
+    // fields. Return an explicit metadata allowlist, not recursive guesses.
+    let provider_type = config
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| crate::provider::ProviderType::try_from_str(value).is_some());
+    serde_json::json!({"type": provider_type}).serialize(serializer)
+}
+
 /// Provider entry with metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderEntry {
     /// Provider name (e.g., "openai", "anthropic")
     pub name: String,
-    /// Provider configuration (JSON)
+    /// Internal configuration; API serialization exposes metadata only.
+    #[serde(serialize_with = "serialize_provider_metadata")]
     pub config: serde_json::Value,
     /// When this provider was added/modified
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Whether this provider is enabled
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for ProviderEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderEntry")
+            .field("name", &self.name)
+            .field("config", &"[redacted]")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 /// Create/update provider request.
@@ -48,6 +80,7 @@ pub enum ProviderStoreError {
     Serialization(String),
     Io(String),
     NotFound,
+    Conflict,
 }
 
 impl std::fmt::Display for ProviderStoreError {
@@ -57,6 +90,10 @@ impl std::fmt::Display for ProviderStoreError {
             Self::Serialization(e) => write!(f, "Serialization error: {e}"),
             Self::Io(e) => write!(f, "IO error: {e}"),
             Self::NotFound => write!(f, "Provider not found"),
+            Self::Conflict => write!(
+                f,
+                "Provider revision changed; fetch current metadata and retry"
+            ),
         }
     }
 }
@@ -69,6 +106,7 @@ pub struct ProviderStore {
     pool: Pool<Sqlite>,
     /// In-memory cache for fast lookups (provider name -> `ProviderEntry`)
     cache: Arc<DashMap<String, ProviderEntry>>,
+    writes: tokio::sync::Mutex<()>,
 }
 
 impl ProviderStore {
@@ -94,7 +132,11 @@ impl ProviderStore {
 
         let cache = Arc::new(DashMap::new());
 
-        let store = Self { pool, cache };
+        let store = Self {
+            pool,
+            cache,
+            writes: tokio::sync::Mutex::new(()),
+        };
 
         // Populate cache from database
         store.refresh_cache().await?;
@@ -116,6 +158,7 @@ impl ProviderStore {
         Ok(Self {
             pool,
             cache: Arc::new(DashMap::new()),
+            writes: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -136,6 +179,9 @@ impl ProviderStore {
         .execute(pool)
         .await
         .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
+
+        sqlx::query("CREATE TABLE IF NOT EXISTS provider_credential_rollback (name TEXT PRIMARY KEY, current_revision TEXT NOT NULL, previous_config TEXT NOT NULL)")
+            .execute(pool).await.map_err(|e| ProviderStoreError::Database(e.to_string()))?;
 
         // Model shortlist table
         sqlx::query(
@@ -162,6 +208,7 @@ impl ProviderStore {
 
     /// Refresh the in-memory cache from the database.
     pub async fn refresh_cache(&self) -> Result<(), ProviderStoreError> {
+        let _guard = self.writes.lock().await;
         let rows: Vec<ProviderRow> = sqlx::query_as(
             "SELECT name, config, created_at, updated_at, enabled FROM providers WHERE enabled = 1",
         )
@@ -184,6 +231,23 @@ impl ProviderStore {
         &self,
         request: ProviderRequest,
     ) -> Result<ProviderEntry, ProviderStoreError> {
+        self.save_provider(request, false).await
+    }
+
+    /// Create only; never overwrite an existing provider after a stale preview.
+    pub async fn create_provider(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<ProviderEntry, ProviderStoreError> {
+        self.save_provider(request, true).await
+    }
+
+    async fn save_provider(
+        &self,
+        request: ProviderRequest,
+        create_only: bool,
+    ) -> Result<ProviderEntry, ProviderStoreError> {
+        let _guard = self.writes.lock().await;
         let now = Utc::now();
 
         // Check if provider already exists
@@ -194,6 +258,9 @@ impl ProviderStore {
                 .await
                 .map_err(|e| ProviderStoreError::Database(e.to_string()))?;
 
+        if create_only && existing > 0 {
+            return Err(ProviderStoreError::Conflict);
+        }
         let config_json = serde_json::to_string(&request.config)
             .map_err(|e| ProviderStoreError::Serialization(e.to_string()))?;
 
@@ -275,8 +342,21 @@ impl ProviderStore {
             .collect()
     }
 
+    /// Inventory includes disabled declarations without activating them.
+    pub async fn list_all_providers(&self) -> Result<Vec<ProviderEntry>, ProviderStoreError> {
+        let rows: Vec<ProviderRow> =
+            sqlx::query_as("SELECT name, config, created_at, updated_at, enabled FROM providers")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|_| {
+                    ProviderStoreError::Database("Provider inventory unavailable".into())
+                })?;
+        rows.into_iter().map(ProviderRow::to_entry).collect()
+    }
+
     /// Delete a provider.
     pub async fn delete_provider(&self, name: &str) -> Result<bool, ProviderStoreError> {
+        let _guard = self.writes.lock().await;
         let result = sqlx::query("DELETE FROM providers WHERE name = ?")
             .bind(name)
             .execute(&self.pool)

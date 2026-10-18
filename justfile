@@ -33,6 +33,93 @@ lint-rust-ai-guardrails:
 test:
     cargo test --locked
 
+# Offline file-provider reload and generation-safety regressions.
+test-routing:
+    cargo test --locked routing::
+
+# Synthetic loopback-only device enrollment/catalog/storage regressions.
+test-device:
+    cargo test --locked device::
+
+# Dedicated phone ingress: authority separation, revocation and bounded claims.
+# Typed invitation CLI/private QR publication; synthetic operator only
+test-device-invitations:
+    cargo test --locked device::invitation::tests
+
+test-device-ingress:
+    cargo test --locked device_ingress::
+
+# Offline scoped serving-catalog authorization and projection regressions.
+test-serving-catalog:
+    cargo test --locked api::serving_catalog::
+
+# Additional Pi wire interface; offline conversion/admission fixtures.
+test-pi-messages:
+    cargo test --locked pi_messages::
+
+# POSIX-only offline fleet TUI lifecycle and confirmation proof
+test-fleet-tui:
+    cargo build --locked
+    python3 scripts/test_fleet_tui.py
+
+# Shared emitter fixtures + actual TUI capture validation (explicit local checker)
+test-program-status checker:
+    python3 -m unittest discover -s "$(dirname {{quote(checker)}})" -v
+    BYTEOWLZ_OSC7501_CHECKER={{quote(checker)}} just test-fleet-tui
+
+# Reusable, shared-design-system UI; no package install or gateway calls
+build-control-room:
+    bun run ui/control-room/build.js
+
+# Pure planning/client/adapter tests against the built shared module
+test-control-room: build-control-room
+    bun test ui/control-room/tests
+
+# Public declaration contract; explicit existing compiler, never auto-installed
+check-control-room-types compiler:
+    bun {{quote(compiler)}} -p ui/control-room/tsconfig.json
+
+# Browser/lifecycle proof against an explicitly running read-only demo host
+test-control-room-browser base="http://127.0.0.1:5281":
+    python3 ui/control-room/tests/browser.py --base {{quote(base)}}
+
+# Offline Pi config merge preservation/fail-closed regression tests.
+test-pi-adapter:
+    bun test adapters/pi/adapter.test.ts
+
+# Scoped shared provider library and dynamic Pi extension, synthetic loopback only.
+test-pi-device-library:
+    bun test adapters/pi/provider-library.test.ts adapters/pi/extension.test.ts
+    node --test scripts/test_pi_live_node.ts
+
+# Strict source + REAL installed Pi SDK declarations; no install or library waiver.
+check-pi-extension-types compiler pi_package:
+    node scripts/check_pi_extension_types.mjs {{quote(compiler)}} {{quote(pi_package)}}
+
+# Actual Pi parser/interpolation against an explicit synthetic generated models.json.
+test-pi-device-sdk pi_source fixture:
+    bun scripts/test_pi_config_sdk.ts {{quote(pi_source)}} {{quote(fixture)}}
+
+# Actual source Rust CLI + Go workflow bridge; synthetic loopback only, no inference.
+test-desktop-device:
+    cargo build --locked
+    cd ui/desktop/control && EAVS_DESKTOP_EAVS_BINARY={{quote(justfile_directory() + "/target/debug/eavs")}} GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -count=1 -race -run TestRealRustDeviceEnrollmentAndPiPublication ./...
+
+# Standard-library native-desktop control adapter; no downloads or gateway calls.
+test-desktop-control:
+    cd ui/desktop/control && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -race ./...
+    cd ui/desktop/control && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go vet ./...
+
+# Native MyGo tests/build: requires provisioned Go 1.27.1 and cached modules.
+check-desktop-native:
+    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -race ./...
+    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go vet ./...
+    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go build -o build/eavs-desktop .
+
+# Actual isolated Linux native window/keyboard capture; no service or inference.
+test-desktop-window output:
+    python3 scripts/test_desktop_native_window.py --binary ui/desktop/build/eavs-desktop --output {{quote(output)}}
+
 # Explicit integration-feature compile gate (no live provider needed)
 check-all-features:
     cargo check --locked --all-targets --all-features

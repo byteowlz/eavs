@@ -9,6 +9,7 @@ pub struct PolicyViolation {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct PolicyConfig {
     pub enabled: bool,
     pub rules: Vec<PolicyRule>,
@@ -16,6 +17,7 @@ pub struct PolicyConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[derive(PartialEq)]
 pub enum PolicyRule {
     /// Deny a request outright.
     Deny {

@@ -14,6 +14,7 @@ pub struct DelegatedFetchPolicy {
 /// denied unless explicitly enabled/allowlisted.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
+#[derive(PartialEq)]
 pub struct DelegatedFetchConfig {
     /// Permit provider-delegated remote file, image, and document content.
     pub enabled: bool,

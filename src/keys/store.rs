@@ -10,6 +10,8 @@
 //! - Batched SQLite writes via background task
 //! - Configurable sync intervals
 
+mod enrollment;
+
 use crate::keys::generation::{generate_human_id, generate_key, hash_key};
 use crate::keys::types::{
     BudgetWindow, CreateKeyRequest, CreateKeyResponse, KeyInfo, KeyPermissions, KeyUsage,
@@ -90,6 +92,7 @@ impl KeyStore {
         };
 
         // Populate cache from database
+        store.init_enrollment().await?;
         store.refresh_cache().await?;
 
         Ok(store)
@@ -105,6 +108,7 @@ impl KeyStore {
             .map_err(|e| KeyStoreError::Database(e.to_string()))?;
 
         Self::run_migrations(&pool).await?;
+        enrollment::migrate(&pool).await?;
 
         Ok(Self {
             pool,

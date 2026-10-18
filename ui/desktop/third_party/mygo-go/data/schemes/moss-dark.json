@@ -1,0 +1,36 @@
+{
+	"id": "moss-dark",
+	"name": "Moss Dark",
+	"mode": "dark",
+	"system": "base24",
+	"slots": {
+		"base00": "#201d19",
+		"base01": "#292521",
+		"base02": "#322f29",
+		"base03": "#5d5951",
+		"base04": "#afa99b",
+		"base05": "#e6dfd0",
+		"base06": "#efe9db",
+		"base07": "#f6f2e5",
+		"base08": "#944b42",
+		"base09": "#d39e7a",
+		"base0A": "#d7c290",
+		"base0B": "#9bc093",
+		"base0C": "#94bbaf",
+		"base0D": "#91b1be",
+		"base0E": "#ce9c9f",
+		"base0F": "#ab947b",
+		"base10": "#1b1815",
+		"base11": "#171512",
+		"base12": "#d19380",
+		"base13": "#e5d3a8",
+		"base14": "#b2d2aa",
+		"base15": "#aacdc2",
+		"base16": "#aac6d2",
+		"base17": "#dfb4b6"
+	},
+	"overrides": {
+		"--terminal-bg": "#171512",
+		"--code-bg": "#1b1815"
+	}
+}

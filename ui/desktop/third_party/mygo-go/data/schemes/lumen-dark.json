@@ -1,0 +1,37 @@
+{
+	"id": "lumen-dark",
+	"name": "Lumen Dark",
+	"mode": "dark",
+	"system": "base24",
+	"slots": {
+		"base00": "#0b0c0e",
+		"base01": "#151617",
+		"base02": "#1e1f21",
+		"base03": "#4c4d50",
+		"base04": "#a1a3a6",
+		"base05": "#eff0f1",
+		"base06": "#f7f8f9",
+		"base07": "#ffffff",
+		"base08": "#c83a35",
+		"base09": "#f2985f",
+		"base0A": "#e9d574",
+		"base0B": "#f6b454",
+		"base0C": "#8ac4c0",
+		"base0D": "#81b2d2",
+		"base0E": "#dd939e",
+		"base0F": "#b0927a",
+		"base10": "#080809",
+		"base11": "#050607",
+		"base12": "#f27166",
+		"base13": "#f6e697",
+		"base14": "#ffca80",
+		"base15": "#a9d9d5",
+		"base16": "#9dc7e4",
+		"base17": "#efacb5"
+	},
+	"overrides": {
+		"--terminal-bg": "#050607",
+		"--code-bg": "#080809",
+		"--code-border": "#1e1f21"
+	}
+}

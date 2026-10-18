@@ -2,8 +2,13 @@
 name = "eavs"
 version = "0.8.3"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+ratatui = "0.30"
+crossterm = "0.29"
+byteowlz-tui-kit = { git = "https://github.com/byteowlz/xlatch.git", rev = "783568c6d55e582fe535405627670ffaa72d8deb" }
 axum = { version = "0.7", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -51,11 +56,10 @@ async-trait = "0.1"
 dialoguer = "0.11"
 zstd = "0.13.3"
 
+tempfile = "3.23.0"
+
 [features]
 integration = []
-
-[dev-dependencies]
-tempfile = "3.23.0"
 
 # Template maximum policy, staged for this existing codebase:
 # Keep debt visible as warnings in ordinary builds/tests so source remediation

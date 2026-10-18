@@ -607,10 +607,6 @@ impl SharedPricingTable {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Public API lookup; retained for external consumers"
-    )]
     pub async fn get(&self, model: &str) -> Option<ModelPricing> {
         self.inner.read().await.get(model).cloned()
     }

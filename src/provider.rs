@@ -612,6 +612,7 @@ pub fn detect_provider_from_model(model: &str) -> Option<&'static str> {
 /// Some providers have slight differences from the `OpenAI` API.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
+#[derive(PartialEq, serde::Serialize)]
 pub struct CompatSettings {
     /// Whether provider supports the `store` field (default: true)
     pub supports_store: Option<bool>,

@@ -138,21 +138,25 @@ runAdapter({
 
   merge(req: MergeRequest): Record<string, unknown> {
     // Parse the existing config
-    let existing: { providers?: Record<string, unknown> };
+    const failure = () => new Error(
+      "Cannot merge invalid Pi configuration; repair the existing JSON object and providers map before retrying. No replacement was generated."
+    );
+    let existing: Record<string, unknown>;
+    const record = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
     try {
-      existing = JSON.parse(req.existing);
+      const parsed: unknown = JSON.parse(req.existing);
+      if (!record(parsed)) throw failure();
+      existing = parsed;
     } catch {
-      // If existing file is invalid, treat as fresh export
-      return {
-        providers: buildEavsProviders(
-          req.providers,
-          req.base_url,
-          req.api_key
-        ),
-      };
+      // Never include parser snippets: existing config may contain credentials.
+      throw failure();
     }
-
-    const providers = existing.providers ?? {};
+    const root = existing.providers;
+    if (root !== undefined && (!record(root) || Object.values(root).some(value => !record(value)))) {
+      throw failure();
+    }
+    const providers: Record<string, unknown> = { ...(root as Record<string, unknown> | undefined) };
 
     // Remove all eavs-managed entries (anything prefixed with "eavs-")
     for (const key of Object.keys(providers)) {

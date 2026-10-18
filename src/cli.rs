@@ -53,8 +53,22 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Explicit device connections and scope-filtered live inventory.
+    Device(crate::device::DeviceArgs),
+    /// Manage providers across independent eavs instances (preview by default)
+    Fleet(crate::fleet::FleetArgs),
+    /// Interactive fleet provider administration
+    Tui {
+        /// Fleet registry TOML (defaults to XDG eavs/fleet.toml)
+        #[arg(long, env = "EAVS_FLEET")]
+        fleet: Option<std::path::PathBuf>,
+    },
     /// Start the EAVS proxy server (foreground)
     Serve {
+        /// Optional device-only loopback listener; expose externally through HTTPS
+        #[arg(long, value_parser = crate::device_ingress::listener_address)]
+        device_listen: Option<std::net::SocketAddr>,
+
         /// Host to bind to
         #[arg(short = 'H', long, env = "EAVS_HOST")]
         host: Option<String>,
