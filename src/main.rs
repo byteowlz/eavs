@@ -10,6 +10,7 @@ mod aws_sigv4;
 mod capture;
 mod cli;
 mod config;
+mod cors;
 mod delegated_fetch;
 mod device;
 mod device_ingress;
@@ -17,6 +18,7 @@ mod egress;
 mod enrollment;
 mod export;
 mod fleet;
+mod inference_ingress;
 mod jobs;
 mod keys;
 mod logging;
@@ -790,6 +792,13 @@ async fn run_server(
     let cleanup_interval = config.state.cleanup_interval_secs;
     let keys_enabled = config.keys.enabled;
     let capture_config = config.capture.clone();
+    let cors = match cors::layer(&config.server.cors_allowed_origins) {
+        Ok(layer) => layer,
+        Err(error) => {
+            tracing::error!("{error}; server not started");
+            return;
+        }
+    };
     let server_port = config.server.port;
     let egress_config = config.egress.clone();
     let egress_network = config.network.clone();
@@ -819,6 +828,37 @@ async fn run_server(
             tracing::error!("Failed to initialize OAuth store: {}", e);
         }
     }
+
+    // Separate, opt-in native inference surface; fail startup before serving
+    // anything if its authority, transport policy, or bind is unavailable.
+    let inference_surface = match state.config.inference.address() {
+        Ok(Some(address)) => {
+            let mut forbidden = vec![listener_token.clone()];
+            if let Some(master) = state.config.keys.resolved_master_key() {
+                forbidden.push(master);
+            }
+            let app = match inference_ingress::router(state.clone(), forbidden) {
+                Ok(app) => app,
+                Err(error) => {
+                    tracing::error!("{error}; server not started");
+                    return;
+                }
+            };
+            let listener = match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => listener,
+                Err(_) => {
+                    tracing::error!("Inference listener bind failed; server not started");
+                    return;
+                }
+            };
+            Some((listener, app))
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::error!("{error}; server not started");
+            return;
+        }
+    };
 
     // Initialize provider store (for admin CRUD API)
     if let Err(e) = state.init_provider_store().await {
@@ -999,7 +1039,9 @@ async fn run_server(
         .layer(middleware::from_fn_with_state(
             api::ListenerAuth::new(listener_token),
             api::require_listener_auth,
-        ));
+        ))
+        // Outermost: preflight has no capability; actual requests still pass auth.
+        .layer(cors);
 
     let device_listener = if let Some(address) = device_listen {
         match tokio::net::TcpListener::bind(address).await {
@@ -1040,19 +1082,29 @@ async fn run_server(
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    if let Some(device_listener) = device_listener {
-        let device_app = device_ingress::router(state);
-        tracing::info!("Device-only listener enabled; external HTTPS remains required");
-        tokio::select! {
-            result = async {axum::serve(listener, app).await} => {
-                if result.is_err() {tracing::error!("Operator listener stopped with an error");}
-            }
-            result = async {axum::serve(device_listener, device_app).await} => {
-                if result.is_err() {tracing::error!("Device listener stopped with an error");}
-            }
+    let device_state = state.clone();
+    tokio::select! {
+        result = async { axum::serve(listener, app).await } => {
+            if result.is_err() { tracing::error!("Operator listener stopped with an error"); }
         }
-    } else {
-        axum::serve(listener, app).await.unwrap();
+        result = async {
+            if let Some(listener) = device_listener {
+                axum::serve(listener, device_ingress::router(device_state)).await
+            } else {
+                std::future::pending::<std::io::Result<()>>().await
+            }
+        } => {
+            if result.is_err() { tracing::error!("Device listener stopped with an error"); }
+        }
+        result = async {
+            if let Some((listener, app)) = inference_surface {
+                axum::serve(listener, app).await
+            } else {
+                std::future::pending::<std::io::Result<()>>().await
+            }
+        } => {
+            if result.is_err() { tracing::error!("Inference listener stopped with an error"); }
+        }
     }
 
     // Clean up capture on shutdown (handle will be dropped automatically)

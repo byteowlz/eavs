@@ -86,6 +86,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
+    pub inference: crate::inference_ingress::Config,
+    #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     /// Legacy support: map upstream -> providers
     #[serde(default)]
@@ -133,6 +135,7 @@ impl AppConfig {
         Self {
             reload_restart_input: None,
             server: ServerConfig::default(),
+            inference: Default::default(),
             providers: HashMap::new(),
             upstream: HashMap::new(),
             logging: LoggingConfig::default(),
@@ -247,6 +250,9 @@ pub struct ServerConfig {
     /// Capability token required by the HTTP listener. Supports `env:`,
     /// `keychain:`, and literal secret references. `EAVS_AUTH_TOKEN` overrides it.
     pub auth_token: Option<String>,
+    /// Exact browser origins permitted on the operator listener; empty disables CORS.
+    /// Cookies are never enabled. This is not an authorization boundary.
+    pub cors_allowed_origins: Vec<String>,
     /// Maximum request body size in bytes. Default: 10 MB.
     /// Set to 0 for unlimited (not recommended).
     pub max_body_size: usize,
@@ -260,6 +266,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3033,
             auth_token: None,
+            cors_allowed_origins: Vec::new(),
             max_body_size: 10 * 1024 * 1024, // 10 MB default
             log_redact: true,
         }

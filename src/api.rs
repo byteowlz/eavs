@@ -2301,6 +2301,7 @@ mod tests {
     /// the OAuth handlers can pass `check_oauth_available`.
     async fn mock_oauth_state() -> AppState {
         let mut config = AppConfig {
+            inference: Default::default(),
             reload_restart_input: None,
             server: ServerConfig::default(),
             providers: HashMap::new(),
@@ -2428,6 +2429,7 @@ mod tests {
     }
     fn mock_state() -> AppState {
         let config = AppConfig {
+            inference: Default::default(),
             reload_restart_input: None,
             server: ServerConfig::default(),
             providers: HashMap::new(),
@@ -2472,6 +2474,7 @@ mod tests {
         let config = AppConfig {
             reload_restart_input: None,
             server: ServerConfig::default(),
+            inference: Default::default(),
             providers,
             upstream: HashMap::new(),
             logging: LoggingConfig::default(),

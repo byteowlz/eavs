@@ -1503,6 +1503,17 @@ pub async fn proxy_handler_pinned(
         }
     }
 
+    // Only the isolated inference ingress can supply these allowlisted,
+    // key-namespaced retry/request semantics; never copy arbitrary client headers.
+    if let Some(headers) = parts
+        .extensions
+        .get::<crate::inference_ingress::NativeHeaders>()
+    {
+        for (name, value) in &headers.0 {
+            upstream_headers.insert(name.clone(), value.clone());
+        }
+    }
+
     // Auto-detect Anthropic beta headers based on request content.
     //
     // - Anthropic direct: apply to all requests when needed.
@@ -5564,6 +5575,7 @@ mod tests {
         AppConfig {
             reload_restart_input: None,
             server: crate::config::ServerConfig::default(),
+            inference: Default::default(),
             providers,
             upstream: HashMap::new(),
             logging: crate::config::LoggingConfig::default(),

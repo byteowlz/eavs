@@ -188,6 +188,7 @@ mod tests {
         AppConfig {
             reload_restart_input: None,
             server: Default::default(),
+            inference: Default::default(),
             providers,
             upstream: HashMap::new(),
             logging: Default::default(),
