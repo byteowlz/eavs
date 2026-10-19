@@ -376,6 +376,7 @@ pub fn validate_input(input: &serde_json::Value) -> Result<(), Failure> {
     let root = input.as_object().ok_or(Failure::InvalidConfiguration)?;
     let allowed = [
         "server",
+        "inference",
         "providers",
         "upstream",
         "logging",
