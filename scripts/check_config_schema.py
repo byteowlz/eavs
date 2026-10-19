@@ -59,6 +59,13 @@ def field_coverage(schema):
         documented = set(node.get("properties", {}))
         if fields != documented:
             raise ValueError(f"{name} field drift: missing={fields - documented}, extra={documented - fields}")
+    ingress_source = (ROOT / "src/inference_ingress.rs").read_text()
+    ingress_body = re.search(r"pub struct Config\s*\{(.*?)\n\}", ingress_source, re.S)
+    if ingress_body is None:
+        raise ValueError("Cannot locate inference ingress Config")
+    ingress_fields = set(re.findall(r"^\s*pub (\w+):", ingress_body[1], re.M))
+    if ingress_fields != set(p["inference"].get("properties", {})):
+        raise ValueError("Inference ingress config field drift")
     body = re.search(r"pub struct MockResponsesConfig\s*\{(.*?)\n\}", source, re.S)[1]
     if not re.search(r"#\[serde\(flatten\)\]\s*pub responses: HashMap<String, MockResponse>", body):
         raise ValueError("MockResponsesConfig flatten mapping changed")

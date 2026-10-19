@@ -31,6 +31,7 @@ class ConfigSchemaTests(unittest.TestCase):
     def test_nested_field_removal_regressions(self):
         paths = [
             ('properties', 'egress', 'properties', 'dns_port'),
+            ('properties', 'inference', 'properties', 'cors_allowed_origins'),
             ('properties', 'native_pricing', 'properties', 'jobs'),
             ('$defs', 'mockResponse', 'properties', 'arguments'),
             ('$defs', 'transformPlugin', 'properties', 'timeout_ms'),
@@ -48,6 +49,9 @@ class ConfigSchemaTests(unittest.TestCase):
     def test_nested_invalid_values(self):
         invalid = [
             {'network': {'allow_domains': [1]}},
+            {'inference': {'listen': 3035}},
+            {'inference': {'cors_allowed_origins': [1]}},
+            {'inference': {'typo': True}},
             {'network': {'trusted_private_endpoints': [{'host': 'x', 'port': 80}]}},
             {'network': {'trusted_private_endpoints': [{'host': 'x', 'port': 80, 'address': 'example.org'}]}},
             {'egress': {'port': 65536}},

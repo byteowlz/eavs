@@ -37,6 +37,12 @@
             "keychain:eavs-listener"
           ]
         },
+        "cors_allowed_origins": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Exact HTTP(S) browser origins allowed on the operator listener, without trailing slash. Empty disables cross-origin access; cookies are not enabled. Not authorization."
+        },
         "max_body_size": {
           "type": "integer",
           "minimum": 0,
@@ -45,6 +51,15 @@
         "log_redact": {
           "type": "boolean"
         }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Default-disabled ordinary-key-only native inference listener, separate from operator/device surfaces.",
+      "properties": {
+        "listen": { "type": ["string", "null"], "description": "Explicit nonzero loopback IP:port; omit to disable" },
+        "cors_allowed_origins": { "type": "array", "items": { "type": "string" }, "default": [] }
       }
     },
     "providers": {

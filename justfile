@@ -33,6 +33,14 @@ lint-rust-ai-guardrails:
 test:
     cargo test --locked
 
+# Isolated ordinary-key native inference ingress; synthetic transports only.
+test-inference-ingress:
+    cargo test --locked inference_ingress:: -- --test-threads=1
+
+# Offline browser preflight/authentication and SSE transport regressions.
+test-cors:
+    cargo test --locked cors:: -- --test-threads=1
+
 # Offline file-provider reload and generation-safety regressions.
 test-routing:
     cargo test --locked routing::
