@@ -85,6 +85,15 @@ fn native_inference_method(path: &str, method: &http::Method) -> bool {
     *method == http::Method::POST
 }
 
+/// Native shapes are forwarded as the caller's exact bytes unless eavs changed their
+/// meaning. Re-serializing sorts object keys, and key order is input for some native
+/// APIs (`TypeSafe` state fields and choice-option order).
+fn native_json_unchanged(is_native_inference: bool, bytes: &[u8], json_body: &Value) -> bool {
+    is_native_inference
+        && !bytes.is_empty()
+        && serde_json::from_slice::<Value>(bytes).is_ok_and(|original| original == *json_body)
+}
+
 fn is_inference_path(path: &str) -> bool {
     path == "/v1/systemone"
         || path == "/v1/eavs/rerank"
@@ -1282,7 +1291,9 @@ pub async fn proxy_handler_pinned(
                 }
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let body = if is_opaque_inference {
+        let body = if is_opaque_inference
+            || native_json_unchanged(is_native_inference, &bytes, &json_body)
+        {
             bytes.to_vec()
         } else if bytes.is_empty() && is_native_inference {
             Vec::new()
@@ -6284,6 +6295,56 @@ mod tests {
             "Bearer secret"
         );
 
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_typesafe_systemone_forwards_caller_key_order_verbatim() -> Result<(), anyhow::Error>
+    {
+        // Key order is input for decision models (state fields, choice option order).
+        // Unsorted keys plus odd whitespace: the upstream must receive these exact bytes.
+        let body = br#"{"model":"jev-latest", "state":{"task":"x","status":"y"},"questions":{"risk":{"type":"choice","instructions":"How risky?","criteria":{"low":null,"medium":null,"high":null}}}}"#;
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(br#"{"answers":{}}"#)],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "typesafe".into(),
+            ProviderConfig {
+                type_: "typesafe".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/typesafe/v1/systemone")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.as_slice()))
+            .context("unexpected None or Err")?;
+        let response = app
+            .oneshot(request)
+            .await
+            .context("oneshot(...) returned None or Err")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].body.as_ref(), body.as_slice());
         Ok(())
     }
 
