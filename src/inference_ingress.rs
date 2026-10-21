@@ -40,6 +40,9 @@ impl Config {
 /// Allowlisted native semantics supplied only by this isolated ingress.
 #[derive(Clone)]
 pub struct NativeHeaders(pub HeaderMap);
+/// An explicitly unlimited operator body setting must not unbound public ingress.
+#[derive(Clone, Copy)]
+pub struct NativeBodyLimit(pub usize);
 
 #[derive(Clone)]
 struct Ingress {
@@ -69,7 +72,7 @@ fn token(headers: &HeaderMap) -> Option<&str> {
         _ => None,
     }
 }
-fn authenticate(ingress: &Ingress, headers: &HeaderMap) -> Option<crate::keys::VirtualKey> {
+async fn authenticate(ingress: &Ingress, headers: &HeaderMap) -> Option<crate::keys::VirtualKey> {
     let token = token(headers)?;
     let fingerprint = crate::keys::hash_key(token);
     if ingress.forbidden.contains(&fingerprint) || !crate::keys::is_virtual_key(token) {
@@ -78,22 +81,75 @@ fn authenticate(ingress: &Ingress, headers: &HeaderMap) -> Option<crate::keys::V
     ingress
         .state
         .get_key_store()?
-        .get_by_key(token)
+        .lookup_for_auth(token)
+        .await
+        .ok()
+        .flatten()
         .filter(|key| {
             key.is_valid()
                 && key.metadata.get("kind").and_then(Value::as_str) != Some("device_enrollment")
         })
 }
-async fn auth(State(ingress): State<Ingress>, request: Request, next: Next) -> Response {
-    if !matches!(
-        *request.method(),
-        axum::http::Method::GET | axum::http::Method::POST
-    ) {
-        return error(StatusCode::METHOD_NOT_ALLOWED, "unsupported_method");
+fn semantic_headers(key_hash: &str, headers: &HeaderMap) -> HeaderMap {
+    let mut forwarded = HeaderMap::new();
+    if let Some(value) = headers.get("idempotency-key") {
+        let mut hash = Sha256::new();
+        hash.update(b"eavs-inference-idempotency-v1\0");
+        hash.update(key_hash.as_bytes());
+        hash.update(b"\0");
+        hash.update(value.as_bytes());
+        if let Ok(value) = HeaderValue::from_str(&format!("eavs-{}", hex::encode(hash.finalize())))
+        {
+            forwarded.insert("idempotency-key", value);
+        }
     }
-    if authenticate(&ingress, request.headers()).is_none() {
+    if let Some(value) = headers.get("x-client-request-id") {
+        forwarded.insert("x-client-request-id", value.clone());
+    }
+    forwarded
+}
+async fn auth(State(ingress): State<Ingress>, mut request: Request, next: Next) -> Response {
+    let Some(key) = authenticate(&ingress, request.headers()).await else {
         return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
+    };
+    let path = crate::inference_routes::api_path(request.uri().path());
+    let metadata = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && (matches!(path, "/v1/models" | "/v1/eavs/catalog")
+        || path.starts_with("/v1/models/"));
+    // Lifecycle handlers still verify MAC-authenticated owner/model bindings.
+    // They must remain reachable for already-created jobs after a cap changes.
+    let lifecycle = path.starts_with("/v1/eavs/jobs/")
+        && (*request.method() == axum::http::Method::GET
+            || (*request.method() == axum::http::Method::POST && path.ends_with("/cancel")));
+    if !metadata
+        && !lifecycle
+        && (key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some())
+    {
+        return error(StatusCode::FORBIDDEN, "durable_accounting_required");
     }
+    let semantic = semantic_headers(&key.key_hash, request.headers());
+    request.extensions_mut().insert(NativeHeaders(semantic));
+    let limit = ingress.state.config.server.max_body_size;
+    request
+        .extensions_mut()
+        .insert(NativeBodyLimit(if limit == 0 {
+            10 * 1024 * 1024
+        } else {
+            limit
+        }));
+    // Normalize only the caller credential, never the native body, model, path,
+    // multipart boundary or WebSocket upgrade. Shared handlers perform effective
+    // provider/model authorization and operation-specific accounting admission.
+    let Some(token) = token(request.headers()).map(str::to_owned) else {
+        return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
+    };
+    let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
+    };
+    request.headers_mut().insert(header::AUTHORIZATION, value);
+    request.headers_mut().remove("x-api-key");
     next.run(request).await
 }
 async fn private(request: Request, next: Next) -> Response {
@@ -181,7 +237,7 @@ async fn inference(State(ingress): State<Ingress>, request: Request) -> Response
         return error(StatusCode::FORBIDDEN, "model_not_allowed");
     };
     // Reauthenticate after body/catalog awaits. Native admission rechecks again.
-    let Some(key) = authenticate(&ingress, &parts.headers) else {
+    let Some(key) = authenticate(&ingress, &parts.headers).await else {
         return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
     };
     if key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some() {
@@ -213,24 +269,8 @@ async fn inference(State(ingress): State<Ingress>, request: Request) -> Response
     let Ok(body) = serde_json::to_vec(&value) else {
         return error(StatusCode::BAD_REQUEST, "invalid_json");
     };
-    let mut semantic_headers = HeaderMap::new();
-    if let Some(value) = parts.headers.get("idempotency-key") {
-        // Stable retries within one key, no cross-tenant replay namespace when
-        // different virtual keys share one physical upstream account.
-        let mut hash = Sha256::new();
-        hash.update(b"eavs-inference-idempotency-v1\0");
-        hash.update(key.key_hash.as_bytes());
-        hash.update(b"\0");
-        hash.update(value.as_bytes());
-        let scoped = format!("eavs-{}", hex::encode(hash.finalize()));
-        if let Ok(value) = HeaderValue::from_str(&scoped) {
-            semantic_headers.insert("idempotency-key", value);
-        }
-    }
-    if let Some(value) = parts.headers.get("x-client-request-id") {
-        semantic_headers.insert("x-client-request-id", value.clone());
-    }
-    parts.extensions.insert(NativeHeaders(semantic_headers));
+    let semantic = semantic_headers(&key.key_hash, &parts.headers);
+    parts.extensions.insert(NativeHeaders(semantic));
     let request = Request::from_parts(parts, Body::from(body));
     match crate::proxy::proxy_handler_pinned(state, request, None).await {
         Ok(response) | Err(response) => response,
@@ -245,29 +285,42 @@ pub fn router(state: AppState, forbidden: Vec<String>) -> Result<Router, &'stati
         return Err("Inference ingress requires enabled initialized KeyStore and validator");
     }
     state.config.inference.address()?;
-    let cors = crate::cors::layer(&state.config.inference.cors_allowed_origins)?.allow_headers([
-        header::AUTHORIZATION,
-        header::CONTENT_TYPE,
-        header::ACCEPT,
-        axum::http::HeaderName::from_static("x-api-key"),
-        axum::http::HeaderName::from_static("anthropic-version"),
-        axum::http::HeaderName::from_static("anthropic-beta"),
-        axum::http::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
-        axum::http::HeaderName::from_static("x-client-request-id"),
-        axum::http::HeaderName::from_static("idempotency-key"),
-        axum::http::HeaderName::from_static("x-stainless-lang"),
-        axum::http::HeaderName::from_static("x-stainless-package-version"),
-        axum::http::HeaderName::from_static("x-stainless-os"),
-        axum::http::HeaderName::from_static("x-stainless-arch"),
-        axum::http::HeaderName::from_static("x-stainless-runtime"),
-        axum::http::HeaderName::from_static("x-stainless-runtime-version"),
-        axum::http::HeaderName::from_static("x-stainless-retry-count"),
-        axum::http::HeaderName::from_static("x-stainless-timeout"),
-        axum::http::HeaderName::from_static("x-stainless-helper-method"),
-        axum::http::HeaderName::from_static("x-stainless-async"),
-        axum::http::HeaderName::from_static("x-stainless-read-timeout"),
-        axum::http::HeaderName::from_static("x-stainless-connect-timeout"),
-    ]);
+    let cors = crate::cors::layer(&state.config.inference.cors_allowed_origins)?
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::HEAD,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            // Firefox preflights the SDK's explicit User-Agent (Chromium drops it).
+            header::USER_AGENT,
+            axum::http::HeaderName::from_static("x-api-key"),
+            axum::http::HeaderName::from_static("x-provider"),
+            axum::http::HeaderName::from_static("anthropic-version"),
+            axum::http::HeaderName::from_static("anthropic-beta"),
+            axum::http::HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
+            axum::http::HeaderName::from_static("x-client-request-id"),
+            axum::http::HeaderName::from_static("idempotency-key"),
+            axum::http::HeaderName::from_static("x-stainless-lang"),
+            axum::http::HeaderName::from_static("x-stainless-package-version"),
+            axum::http::HeaderName::from_static("x-stainless-os"),
+            axum::http::HeaderName::from_static("x-stainless-arch"),
+            axum::http::HeaderName::from_static("x-stainless-runtime"),
+            axum::http::HeaderName::from_static("x-stainless-runtime-version"),
+            axum::http::HeaderName::from_static("x-stainless-retry-count"),
+            axum::http::HeaderName::from_static("x-stainless-timeout"),
+            axum::http::HeaderName::from_static("x-stainless-helper-method"),
+            axum::http::HeaderName::from_static("x-stainless-async"),
+            axum::http::HeaderName::from_static("x-stainless-read-timeout"),
+            axum::http::HeaderName::from_static("x-stainless-connect-timeout"),
+        ]);
+    let native = crate::inference_routes::router().with_state(state.clone());
     let ingress = Ingress {
         state,
         forbidden: Arc::new(
@@ -282,9 +335,10 @@ pub fn router(state: AppState, forbidden: Vec<String>) -> Result<Router, &'stati
         .route("/v1/chat/completions", post(inference))
         .route("/v1/messages", post(inference))
         .route("/v1/responses", post(inference))
-        .route_layer(middleware::from_fn_with_state(ingress.clone(), auth))
+        .with_state(ingress.clone())
+        .merge(native)
+        .route_layer(middleware::from_fn_with_state(ingress, auth))
         .route_layer(cors)
-        .with_state(ingress)
         .layer(middleware::from_fn(private)))
 }
 

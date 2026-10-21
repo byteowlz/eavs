@@ -434,3 +434,41 @@ fn unsupported_operations_and_price_claims_are_not_inferred() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions in fallible fixture"
+)]
+async fn external_writer_catalog_auth() -> Result<()> {
+    let f = fixture().await?;
+    let path = f.dir.path().join("keys.sqlite");
+    let writer = KeyStore::new(&path).await?;
+    let key = writer.create_key(CreateKeyRequest::default()).await?;
+    let (status, _, value) = request(&f.state, Some(&key.key), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!model_ids(&value).is_empty());
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display())).await?;
+    sqlx::query("UPDATE virtual_keys SET permissions='{\"allowed_providers\":[\"other\"]}'")
+        .execute(&pool)
+        .await?;
+    let (status, _, value) = request(&f.state, Some(&key.key), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(model_ids(&value).is_empty());
+    sqlx::query("UPDATE virtual_keys SET permissions='malformed'")
+        .execute(&pool)
+        .await?;
+    assert_ne!(
+        request(&f.state, Some(&key.key), true).await?.0,
+        StatusCode::OK
+    );
+    sqlx::query("DELETE FROM virtual_keys")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        request(&f.state, Some(&key.key), true).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(f.tripwire.0.load(Ordering::SeqCst), 0);
+    Ok(())
+}

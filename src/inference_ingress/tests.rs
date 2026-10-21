@@ -1,6 +1,16 @@
 use super::*;
+#[path = "admission_tests.rs"]
+mod admission_tests;
 #[path = "extra_tests.rs"]
 mod extra_tests;
+#[path = "order_tests.rs"]
+mod order_tests;
+#[path = "protocol_shape_tests.rs"]
+mod protocol_shape_tests;
+#[path = "restoration_more_tests.rs"]
+mod restoration_more_tests;
+#[path = "restoration_tests.rs"]
+mod restoration_tests;
 use crate::{
     config::{AppConfig, ProviderConfig},
     keys::{CreateKeyRequest, KeyPermissions, KeyStore, KeyValidator},
@@ -18,11 +28,15 @@ use tower::ServiceExt;
 struct Synthetic {
     calls: AtomicUsize,
     requests: Mutex<Vec<(String, Value, HeaderMap)>>,
+    raw_bodies: Mutex<Vec<Bytes>>,
     status: StatusCode,
 }
 impl Upstream for Synthetic {
     fn send(&self, request: UpstreamRequest) -> BoxFuture<'_, std::io::Result<UpstreamResponse>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut bodies) = self.raw_bodies.lock() {
+            bodies.push(request.body.clone());
+        }
         let body = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         if let Ok(mut requests) = self.requests.lock() {
             requests.push((request.url, body, request.headers));
@@ -60,7 +74,7 @@ impl Upstream for Synthetic {
 struct Fixture {
     state: AppState,
     upstream: Arc<Synthetic>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 async fn fixture(status: StatusCode) -> Result<Fixture> {
     fixture_with_policy(
@@ -75,6 +89,14 @@ async fn fixture_with_policy(
     policy: crate::policy::PolicyConfig,
     alpha_type: &str,
 ) -> Result<Fixture> {
+    fixture_with_policy_at(status, policy, alpha_type, "https://api.openai.com/v1").await
+}
+async fn fixture_with_policy_at(
+    status: StatusCode,
+    policy: crate::policy::PolicyConfig,
+    alpha_type: &str,
+    base: &str,
+) -> Result<Fixture> {
     let dir = tempfile::tempdir()?;
     let mut config = AppConfig::with_defaults();
     config.keys.enabled = true;
@@ -86,7 +108,12 @@ async fn fixture_with_policy(
             name.into(),
             ProviderConfig {
                 type_: kind.into(),
-                base_url: "https://api.openai.com/v1".into(),
+                base_url: if kind == "cohere" {
+                    base.trim_end_matches("/v1")
+                } else {
+                    base
+                }
+                .into(),
                 api_key: "synthetic-upstream".into(),
                 models: vec![
                     serde_json::from_value(json!({"id":"allowed","name":"Allowed"}))?,
@@ -99,6 +126,7 @@ async fn fixture_with_policy(
     let upstream = Arc::new(Synthetic {
         calls: AtomicUsize::new(0),
         requests: Mutex::new(Vec::new()),
+        raw_bodies: Mutex::new(Vec::new()),
         status,
     });
     let state = AppState::new_with_upstream(config, upstream.clone());
@@ -117,7 +145,7 @@ async fn fixture_with_policy(
     Ok(Fixture {
         state,
         upstream,
-        _dir: dir,
+        dir,
     })
 }
 async fn key(state: &AppState, provider: &str) -> Result<String> {
@@ -182,9 +210,6 @@ async fn authentication_revocation_and_surface_isolation() -> Result<()> {
         "/admin/providers",
         "/providers",
         "/health",
-        "/v1/eavs/catalog",
-        "/alpha/v1/chat/completions",
-        "/v1/eavs/jobs",
         "/unknown",
         "/models",
     ] {
@@ -485,5 +510,49 @@ async fn startup_prerequisites_and_operator_collision() -> Result<()> {
         401
     );
     assert_eq!(f.upstream.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions in fallible fixture"
+)]
+async fn external_writer_native_auth() -> Result<()> {
+    let f = fixture(StatusCode::OK).await?;
+    let path = f.dir.path().join("keys.sqlite");
+    let writer = KeyStore::new(&path).await?;
+    let key = writer.create_key(CreateKeyRequest::default()).await?;
+    for mutation in [
+        "",
+        "UPDATE virtual_keys SET permissions='{\"allowed_providers\":[\"other\"]}'",
+        "UPDATE virtual_keys SET permissions='{}', disabled=1",
+        "DELETE FROM virtual_keys",
+    ] {
+        if !mutation.is_empty() {
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display())).await?;
+            sqlx::query(mutation).execute(&pool).await?;
+            pool.close().await;
+        }
+        let response = app(&f.state)?
+            .oneshot(request(
+                "POST",
+                "/alpha/v1/chat/completions",
+                &key.key,
+                json!({"model":"allowed","messages":[]}),
+            )?)
+            .await?;
+        if mutation.is_empty() {
+            assert_eq!(response.status(), 200);
+        } else {
+            assert!(
+                response.status().is_client_error(),
+                "{}: {}",
+                mutation,
+                response.status()
+            );
+        }
+    }
+    assert_eq!(f.upstream.calls.load(Ordering::SeqCst), 1);
     Ok(())
 }

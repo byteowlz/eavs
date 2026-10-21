@@ -35,7 +35,7 @@ struct Ingress {
 fn denial(status: StatusCode, code: &'static str) -> Response {
     (status, Json(serde_json::json!({"error":code}))).into_response()
 }
-fn device_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+async fn device_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     if !state.config.keys.enabled {
         return false;
     }
@@ -49,14 +49,15 @@ fn device_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     if !crate::keys::is_virtual_key(token) {
         return false;
     }
-    state
-        .get_key_store()
-        .and_then(|store| store.get_by_key(token))
-        .is_some_and(|key| {
-            key.is_valid()
-                && key.metadata.get("kind").and_then(serde_json::Value::as_str)
-                    == Some("device_enrollment")
-        })
+    let key = match state.get_key_store() {
+        Some(store) => store.lookup_for_auth(token).await.ok().flatten(),
+        None => None,
+    };
+    key.is_some_and(|key| {
+        key.is_valid()
+            && key.metadata.get("kind").and_then(serde_json::Value::as_str)
+                == Some("device_enrollment")
+    })
 }
 async fn private_response(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
@@ -94,17 +95,20 @@ async fn revoke_self(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    if !device_authorized(&ingress.gateway, &headers) {
+    if !device_authorized(&ingress.gateway, &headers).await {
         return denial(StatusCode::UNAUTHORIZED, "device_unauthorized");
     }
     if body.is_err() {
         return denial(StatusCode::BAD_REQUEST, "invalid_device_request");
     }
-    let key = headers
+    let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .and_then(|token| ingress.gateway.get_key_store()?.get_by_key(token));
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let key = match (token, ingress.gateway.get_key_store()) {
+        (Some(token), Some(store)) => store.lookup_for_auth(token).await.ok().flatten(),
+        _ => None,
+    };
     let Some(key) = key else {
         return denial(StatusCode::UNAUTHORIZED, "device_unauthorized");
     };
@@ -124,7 +128,7 @@ async fn revoke_self(
 }
 
 async fn catalog(State(ingress): State<Ingress>, headers: HeaderMap) -> Response {
-    if !device_authorized(&ingress.gateway, &headers) {
+    if !device_authorized(&ingress.gateway, &headers).await {
         return denial(StatusCode::UNAUTHORIZED, "device_unauthorized");
     }
     crate::api::serving_catalog::handler(State(ingress.gateway), headers).await
@@ -134,7 +138,7 @@ async fn inference(
     Path(provider): Path<String>,
     request: Request<Body>,
 ) -> Response {
-    if !device_authorized(&ingress.gateway, request.headers()) {
+    if !device_authorized(&ingress.gateway, request.headers()).await {
         return denial(StatusCode::UNAUTHORIZED, "device_unauthorized");
     }
     crate::pi_messages::handle(ingress.gateway, request, Some(provider)).await

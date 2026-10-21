@@ -272,3 +272,66 @@ async fn claim_throttle_is_bounded_and_does_not_charge_catalog_access() -> TestR
     );
     Ok(())
 }
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions in fallible fixture"
+)]
+async fn external_writer_device_and_pi_preflight_auth() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys.sqlite");
+    let mut config = AppConfig::with_defaults();
+    config.keys.enabled = true;
+    let state = AppState::new(config);
+    let server = Arc::new(KeyStore::new(&path).await?);
+    state
+        .key_store
+        .set(server)
+        .map_err(|_| "store initialization")?;
+    let writer = KeyStore::new(&path).await?;
+    let key = writer
+        .create_key(CreateKeyRequest {
+            metadata: serde_json::json!({"kind":"device_enrollment"}),
+            ..Default::default()
+        })
+        .await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {}", key.key))?,
+    );
+    assert!(device_authorized(&state, &headers).await);
+    let pi_request = || -> Result<Request<Body>, http::Error> {
+        Request::builder()
+            .method("POST")
+            .uri("/missing/v1/pi/messages")
+            .header("authorization", format!("Bearer {}", key.key))
+            .body(Body::from("{}"))
+    };
+    // Authentication passed: the intentionally missing provider prevents any
+    // inference and returns the existing explicit-provider failure instead.
+    assert_eq!(
+        crate::pi_messages::handle(state.clone(), pi_request()?, Some("missing".into()))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    writer.disable_key(&key.key_hash).await?;
+    assert!(!device_authorized(&state, &headers).await);
+    assert_eq!(
+        crate::pi_messages::handle(state.clone(), pi_request()?, Some("missing".into()))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    writer.delete_key(&key.key_hash).await?;
+    assert!(!device_authorized(&state, &headers).await);
+    assert_eq!(
+        crate::pi_messages::handle(state, pi_request()?, Some("missing".into()))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
