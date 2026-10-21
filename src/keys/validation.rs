@@ -72,7 +72,9 @@ impl KeyValidator {
         // Look up the key
         let key = self
             .store
-            .get_by_key(api_key)
+            .lookup_for_auth(api_key)
+            .await
+            .map_err(|_| KeyValidationError::InvalidKey)?
             .ok_or(KeyValidationError::InvalidKey)?;
 
         // Check if key is valid (not expired, not disabled, etc.)
@@ -297,6 +299,103 @@ mod tests {
         let rate_limiter = Arc::new(RateLimiter::new());
         let validator = KeyValidator::new(store.clone(), rate_limiter.clone());
         (store, rate_limiter, validator)
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Behavioral assertions in fallible fixture"
+    )]
+    async fn external_writer_auth_coherence() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("keys.db");
+        let server = Arc::new(KeyStore::new(&path).await?);
+        let writer = KeyStore::new(&path).await?;
+        let validator = KeyValidator::new(server, Arc::new(RateLimiter::new()));
+        let key = writer.create_key(CreateKeyRequest::default()).await?;
+        assert!(
+            validator.validate(&key.key, "m", "p", None).await.is_ok(),
+            "external creation"
+        );
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display())).await?;
+        for assignment in [
+            "permissions='{\"allowed_providers\":[\"other\"]}'",
+            "permissions='{\"allowed_models\":[\"other\"]}'",
+            "expires_at='2000-01-01T00:00:00Z'",
+            "valid_after='2999-01-01T00:00:00Z'",
+            "permissions='invalid'",
+            "disabled=1",
+        ] {
+            sqlx::query(&format!("UPDATE virtual_keys SET {assignment}"))
+                .execute(&pool)
+                .await?;
+            assert!(
+                validator.validate(&key.key, "m", "p", None).await.is_err(),
+                "{assignment}"
+            );
+            sqlx::query("UPDATE virtual_keys SET permissions='{}', disabled=0, expires_at=NULL, valid_after=NULL")
+                .execute(&pool).await?;
+            assert!(
+                validator.validate(&key.key, "m", "p", None).await.is_ok(),
+                "restored"
+            );
+        }
+        writer.disable_key(&key.key_hash).await?;
+        assert!(
+            validator.validate(&key.key, "m", "p", None).await.is_err(),
+            "external disable"
+        );
+        writer.delete_key(&key.key_hash).await?;
+        assert!(
+            validator.validate(&key.key, "m", "p", None).await.is_err(),
+            "external delete"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Behavioral assertions in fallible fixture"
+    )]
+    async fn external_writer_cached_revocation_and_scope() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("keys.db");
+        let server = Arc::new(KeyStore::new(&path).await?);
+        let key = server.create_key(CreateKeyRequest::default()).await?;
+        let writer = KeyStore::new(&path).await?;
+        let validator = KeyValidator::new(server, Arc::new(RateLimiter::new()));
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display())).await?;
+        let mut incorrectly_allowed = Vec::new();
+        for assignment in [
+            r#"permissions='{"allowed_providers":["other"]}'"#,
+            r#"permissions='{"allowed_models":["other"]}'"#,
+            "expires_at='2000-01-01T00:00:00Z'",
+            "valid_after='2999-01-01T00:00:00Z'",
+            "permissions='invalid'",
+            "disabled=1",
+        ] {
+            sqlx::query(&format!("UPDATE virtual_keys SET {assignment}"))
+                .execute(&pool)
+                .await?;
+            if validator.validate(&key.key, "m", "p", None).await.is_ok() {
+                incorrectly_allowed.push(assignment);
+            }
+            sqlx::query("UPDATE virtual_keys SET permissions='{}', disabled=0, expires_at=NULL, valid_after=NULL").execute(&pool).await?;
+        }
+        writer.delete_key(&key.key_hash).await?;
+        if validator
+            .validate_skip_budget(&key.key, "m", "p")
+            .await
+            .is_ok()
+        {
+            incorrectly_allowed.push("deleted key / skip-budget admission");
+        }
+        assert!(
+            incorrectly_allowed.is_empty(),
+            "stale authority accepted: {incorrectly_allowed:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]

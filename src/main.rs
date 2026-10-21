@@ -19,6 +19,7 @@ mod enrollment;
 mod export;
 mod fleet;
 mod inference_ingress;
+mod inference_routes;
 mod jobs;
 mod keys;
 mod logging;
@@ -67,7 +68,7 @@ use crate::plugins::start_analysis_plugins;
 use crate::state::{start_cleanup_task, AppState};
 use axum::{
     middleware,
-    routing::{any, delete, get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use clap::Parser;
@@ -892,7 +893,6 @@ async fn run_server(
         // Control API - Providers
         .route("/providers", get(api::providers_handler))
         .route("/providers/detail", get(api::providers_detail_handler))
-        .route("/v1/eavs/catalog", get(api::serving_catalog::handler))
         .route("/providers/templates", get(api::provider_templates_handler))
         // Control API - Conversations
         .route("/conversations", get(api::conversations_handler))
@@ -988,50 +988,8 @@ async fn run_server(
         )
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
-        // WebSocket proxy (e.g. OpenAI Realtime) - default route
-        .route("/v1/realtime", get(proxy::ws_proxy_handler))
-        // Provider-prefixed WebSocket proxy (e.g. /openai/v1/realtime)
-        .route(
-            "/:provider/v1/realtime",
-            get(proxy::provider_ws_proxy_handler),
-        )
-        // ElevenLabs native realtime STT and streaming TTS.
-        .route(
-            "/:provider/v1/speech-to-text/realtime",
-            get(proxy::provider_ws_proxy_handler),
-        )
-        .route(
-            "/:provider/v1/text-to-speech/:voice_id/stream-input",
-            get(proxy::provider_voice_ws_proxy_handler),
-        )
-        .route(
-            "/:provider/v1/text-to-speech/:voice_id/multi-stream-input",
-            get(proxy::provider_voice_ws_proxy_handler),
-        )
-        // Codex Responses proxy - default route
-        // GET is the WebSocket upgrade, POST the SSE transport (pi falls back
-        // to SSE when the WebSocket is unavailable or connection-limited)
-        .route(
-            "/v1/codex/responses",
-            get(proxy::codex_ws_handler).post(proxy::proxy_handler),
-        )
-        // Provider-prefixed Codex Responses proxy
-        .route(
-            "/:provider/v1/codex/responses",
-            get(proxy::provider_codex_ws_handler).post(proxy::provider_codex_sse_handler),
-        )
-        // Tenant-bound asynchronous inference jobs (fal and Replicate).
-        .route("/:provider/v1/eavs/jobs", post(jobs::submit))
-        .route("/:provider/v1/eavs/jobs/:handle", get(jobs::status))
-        .route("/:provider/v1/eavs/jobs/:handle/result", get(jobs::result))
-        .route("/:provider/v1/eavs/jobs/:handle/cancel", post(jobs::cancel))
-        // Provider-prefixed proxy routes (e.g. /openai/v1/chat/completions)
-        // This allows explicit provider selection via URL path
-        .route("/:provider/v1/*path", any(proxy::provider_proxy_handler))
-        .route("/:provider/v2/*path", any(proxy::provider_proxy_handler))
-        // Default proxy route with X-Provider header or auto-detection
-        .route("/v1/*path", any(proxy::proxy_handler))
-        .route("/v2/*path", any(proxy::proxy_handler))
+        // One shared inventory for native HTTP, media, jobs, Pi and WebSockets.
+        .merge(inference_routes::router())
         .with_state(state.clone())
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal
