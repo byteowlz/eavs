@@ -62,27 +62,29 @@ pub async fn handle(state: AppState, req: Request<Body>, provider: Option<String
         Err(failure) => failure.response(),
     }
 }
-fn preflight(
+async fn preflight(
     state: &AppState,
-    req: &Request<Body>,
+    method: &http::Method,
+    headers: &http::HeaderMap,
     provider: Option<String>,
 ) -> Result<String, Failure> {
-    if req.method() != http::Method::POST {
+    if method != http::Method::POST {
         return Err(error(
             StatusCode::METHOD_NOT_ALLOWED,
             "pi_method_not_allowed",
         ));
     }
     if state.config.keys.enabled {
-        let token = req
-            .headers()
+        let token = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        let key = token
-            .and_then(|v| state.get_key_store()?.get_by_key(v))
-            .filter(crate::keys::VirtualKey::is_valid)
-            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "pi_unauthorized"))?;
+        let key = match (token, state.get_key_store()) {
+            (Some(token), Some(store)) => store.lookup_for_auth(token).await.ok().flatten(),
+            _ => None,
+        }
+        .filter(crate::keys::VirtualKey::is_valid)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "pi_unauthorized"))?;
         if key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some() {
             return Err(error(
                 StatusCode::BAD_REQUEST,
@@ -92,7 +94,7 @@ fn preflight(
     }
     let selected = provider
         .or_else(|| {
-            req.headers()
+            headers
                 .get("x-provider")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
@@ -111,7 +113,7 @@ async fn handle_inner(
     req: Request<Body>,
     provider: Option<String>,
 ) -> Result<Response, Failure> {
-    let provider = Some(preflight(&state, &req, provider)?);
+    let provider = Some(preflight(&state, req.method(), req.headers(), provider).await?);
     let (mut parts, body) = req.into_parts();
     let limit = state.config.server.max_body_size;
     let bytes = to_bytes(body, if limit == 0 { 10 * 1024 * 1024 } else { limit })

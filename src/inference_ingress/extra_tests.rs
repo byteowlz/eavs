@@ -5,6 +5,78 @@ use super::*;
     clippy::panic_in_result_fn,
     reason = "Behavioral assertions with fallible fixture setup"
 )]
+async fn firefox_sdk_preflight_allows_user_agent_without_bypassing_auth() -> Result<()> {
+    let f = fixture(StatusCode::OK).await?;
+    // Sanitized Firefox HAR header NAMES only. Chromium drops the SDK's
+    // programmatic User-Agent; Firefox includes it in its CORS preflight.
+    let requested = "authorization,content-type,user-agent,x-stainless-arch,x-stainless-lang,x-stainless-os,x-stainless-package-version,x-stainless-retry-count,x-stainless-runtime,x-stainless-runtime-version,x-stainless-timeout";
+    for path in ["/v1/chat/completions", "/v1/messages", "/v1/responses"] {
+        let response = app(&f.state)?
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(path)
+                    .header("origin", "https://flash.example")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", requested)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://flash.example"
+        );
+        let allowed: Vec<_> = response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()?
+            .split(',')
+            .map(str::trim)
+            .collect();
+        for name in requested.split(',') {
+            assert!(
+                allowed.contains(&name),
+                "missing Firefox SDK CORS header {name} on {path}"
+            );
+        }
+        let denied = app(&f.state)?
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("origin", "https://flash.example")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))?,
+            )
+            .await?;
+        assert_eq!(denied.status(), 401);
+        assert_eq!(
+            denied.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://flash.example"
+        );
+    }
+    let foreign = app(&f.state)?
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "https://unapproved.example")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", requested)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert!(!foreign
+        .headers()
+        .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    assert_eq!(f.upstream.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions with fallible fixture setup"
+)]
 async fn effective_policy_scope_cannot_be_bypassed() -> Result<()> {
     let policy = crate::policy::PolicyConfig {
         enabled: true,
@@ -184,12 +256,7 @@ async fn expired_device_conflicting_credentials_and_bad_configuration() -> Resul
         assert_eq!(app(&f.state)?.oneshot(req).await?.status(), 401);
     }
     for method in ["GET", "POST", "OPTIONS"] {
-        for path in [
-            "/admin/providers",
-            "/alpha/v1/chat/completions",
-            "/v1/eavs/jobs",
-            "/unknown",
-        ] {
+        for path in ["/admin/providers", "/unknown"] {
             assert_eq!(
                 app(&f.state)?
                     .oneshot(request(method, path, &token, json!({}))?)
@@ -204,7 +271,7 @@ async fn expired_device_conflicting_credentials_and_bad_configuration() -> Resul
             .oneshot(request("HEAD", "/v1/models", &token, json!({}))?)
             .await?
             .status(),
-        405
+        200
     );
     crate::routing::validate_input(&json!({"inference":{"listen":"127.0.0.1:3035"}}))
         .map_err(|_| anyhow!("inference root config rejected"))?;

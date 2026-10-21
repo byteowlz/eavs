@@ -39,10 +39,15 @@ use uuid::Uuid;
 /// Keep this an explicit allowlist: provider credentials must not become a
 /// general-purpose proxy to account, billing, or administrative endpoints.
 fn native_inference_path(provider: ProviderType, path: &str) -> bool {
-    let openai_media = path == "/v1/embeddings"
+    let openai_media = path == "/v1/decisions"
+        || path == "/v1/embeddings"
         || path == "/v1/images/generations"
         || path == "/v1/images/edits"
         || path == "/v1/images/variations"
+        || matches!(
+            path,
+            "/v1/audio/speech" | "/v1/audio/transcriptions" | "/v1/audio/translations"
+        )
         || path == "/v1/videos"
         || path.starts_with("/v1/videos/");
     match provider {
@@ -85,11 +90,23 @@ fn native_inference_method(path: &str, method: &http::Method) -> bool {
     *method == http::Method::POST
 }
 
-fn is_inference_path(path: &str) -> bool {
+/// Preserve caller bytes (including meaningful field/choice ordering) unless policy rewrote JSON.
+fn native_json_unchanged(is_native_inference: bool, bytes: &[u8], json_body: &Value) -> bool {
+    is_native_inference
+        && !bytes.is_empty()
+        && serde_json::from_slice::<Value>(bytes).is_ok_and(|original| original == *json_body)
+}
+
+pub(crate) fn is_inference_path(path: &str) -> bool {
     path == "/v1/systemone"
+        || path == "/v1/decisions"
         || path == "/v1/eavs/rerank"
         || path == "/v1/embeddings"
         || path.starts_with("/v1/images/")
+        || matches!(
+            path,
+            "/v1/audio/speech" | "/v1/audio/transcriptions" | "/v1/audio/translations"
+        )
         || path == "/v1/videos"
         || path.starts_with("/v1/videos/")
         || matches!(
@@ -420,8 +437,12 @@ pub async fn proxy_handler_pinned(
     let max_body_size = if state.config.server.max_body_size > 0 {
         state.config.server.max_body_size
     } else {
-        usize::MAX // Unlimited if explicitly set to 0
+        usize::MAX
     };
+    let max_body_size = parts
+        .extensions
+        .get::<crate::inference_ingress::NativeBodyLimit>()
+        .map_or(max_body_size, |limit| max_body_size.min(limit.0));
 
     let bytes = axum::body::to_bytes(body, max_body_size)
         .await
@@ -457,8 +478,26 @@ pub async fn proxy_handler_pinned(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"))
     {
-        match zstd::stream::decode_all(bytes.as_ref()) {
-            Ok(decoded) => Bytes::from(decoded),
+        let decoded = zstd::stream::read::Decoder::new(bytes.as_ref()).and_then(|decoder| {
+            let mut decoded = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(decoder, max_body_size.saturating_add(1) as u64),
+                &mut decoded,
+            )?;
+            Ok(decoded)
+        });
+        match decoded {
+            Ok(decoded) if decoded.len() <= max_body_size => Bytes::from(decoded),
+            Ok(_) => {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(ProxyError::new(
+                        "Decoded request body too large",
+                        "request_too_large",
+                    )),
+                )
+                    .into_response())
+            }
             Err(e) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -481,12 +520,17 @@ pub async fn proxy_handler_pinned(
     };
 
     // Extract model from request for validation
-    let model = json_body
-        .get("model")
-        .or_else(|| json_body.get("model_id"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    // URL-addressed model RPCs must authorize the actual path model before
+    // any body model or synthetic unknown label can affect admission.
+    let model = google_model_from_path(parts.uri.path())
+        .or_else(|| {
+            json_body
+                .get("model")
+                .or_else(|| json_body.get("model_id"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Final provider resolution:
     // 1. Path parameter (/{provider}/v1/...)
@@ -658,6 +702,10 @@ pub async fn proxy_handler_pinned(
         let allowed_upload = api_path == "/v1/images/edits"
             || api_path == "/v1/images/variations"
             || api_path.starts_with("/v1/speech-to-text")
+            || matches!(
+                api_path,
+                "/v1/audio/transcriptions" | "/v1/audio/translations"
+            )
             || api_path.starts_with("/v1/text-to-speech/");
         if !allowed_upload
             || !parts
@@ -789,6 +837,23 @@ pub async fn proxy_handler_pinned(
     } else {
         None
     };
+
+    // Opaque uploads cannot prove the physical body model. Never authorize
+    // them against the synthetic "unknown" label when a key restricts models.
+    if is_opaque_inference
+        && validated_key.as_ref().is_some_and(|key| {
+            key.permissions.allowed_models.is_some() || key.permissions.blocked_models.is_some()
+        })
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ProxyError::new(
+                "Model-scoped keys require a verifiable native upload model",
+                "unsupported_model_scope",
+            )),
+        )
+            .into_response());
+    }
 
     // The OpenAI video job ID is a bearer-like handle at the upstream. With a
     // shared provider credential, virtual tenants must not access each other's
@@ -1282,7 +1347,9 @@ pub async fn proxy_handler_pinned(
                 }
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let body = if is_opaque_inference {
+        let body = if is_opaque_inference
+            || native_json_unchanged(is_native_inference, &bytes, &json_body)
+        {
             bytes.to_vec()
         } else if bytes.is_empty() && is_native_inference {
             Vec::new()
@@ -2842,6 +2909,20 @@ async fn ws_proxy_handler_inner(
                 Some("stream-input" | "multi-stream-input")
             );
 
+    // Resolve once before authorization; scope and accounting use the effective
+    // provider identity, not the caller's casing/alias label.
+    let Some(provider_lookup) = state.resolve_provider(&provider_name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Unknown realtime provider",
+                "invalid_provider",
+            )),
+        )
+            .into_response();
+    };
+    let provider_name = provider_lookup.resolved_name.clone();
+
     // Determine the actual model the client requested (Realtime carries it in
     // the connection query, e.g. ?model=gpt-4o-realtime). Validating this real
     // model is what makes virtual-key model scope apply to Realtime.
@@ -2974,20 +3055,6 @@ async fn ws_proxy_handler_inner(
                 meta.request_count += 1;
             });
     }
-
-    let provider_lookup = if let Some(v) = state.resolve_provider(&provider_name) {
-        v
-    } else {
-        let available = state.config.provider_names();
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ProxyError::new(
-                format!("Unknown provider '{provider_name}'. Available providers: {available:?}"),
-                "invalid_provider",
-            )),
-        )
-            .into_response();
-    };
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
@@ -3359,6 +3426,17 @@ async fn codex_ws_handler_inner(
     let provider_name = path_provider
         .or(header_provider)
         .unwrap_or_else(|| "openai-codex".to_string());
+    let Some(provider_lookup) = state.resolve_provider(&provider_name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProxyError::new(
+                "Unknown Codex provider",
+                "invalid_provider",
+            )),
+        )
+            .into_response();
+    };
+    let provider_name = provider_lookup.resolved_name.clone();
 
     let require_key = state.config.keys.enabled && state.config.keys.require_key;
     let auth_header = headers
@@ -3425,20 +3503,6 @@ async fn codex_ws_handler_inner(
         )
             .into_response();
     }
-
-    let provider_lookup = if let Some(v) = state.resolve_provider(&provider_name) {
-        v
-    } else {
-        let available = state.config.provider_names();
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ProxyError::new(
-                format!("Unknown provider '{provider_name}'. Available: {available:?}"),
-                "invalid_provider",
-            )),
-        )
-            .into_response();
-    };
 
     let provider_config = provider_lookup.config.clone();
     let provider_type = provider_config.provider_type();
@@ -3927,7 +3991,7 @@ fn inject_claude_code_identity_into_anthropic_body(body: &mut Value) {
 
 /// Extract the model id from a native Google generateContent path,
 /// e.g. `/v1/models/gemini-2.5-pro:streamGenerateContent`.
-fn google_model_from_path(api_path: &str) -> Option<String> {
+pub(crate) fn google_model_from_path(api_path: &str) -> Option<String> {
     let after = api_path.split("/models/").nth(1)?;
     let model = after.split(':').next()?;
     if model.is_empty() {
@@ -5569,6 +5633,71 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn e2e_typesafe_systemone_forwards_caller_key_order_verbatim() -> Result<(), anyhow::Error>
+    {
+        let body = br#"{"model":"jev-latest", "state":{"task":"x","status":"y"},"questions":{"risk":{"type":"choice","instructions":"How risky?","criteria":{"low":null,"medium":null,"high":null}}}}"#;
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            chunks: vec![Bytes::from_static(br#"{"answers":{}}"#)],
+        }]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "typesafe".into(),
+            ProviderConfig {
+                type_: "typesafe".into(),
+                base_url: "http://up/v1".into(),
+                api_key: "secret".into(),
+                ..Default::default()
+            },
+        );
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(AppState::new_with_upstream(
+                make_config(providers),
+                Arc::new(mock.clone()),
+            ));
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/typesafe/v1/systemone")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.as_slice()))?;
+        let response = app.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = mock.take_requests().await;
+        assert_eq!(sent[0].body.as_ref(), body.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn native_json_preservation_does_not_bypass_rewrites() {
+        let original = br#"{ "model":"original", "z":1,"a":2 }"#;
+        assert!(native_json_unchanged(
+            true,
+            original,
+            &serde_json::json!({"model":"original", "a":2,"z":1})
+        ));
+        assert!(!native_json_unchanged(
+            true,
+            original,
+            &serde_json::json!({"model":"rewritten", "a":2,"z":1})
+        ));
+        assert!(!native_json_unchanged(
+            false,
+            original,
+            &serde_json::json!({"model":"original", "a":2,"z":1})
+        ));
+        assert!(!native_json_unchanged(true, b"", &Value::Null));
     }
 
     fn make_config(providers: HashMap<String, ProviderConfig>) -> AppConfig {

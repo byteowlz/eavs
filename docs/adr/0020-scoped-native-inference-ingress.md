@@ -1,8 +1,45 @@
 # Scoped native inference ingress
 
-Status: Implementation/verification in `eavs-m09n` (`flash-eavs-inference`). No deployment approval.
+Status: Original implementation tracked in `eavs-m09n`; full-surface correction and deployment explicitly requested by the user, tracked in `eavs-vt90`.
 
-## Decision
+## Full-surface amendment (2026-10-20)
+
+The original four-chat-route restriction below is superseded. The inference
+listener must expose the gateway's complete **supported inference** inventory,
+not a separately maintained subset. Both listeners mount `inference_routes::router`:
+provider-prefixed/default native HTTP v1/v2, SystemOne, Decisions, images,
+embeddings/rerank, audio, Pi messages, realtime/Codex WebSockets/SSE, and the
+existing tenant-bound async job submission/status/result/cancel handlers. Explicit
+provider paths preserve physical model IDs and native bodies, including multipart.
+The canonical chat endpoints retain their namespaced catalog adapter.
+
+The shared proxy fallbacks permit recognized inference paths only: an inference
+key must never become an upstream account/billing/files/admin proxy. Ordinary-key
+authentication covers the entire isolated router, normalizing Anthropic X-Api-Key
+to the existing native Bearer admission without changing request bodies. Effective
+provider/model checks, policy and operation-specific accounting remain in shared
+handlers. Operator/master/device-enrollment credentials remain rejected. CORS
+preflight is outside key admission and uses a finite header/method policy.
+
+The reverse proxy forwards this hostname only to inference3033, never operator3044;
+it must not maintain another partial endpoint list. Gateway admin/configuration/
+OAuth/credential routes are absent from the isolated router. Operator3044 remains
+loopback-only and requires operator authentication even through an SSH tunnel.
+
+This restores routing, not unsupported operation promises: native OpenAI video
+IDs still lack tenant ownership binding and remain rejected for virtual keys;
+video jobs use the existing tenant-bound Fal/Replicate job API. Native budget/TPM
+limitations remain fail-closed. Opaque uploads with model-restricted keys fail
+closed rather than authorize an unverifiable body model against `unknown`.
+The chat-only catalog projection is not a complete media capability inventory.
+No automatic fallback, retry, paid validation or accounting durability is implied.
+
+OpenAI Decisions native shape is verified against the official guide
+https://developers.openai.com/api/docs/guides/decisions (`POST /v1/decisions`,
+model/input/questions). The reference URL returned404; mock fixtures verify opaque
+native forwarding and shared admission, not provider availability or pricing.
+
+## Original decision (route restriction superseded above)
 
 Add a third, default-disabled listener configured by `[inference].listen` (explicit
 nonzero loopback IP:port). Startup fails closed if enabled without keys, initialized

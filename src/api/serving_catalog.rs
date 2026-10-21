@@ -79,7 +79,7 @@ impl Failure {
     }
 }
 
-fn permissions(state: &AppState, token: &str) -> Result<KeyPermissions, Failure> {
+async fn permissions(state: &AppState, token: &str) -> Result<KeyPermissions, Failure> {
     if !state.config.keys.enabled {
         return Err(Failure::Unavailable);
     }
@@ -89,7 +89,11 @@ fn permissions(state: &AppState, token: &str) -> Result<KeyPermissions, Failure>
     if !crate::keys::is_virtual_key(token) {
         return Err(Failure::Unauthorized);
     }
-    let key = store.get_by_key(token).ok_or(Failure::Unauthorized)?;
+    let key = store
+        .lookup_for_auth(token)
+        .await
+        .map_err(|_| Failure::Unavailable)?
+        .ok_or(Failure::Unauthorized)?;
     if !key.is_valid() {
         return Err(Failure::Unauthorized);
     }
@@ -328,10 +332,10 @@ fn project(
 /// pinned once; DB and key stores remain independently live, not one revision.
 pub async fn build(state: &AppState, token: &str) -> Result<ServingCatalog, Failure> {
     let state = state.pin_routes();
-    permissions(&state, token)?; // authenticate before reading inventories
+    permissions(&state, token).await?; // authenticate before reading inventories
     let candidates = collect_candidates(&state).await?;
     // Reauthenticate after DB awaits; project with current scope synchronously.
-    let scope = permissions(&state, token)?;
+    let scope = permissions(&state, token).await?;
     let providers = project(&state, &scope, candidates);
     let result = ServingCatalog {
         schema_version: 1,

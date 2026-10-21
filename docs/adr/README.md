@@ -25,4 +25,6 @@ Accepted means the direction is agreed, not that implementation or enforcement i
 
 - [0017: Atomic template-based device enrollment](0017-atomic-template-device-enrollment.md) — root-approved one-time invitations and independent scoped keys; not delegated grants (`eavs-s8ke`)
 
+- [0021: SQLite-authoritative virtual-key authentication](0021-authoritative-key-authentication.md) — per-admission security reads; process-local usage and rate limits remain non-durable (`eavs-0dne`)
+
 See the [domain glossary](../../CONTEXT.md), [delivery contract](../scoped-provisioning.md), and implementation epic `eavs-4m7n` in `trx`.

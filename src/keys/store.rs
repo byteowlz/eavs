@@ -1,15 +1,18 @@
 //! SQLite-backed key storage.
 //!
 //! Provides persistent storage for virtual API keys with an in-memory cache
-//! for fast lookups. Human-readable key IDs (e.g., "cold-lamp") are managed
+//! for process-local usage snapshots. Authentication reads SQLite on every lookup.
+//! Human-readable key IDs (e.g., "cold-lamp") are managed
 //! via a pool table - IDs are claimed on key creation and returned to the
 //! pool on key deletion.
 //!
 //! Performance optimizations:
-//! - In-memory cache for O(1) lookups
+//! - In-memory cache for O(1) local usage lookups (not authorization)
 //! - Batched SQLite writes via background task
 //! - Configurable sync intervals
 
+#[cfg(test)]
+mod coherence_tests;
 mod enrollment;
 
 use crate::keys::generation::{generate_human_id, generate_key, hash_key};
@@ -38,7 +41,7 @@ enum SyncMessage {
 pub struct KeyStore {
     /// SQLite connection pool
     pool: Pool<Sqlite>,
-    /// In-memory cache for fast lookups (`key_hash` -> `VirtualKey`)
+    /// Process-local usage/snapshot cache; never an authority for authentication.
     cache: Arc<DashMap<String, VirtualKey>>,
     /// Secondary index for O(1) lookup by human ID (`key_id` -> `key_hash`)
     human_id_index: Arc<DashMap<String, String>>,
@@ -170,8 +173,9 @@ impl KeyStore {
         key_hashes: &std::collections::HashSet<String>,
     ) {
         for key_hash in key_hashes {
-            if let Some(key) = cache.get(key_hash) {
-                let usage_json = match serde_json::to_string(&key.usage) {
+            let usage = cache.get(key_hash).map(|key| key.usage.clone());
+            if let Some(usage) = usage {
+                let usage_json = match serde_json::to_string(&usage) {
                     Ok(json) => json,
                     Err(e) => {
                         tracing::warn!("Failed to serialize usage for {}: {}", key_hash, e);
@@ -510,9 +514,38 @@ impl KeyStore {
         format!("{base_id}-{suffix}")
     }
 
-    /// Look up a key by its value.
-    ///
-    /// This is the hot path - uses cache for O(1) lookup.
+    /// Read security metadata from SQLite on every admission; never fall back to
+    /// cached authority, including on missing rows or decoding/database errors.
+    /// Cache publication is atomic with local usage updates and keeps pending
+    /// counters. Concurrent admissions may observe different committed revisions;
+    /// this is not globally linearizable revocation or durable budget accounting.
+    pub async fn lookup_for_auth(&self, token: &str) -> Result<Option<VirtualKey>, KeyStoreError> {
+        let hash = hash_key(token);
+        let row: Option<KeyRow> = sqlx::query_as(
+            "SELECT key_hash, key_id, name, created_at, expires_at, valid_after, disabled, permissions, usage, metadata, owner, oauth_user, oauth_account FROM virtual_keys WHERE key_hash = ?",
+        )
+        .bind(&hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| KeyStoreError::Database(e.to_string()))?;
+        let Some(row) = row else { return Ok(None) };
+        let mut key = row.to_virtual_key()?;
+        // No await while holding DashMap guards. Preserve local counters even
+        // when SQLite's write-behind snapshot is older than this admission.
+        self.cache
+            .entry(hash)
+            .and_modify(|cached| {
+                key.usage = cached.usage.clone();
+                *cached = key.clone();
+            })
+            .or_insert_with(|| key.clone());
+        self.human_id_index
+            .insert(key.key_id.clone(), key.key_hash.clone());
+        Ok(Some(key))
+    }
+
+    /// Process-local test snapshot only. Never use for authentication.
+    #[cfg(test)]
     pub fn get_by_key(&self, key: &str) -> Option<VirtualKey> {
         let key_hash = hash_key(key);
         self.cache.get(&key_hash).map(|v| v.clone())
@@ -897,8 +930,9 @@ impl KeyStore {
             let _ = tx.send(SyncMessage::SyncUsage(key_hash.to_string()));
         } else {
             // Fallback for tests: sync immediately
-            if let Some(key) = self.cache.get(key_hash) {
-                let usage_json = serde_json::to_string(&key.usage)
+            let usage = self.cache.get(key_hash).map(|key| key.usage.clone());
+            if let Some(usage) = usage {
+                let usage_json = serde_json::to_string(&usage)
                     .map_err(|e| KeyStoreError::Serialization(e.to_string()))?;
 
                 sqlx::query("UPDATE virtual_keys SET usage = ? WHERE key_hash = ?")
