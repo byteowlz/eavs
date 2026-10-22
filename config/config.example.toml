@@ -231,6 +231,11 @@ type = "openai-compatible"
 base_url = "http://localhost:8000/v1"
 api_key = "EMPTY"
 test_model = "my-model"  # Model to use for `eavs setup test` / `eavs setup test-all`
+# Identification sent upstream (all providers):
+# session_header = "x-session-affinity"  # per-conversation id, opaque and key-scoped;
+#                                        # default x-opencode-session (OpenCode),
+#                                        # x-session-id (OpenRouter); "" disables
+# user_agent = "{client} {eavs}"         # default; {client} = caller's User-Agent
 [providers.vllm.compat]
 supports_store = false
 max_tokens_field = "max_tokens"

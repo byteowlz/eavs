@@ -427,6 +427,15 @@ pub struct ProviderConfig {
     /// Custom headers to add to requests
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Upstream header carrying the per-conversation session id (opaque,
+    /// scoped to the virtual key). Default by type: `x-opencode-session` for
+    /// `OpenCode`, `x-session-id` for `OpenRouter`, none otherwise. Empty disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_header: Option<String>,
+    /// User-Agent sent upstream. `{client}` is the client's User-Agent and
+    /// `{eavs}` is `eavs/<version>`. Default: `{client} {eavs}`. Empty sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
     /// AWS region (Bedrock only). Supports `env:VAR_NAME` syntax.
     #[serde(default)]
     pub aws_region: String,
@@ -551,6 +560,8 @@ impl Default for ProviderConfig {
             api_version: None,
             compat: CompatSettings::default(),
             headers: HashMap::new(),
+            session_header: None,
+            user_agent: None,
             aws_region: String::new(),
             aws_access_key_id: String::new(),
             aws_secret_access_key: String::new(),

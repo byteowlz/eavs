@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Session affinity for every provider: the client's conversation id (`x-session-affinity`,
+  `x-opencode-session`, `x-session-id`, `session_id` or `X-Conversation-ID`) is sent
+  upstream as an opaque id scoped to the virtual key and provider, in the provider's
+  header (`x-opencode-session` for OpenCode, `x-session-id` for OpenRouter; configurable
+  via `session_header`). Without one, the id is stable per key; previously OpenCode got
+  the literal `default` for every conversation of every key.
+- Upstream User-Agent: previously none was sent. Default is `<client UA> eavs/<version>`;
+  configurable per provider via `user_agent` with `{client}` and `{eavs}`.
 - Anthropic adaptive thinking: models that reject `thinking.type: "enabled"` (e.g. Claude
   Sonnet 5.5) get `{type: "adaptive"}` plus `output_config.effort` derived from the token
   budget. Learned from the first upstream 400 (persisted, one retry) or declared via model

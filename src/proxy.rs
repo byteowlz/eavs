@@ -1558,7 +1558,14 @@ pub async fn proxy_handler_pinned(
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
-    apply_opencode_session_headers(&mut upstream_headers, provider_type, &conversation_id);
+    apply_client_identity(
+        &mut upstream_headers,
+        &parts.headers,
+        provider_config,
+        provider_type,
+        &provider_name,
+        validated_key.as_ref().map(|key| key.key_hash.as_str()),
+    );
 
     // Add custom headers from provider config
     for (key, value) in &provider_config.headers {
@@ -3504,6 +3511,8 @@ async fn ws_proxy_handler_inner(
         .policy_for_key_metadata(validated_key.as_ref().map(|key| &key.metadata));
     let delegated_fetch_analysis_tx = state.analysis_tx.clone();
 
+    let client_headers = headers.clone();
+    let key_scope = validated_key.as_ref().map(|key| key.key_hash.clone());
     ws.on_upgrade(move |mut client_socket| async move {
         let (session_token, mut injection_rx) = state.ws_sessions.register(&ns_conversation);
         let _session_guard = WsSessionGuard {
@@ -3521,7 +3530,14 @@ async fn ws_proxy_handler_inner(
 
         apply_ws_auth_headers(&mut request, provider_type, &api_key);
         apply_ws_extra_headers(&mut request, provider_type);
-        apply_opencode_session_headers(&mut request, provider_type, &conversation_id);
+        apply_client_identity(
+            &mut request,
+            &client_headers,
+            &provider_config,
+            provider_type,
+            &provider_name,
+            key_scope.as_deref(),
+        );
 
         // Custom provider headers
         for (key, value) in &provider_config.headers {
@@ -4559,24 +4575,41 @@ pub fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: Provider
     apply_extra_headers(headers, provider_type);
 }
 
-/// `OpenCode` providers (opencode, opencode-go) route each request to a session via
-/// the `x-opencode-session` header, derived from the conversation id.
-fn apply_opencode_session_headers<H: HeadersExt>(
+/// Session affinity and User-Agent for the upstream request (see
+/// `client_identity`). Provider `headers` applied afterwards still override.
+fn apply_client_identity<H: HeadersExt>(
     headers: &mut H,
+    client_headers: &HeaderMap,
+    provider_config: &crate::config::ProviderConfig,
     provider_type: ProviderType,
-    session_id: &str,
+    provider_name: &str,
+    key_hash: Option<&str>,
 ) {
-    if matches!(
+    if let Some(name) = crate::client_identity::session_header(
         provider_type,
-        ProviderType::OpenCode | ProviderType::OpenCodeGo
-    ) && !session_id.is_empty()
-    {
-        if let Ok(value) = http::HeaderValue::from_str(session_id) {
-            headers.insert_header(
-                http::header::HeaderName::from_static("x-opencode-session"),
-                value,
-            );
+        provider_config.session_header.as_deref(),
+    ) {
+        let session = crate::client_identity::upstream_session(
+            key_hash.unwrap_or("operator"),
+            provider_name,
+            crate::client_identity::client_session(client_headers),
+        );
+        if let (Ok(name), Ok(value)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_str(&session),
+        ) {
+            headers.insert_header(name, value);
         }
+    }
+    if let Some(value) = crate::client_identity::user_agent(
+        provider_config.user_agent.as_deref(),
+        client_headers
+            .get(http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .and_then(|agent| http::HeaderValue::from_str(&agent).ok())
+    {
+        headers.insert_header(http::header::USER_AGENT, value);
     }
 }
 
@@ -5215,40 +5248,94 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "assertions are intentional in tests"
     )]
-    #[test]
-    fn opencode_session_header_is_applied() -> Result<(), anyhow::Error> {
-        let mut headers = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut headers, ProviderType::OpenCodeGo, "sess-1");
-        assert_eq!(
-            headers
-                .get("x-opencode-session")
-                .context("get(...) returned None or Err")?
-                .to_str()
-                .context("to_str(...) returned None or Err")?,
-            "sess-1"
+    #[tokio::test]
+    async fn upstream_gets_scoped_session_and_client_user_agent() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec(), ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        for (name, type_) in [("ocgo", "opencode-go"), ("oai", "openai")] {
+            providers.insert(
+                name.to_string(),
+                ProviderConfig {
+                    type_: type_.to_string(),
+                    base_url: format!("http://{name}/v1"),
+                    api_key: "sk-test".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        providers.insert(
+            "custom".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://custom/v1".to_string(),
+                session_header: Some("X-Session-Affinity".to_string()),
+                user_agent: Some(format!(
+                    "my-agent/2 {}",
+                    crate::client_identity::EAVS_PLACEHOLDER
+                )),
+                ..Default::default()
+            },
         );
-
-        // OpenCode (Zen) also gets the session header.
-        let mut h2 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h2, ProviderType::OpenCode, "sess-2");
-        assert_eq!(
-            h2.get("x-opencode-session")
-                .context("get(...) returned None or Err")?
-                .to_str()
-                .context("to_str(...) returned None or Err")?,
-            "sess-2"
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        for (provider, session) in [
+            ("ocgo", Some("pi-session-1")),
+            ("ocgo", None),
+            ("oai", Some("pi-session-1")),
+            ("custom", Some("pi-session-1")),
+        ] {
+            let mut req = http::Request::builder()
+                .method("POST")
+                .uri(format!("/{provider}/v1/chat/completions"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::USER_AGENT, "pi (darwin 25.0; arm64)");
+            if let Some(session) = session {
+                req = req.header("x-session-affinity", session);
+            }
+            let _ = app
+                .clone()
+                .oneshot(
+                    req.body(Body::from(
+                        json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+                            .to_string(),
+                    ))?,
+                )
+                .await?;
+        }
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 4);
+        let header = |i: usize, name: &str| {
+            requests[i]
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let eavs = crate::client_identity::eavs_agent();
+        let with_session = header(0, "x-opencode-session").context("ocgo session header")?;
+        assert!(with_session.starts_with("eavs-"), "{with_session}");
+        assert!(
+            !with_session.contains("pi-session-1"),
+            "raw client id leaked"
         );
-
-        // Non-OpenCode providers must NOT receive the header.
-        let mut h3 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h3, ProviderType::OpenAI, "sess-3");
-        assert!(h3.get("x-opencode-session").is_none());
-
-        // Empty session id -> no header.
-        let mut h4 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h4, ProviderType::OpenCodeGo, "");
-        assert!(h4.get("x-opencode-session").is_none());
-
+        let without_session = header(1, "x-opencode-session").context("fallback session")?;
+        assert_ne!(with_session, without_session);
+        assert_ne!(without_session, "default");
+        assert_eq!(
+            header(0, "user-agent").as_deref(),
+            Some(format!("pi (darwin 25.0; arm64) {eavs}").as_str())
+        );
+        assert_eq!(
+            header(2, "x-opencode-session"),
+            None,
+            "openai: no session header"
+        );
+        assert_eq!(header(2, "x-session-id"), None);
+        assert!(header(2, "user-agent").is_some());
+        assert!(header(3, "x-session-affinity").is_some_and(|v| v.starts_with("eavs-")));
+        assert_eq!(header(3, "user-agent"), Some(format!("my-agent/2 {eavs}")));
         Ok(())
     }
 

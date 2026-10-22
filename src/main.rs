@@ -9,6 +9,7 @@ mod aws_credentials;
 mod aws_sigv4;
 mod capture;
 mod cli;
+mod client_identity;
 mod config;
 mod cors;
 mod delegated_fetch;

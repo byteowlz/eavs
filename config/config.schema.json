@@ -736,6 +736,16 @@
             "type": "string"
           }
         },
+        "session_header": {
+          "type": "string",
+          "description": "Upstream header carrying the per-conversation session id (opaque, scoped to the virtual key). Default by type: x-opencode-session for OpenCode, x-session-id for OpenRouter, none otherwise. Empty string disables.",
+          "examples": ["x-session-affinity", ""]
+        },
+        "user_agent": {
+          "type": "string",
+          "description": "User-Agent sent upstream. {client} is the client's User-Agent, {eavs} is eavs/<version>. Default: '{client} {eavs}'. Empty string sends none.",
+          "examples": ["{client} {eavs}", "my-agent/1.0 {eavs}"]
+        },
         "aws_region": {
           "type": "string",
           "description": "AWS region (Bedrock only). Supports 'env:VAR_NAME' syntax.",
