@@ -133,17 +133,26 @@ pub fn rewrite_bytes(body: &[u8], supported: &[String]) -> Option<(Vec<u8>, Stri
     Some((serde_json::to_vec(&json).ok()?, from, to))
 }
 
-/// Provider -> model -> accepted values.
-type EffortMap = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+/// Provider -> model -> learned value.
+type LearnedMap<T> = BTreeMap<String, BTreeMap<String, T>>;
 
-/// Supported values learned from upstream errors, keyed by provider then model.
-/// Process-wide and persisted best-effort; config declarations always win.
-pub struct LearnedEfforts {
+/// Facts learned from upstream errors (accepted reasoning efforts, adaptive
+/// thinking), keyed by provider then model. Process-wide and persisted
+/// best-effort; config declarations always win.
+pub struct Learned<T> {
     path: Option<PathBuf>,
-    entries: RwLock<EffortMap>,
+    entries: RwLock<LearnedMap<T>>,
 }
 
-impl LearnedEfforts {
+/// Accepted reasoning efforts per model.
+pub type LearnedEfforts = Learned<Vec<String>>;
+/// Models that require Anthropic adaptive thinking.
+pub type LearnedAdaptive = Learned<bool>;
+
+impl<T> Learned<T>
+where
+    T: Clone + PartialEq + Default + serde::Serialize + serde::de::DeserializeOwned,
+{
     pub fn load(path: Option<PathBuf>) -> Self {
         let entries = path
             .as_ref()
@@ -156,20 +165,19 @@ impl LearnedEfforts {
         }
     }
 
-    pub fn default_path() -> Option<PathBuf> {
-        Some(
-            crate::paths::state_dir()
-                .ok()?
-                .join("eavs")
-                .join("reasoning-efforts.json"),
-        )
+    /// `$XDG_STATE_HOME/eavs/<file>`, or `None` in tests.
+    pub fn state_file(file: &str) -> Option<PathBuf> {
+        if cfg!(test) {
+            return None;
+        }
+        Some(crate::paths::state_dir().ok()?.join("eavs").join(file))
     }
 
-    pub fn get(&self, provider: &str, model: &str) -> Option<Vec<String>> {
+    pub fn get(&self, provider: &str, model: &str) -> Option<T> {
         self.entries.read().ok()?.get(provider)?.get(model).cloned()
     }
 
-    pub fn learn(&self, provider: &str, model: &str, supported: Vec<String>) {
+    pub fn learn(&self, provider: &str, model: &str, value: T) {
         let snapshot = {
             let Ok(mut entries) = self.entries.write() else {
                 return;
@@ -179,10 +187,10 @@ impl LearnedEfforts {
                 .or_default()
                 .entry(model.to_owned())
                 .or_default();
-            if *slot == supported {
+            if *slot == value {
                 return;
             }
-            *slot = supported;
+            *slot = value;
             entries.clone()
         };
         let Some(path) = &self.path else { return };
@@ -198,9 +206,70 @@ impl LearnedEfforts {
                 std::fs::rename(&tmp, path)
             });
         if let Err(error) = result {
-            tracing::warn!(%error, "Could not persist learned reasoning efforts");
+            tracing::warn!(%error, path = %path.display(), "Could not persist learned upstream behavior");
         }
     }
+}
+
+/// Whether an Anthropic error says the model requires adaptive thinking, e.g.
+/// `"thinking.type.enabled" is not supported for this model. Use
+/// "thinking.type.adaptive" ...`.
+pub fn requires_adaptive(error_body: &str) -> bool {
+    let lower = error_body.to_ascii_lowercase();
+    lower.contains("thinking.type.enabled") && lower.contains("thinking.type.adaptive")
+}
+
+/// Whether an Anthropic Messages body uses budget-based (`enabled`) thinking.
+pub fn uses_enabled_thinking(body: &Value) -> bool {
+    body.pointer("/thinking/type").and_then(Value::as_str) == Some("enabled")
+}
+
+/// Anthropic effort for a thinking token budget (Pi's budgets: 1024 minimal,
+/// ~2-4k low, ~8-10k medium, ~16k+ high).
+const fn effort_for_budget(budget: Option<u64>) -> &'static str {
+    match budget {
+        Some(0..=4_096) => "low",
+        Some(4_097..=12_288) => "medium",
+        _ => "high",
+    }
+}
+
+/// Convert `thinking: {type: "enabled", budget_tokens}` to adaptive thinking
+/// with `output_config.effort` (kept if the client already set one).
+/// Returns `(from, to)` when the body changed.
+pub fn to_adaptive(body: &mut Value) -> Option<(String, String)> {
+    if !uses_enabled_thinking(body) {
+        return None;
+    }
+    let budget = body
+        .pointer("/thinking/budget_tokens")
+        .and_then(Value::as_u64);
+    let display = body.pointer("/thinking/display").cloned();
+    let object = body.as_object_mut()?;
+    let mut thinking = serde_json::Map::new();
+    thinking.insert("type".into(), "adaptive".into());
+    if let Some(display) = display {
+        thinking.insert("display".into(), display);
+    }
+    object.insert("thinking".into(), Value::Object(thinking));
+    let config = object
+        .entry("output_config")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()?;
+    let effort = config
+        .entry("effort")
+        .or_insert_with(|| effort_for_budget(budget).into())
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    Some(("enabled".into(), format!("adaptive({effort})")))
+}
+
+/// `to_adaptive` over raw JSON bytes; `None` when unchanged or not JSON.
+pub fn to_adaptive_bytes(body: &[u8]) -> Option<(Vec<u8>, String, String)> {
+    let mut json: Value = serde_json::from_slice(body).ok()?;
+    let (from, to) = to_adaptive(&mut json)?;
+    Some((serde_json::to_vec(&json).ok()?, from, to))
 }
 
 #[cfg(test)]
@@ -299,5 +368,40 @@ mod tests {
         );
         assert_eq!(reloaded.get("rtx", "other"), None);
         Ok(())
+    }
+
+    #[test]
+    fn detects_anthropic_adaptive_requirement() {
+        let body = json!({"type": "error", "error": {"type": "invalid_request_error", "message": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}).to_string();
+        assert!(requires_adaptive(&body));
+        assert!(!requires_adaptive(
+            r#"{"error":{"message":"thinking budget too large"}}"#
+        ));
+    }
+
+    #[test]
+    fn converts_enabled_thinking_to_adaptive_with_effort() {
+        let mut body = json!({"model": "claude", "max_tokens": 32000, "thinking": {"type": "enabled", "budget_tokens": 16384, "display": "summarized"}});
+        assert_eq!(
+            to_adaptive(&mut body),
+            Some(("enabled".into(), "adaptive(high)".into()))
+        );
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+        let mut low = json!({"thinking": {"type": "enabled", "budget_tokens": 2048}});
+        assert_eq!(
+            to_adaptive(&mut low).map(|(_, to)| to).as_deref(),
+            Some("adaptive(low)")
+        );
+        let mut kept = json!({"thinking": {"type": "enabled", "budget_tokens": 2048}, "output_config": {"effort": "max", "other": 1}});
+        to_adaptive(&mut kept);
+        assert_eq!(kept["output_config"], json!({"effort": "max", "other": 1}));
+        let mut disabled = json!({"thinking": {"type": "disabled"}});
+        assert_eq!(to_adaptive(&mut disabled), None);
+        let mut adaptive = json!({"thinking": {"type": "adaptive"}});
+        assert_eq!(to_adaptive(&mut adaptive), None);
     }
 }

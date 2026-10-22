@@ -504,6 +504,7 @@ async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
         .state
         .learned_efforts
         .learn("alpha", "field", vec!["medium".into()]);
+    fixture.state.learned_adaptive.learn("alpha", "field", true);
     let token = key(&fixture.state, KeyPermissions::default()).await?;
     let (status, _, value) = request(&fixture.state, Some(&token), true).await?;
     assert_eq!(status, StatusCode::OK);
@@ -525,6 +526,14 @@ async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
     );
     assert_eq!(efforts("field"), Some(Some(serde_json::json!(["medium"]))));
     assert_eq!(efforts("blocked"), Some(None), "unknown values are omitted");
+    let adaptive = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .and_then(|m| m["compat"].get("forceAdaptiveThinking").cloned())
+    };
+    assert_eq!(adaptive("field"), Some(serde_json::json!(true)));
+    assert_eq!(adaptive("allowed"), None);
     assert_eq!(
         fixture.tripwire.0.load(std::sync::atomic::Ordering::SeqCst),
         0

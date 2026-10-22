@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Anthropic adaptive thinking: models that reject `thinking.type: "enabled"` (e.g. Claude
+  Sonnet 5.5) get `{type: "adaptive"}` plus `output_config.effort` derived from the token
+  budget. Learned from the first upstream 400 (persisted, one retry) or declared via model
+  compat `forceAdaptiveThinking = true`; published in the catalog's model `compat`.
+  Reported via `x-eavs-thinking: enabled->adaptive(<effort>)`.
+- FastAPI-style upstream errors (`{"detail": ...}`) keep their message when normalized.
+
 ### Changed
 - **Breaking:** an unprefixed `/v1` request whose model name suggests a provider kind
   (e.g. `deepseek-*`) is routed only to a provider of that name, or to the single

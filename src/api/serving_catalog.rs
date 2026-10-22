@@ -164,6 +164,7 @@ fn model_compat(
         "requiresToolResultName",
         "requiresAssistantAfterToolResult",
         "requiresThinkingAsText",
+        "forceAdaptiveThinking",
     ] {
         if let Some(value) = values.get(name).and_then(serde_json::Value::as_bool) {
             result.insert(name.to_owned(), serde_json::Value::Bool(value));
@@ -308,6 +309,15 @@ fn project(
                 &model.id,
             )
             .unwrap_or_default();
+            let mut compat = model_compat(&model.compat);
+            if crate::proxy::requires_adaptive_thinking(
+                state,
+                &candidate.config,
+                &candidate.id,
+                &model.id,
+            ) {
+                compat.insert("forceAdaptiveThinking".into(), true.into());
+            }
             models.insert(
                 model.id.clone(),
                 ServingModel {
@@ -317,7 +327,7 @@ fn project(
                     input,
                     context_window: model.context_window,
                     max_tokens: model.max_tokens,
-                    compat: model_compat(&model.compat),
+                    compat,
                     pricing: estimate(&model.cost),
                     reasoning_efforts,
                 },

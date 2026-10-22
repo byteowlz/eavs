@@ -245,6 +245,13 @@ supports_stream_options = false
 # id = "my-model"
 # reasoning = true
 # reasoning_efforts = ["low", "medium", "xhigh"]
+#
+# Anthropic models that only accept adaptive thinking (Sonnet 5.5 and newer)
+# are handled the same way: a request with thinking.type "enabled" is
+# converted to {type: "adaptive"} plus output_config.effort (from the token
+# budget), learned from the first upstream 400 (persisted to
+# $XDG_STATE_HOME/eavs/adaptive-thinking.json). Declare it up front with:
+# compat = { forceAdaptiveThinking = true }
 
 # =============================================================================
 # Test Model Resolution

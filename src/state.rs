@@ -56,6 +56,8 @@ pub struct AppState {
     pub quota_tracker: QuotaTracker,
     /// Reasoning-effort values learned from upstream errors.
     pub learned_efforts: Arc<crate::reasoning_effort::LearnedEfforts>,
+    /// Models learned to require Anthropic adaptive thinking.
+    pub learned_adaptive: Arc<crate::reasoning_effort::LearnedAdaptive>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -506,11 +508,10 @@ impl AppState {
             model_catalog: Arc::new(OnceCell::new()),
             quota_tracker: QuotaTracker::new(),
             learned_efforts: Arc::new(crate::reasoning_effort::LearnedEfforts::load(
-                if cfg!(test) {
-                    None
-                } else {
-                    crate::reasoning_effort::LearnedEfforts::default_path()
-                },
+                crate::reasoning_effort::LearnedEfforts::state_file("reasoning-efforts.json"),
+            )),
+            learned_adaptive: Arc::new(crate::reasoning_effort::LearnedAdaptive::load(
+                crate::reasoning_effort::LearnedAdaptive::state_file("adaptive-thinking.json"),
             )),
         }
     }

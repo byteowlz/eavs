@@ -1525,11 +1525,11 @@ pub async fn proxy_handler_pinned(
         }
     }
 
-    // Rewrite a reasoning effort the upstream is known not to accept
-    // (declared on the model, or learned from an earlier upstream 400).
+    // Adjust for upstream behavior already known for this model (accepted
+    // reasoning efforts, adaptive thinking), declared or learned from a 400.
     let effort_capable = !is_native_inference && provider_type != ProviderType::Bedrock;
-    let (request_body, effort_rewrite) = if effort_capable {
-        apply_known_efforts(
+    let (request_body, adjustments) = if effort_capable {
+        apply_known_adjustments(
             &state,
             provider_config,
             &provider_name,
@@ -1537,7 +1537,7 @@ pub async fn proxy_handler_pinned(
             request_body,
         )
     } else {
-        (request_body, None)
+        (request_body, Vec::new())
     };
     let request_body = Bytes::from(request_body);
 
@@ -1792,13 +1792,13 @@ pub async fn proxy_handler_pinned(
     } else {
         None
     };
-    let upstream_res = send_with_effort_retry(
+    let upstream_res = send_with_adjustment_retry(
         &state,
         &provider_name,
         &model_name,
         upstream_req,
         effort_capable,
-        effort_rewrite,
+        adjustments,
     )
     .await
     .map_err(|e| {
@@ -2713,49 +2713,79 @@ pub async fn unknown_endpoint_response(
         .into_response()
 }
 
-/// Rewrite the request's reasoning effort to one the upstream accepts, when
-/// the accepted set is known. Returns the body and the rewrite, if any.
-fn apply_known_efforts(
+/// A request adjustment reported to the client as `header: from->to`.
+type Adjustment = (&'static str, String, String);
+
+/// Whether `model` is known to require Anthropic adaptive thinking: declared
+/// via model compat `forceAdaptiveThinking = true`, or learned.
+pub fn requires_adaptive_thinking(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model: &str,
+) -> bool {
+    provider_config
+        .models
+        .iter()
+        .find(|entry| entry.id == model)
+        .and_then(|entry| entry.compat.get("forceAdaptiveThinking"))
+        .and_then(Value::as_bool)
+        .or_else(|| state.learned_adaptive.get(provider_name, model))
+        .unwrap_or(false)
+}
+
+/// Apply adjustments already known for this upstream model (accepted
+/// reasoning efforts, adaptive thinking) before sending.
+fn apply_known_adjustments(
     state: &AppState,
     provider_config: &crate::config::ProviderConfig,
     provider_name: &str,
     model_name: &str,
-    body: Vec<u8>,
-) -> (Vec<u8>, Option<(String, String)>) {
-    let Some((rewritten, from, to)) =
+    mut body: Vec<u8>,
+) -> (Vec<u8>, Vec<Adjustment>) {
+    let mut adjustments = Vec::new();
+    if let Some((rewritten, from, to)) =
         reasoning_efforts_for(state, provider_config, provider_name, model_name)
             .and_then(|supported| crate::reasoning_effort::rewrite_bytes(&body, &supported))
-    else {
-        return (body, None);
-    };
-    tracing::info!(
-        provider = %provider_name,
-        model = %model_name,
-        from = %from,
-        to = %to,
-        "Rewrote unsupported reasoning effort"
-    );
-    (rewritten, Some((from, to)))
+    {
+        body = rewritten;
+        adjustments.push(("x-eavs-reasoning-effort", from, to));
+    }
+    if requires_adaptive_thinking(state, provider_config, provider_name, model_name) {
+        if let Some((rewritten, from, to)) = crate::reasoning_effort::to_adaptive_bytes(&body) {
+            body = rewritten;
+            adjustments.push(("x-eavs-thinking", from, to));
+        }
+    }
+    for (header, from, to) in &adjustments {
+        tracing::info!(provider = %provider_name, model = %model_name, %header, %from, %to, "Adjusted request for known upstream behavior");
+    }
+    (body, adjustments)
 }
 
-/// Send upstream; if the upstream rejects the request's reasoning effort with
-/// a 400 that names the accepted set, learn it and resend once with the
-/// nearest accepted value. Any other response passes through unchanged.
-/// Adds `x-eavs-reasoning-effort: from->to` when the effort was rewritten.
-async fn send_with_effort_retry(
+/// Whether a request carries something the gateway can adjust after an
+/// upstream rejection.
+fn adjustable(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|body| {
+        crate::reasoning_effort::requested(&body).is_some()
+            || crate::reasoning_effort::uses_enabled_thinking(&body)
+    })
+}
+
+/// Send upstream; if the upstream rejects the request with a 400 the gateway
+/// understands (unsupported reasoning effort naming the accepted set, or a
+/// model requiring adaptive thinking), learn it and resend once, adjusted.
+/// Any other response passes through unchanged. Adjustments are reported as
+/// `x-eavs-reasoning-effort` / `x-eavs-thinking: from->to` headers.
+async fn send_with_adjustment_retry(
     state: &AppState,
     provider_name: &str,
     model_name: &str,
     request: UpstreamRequest,
-    effort_capable: bool,
-    mut effort_rewrite: Option<(String, String)>,
+    capable: bool,
+    mut adjustments: Vec<Adjustment>,
 ) -> Result<UpstreamResponse, std::io::Error> {
-    let carries_effort = effort_capable
-        && serde_json::from_slice::<Value>(&request.body)
-            .ok()
-            .and_then(|body| crate::reasoning_effort::requested(&body))
-            .is_some();
-    let resend = carries_effort.then(|| {
+    let resend = (capable && adjustable(&request.body)).then(|| {
         (
             request.method.clone(),
             request.url.clone(),
@@ -2765,17 +2795,18 @@ async fn send_with_effort_retry(
     });
     let mut response = state.upstream.send(request).await?;
     if let Some((method, url, headers, body)) = resend {
-        if let Some((rewritten, from, to)) =
-            learn_from_effort_error(state, provider_name, model_name, &mut response, &body).await
+        if let Some((rewritten, (header, from, to))) =
+            learn_from_upstream_error(state, provider_name, model_name, &mut response, &body).await
         {
             tracing::info!(
                 provider = %provider_name,
                 model = %model_name,
-                from = %from,
-                to = %to,
-                "Upstream rejected reasoning effort; learned supported values and retrying once"
+                %header,
+                %from,
+                %to,
+                "Upstream rejected request; learned its requirement and retrying once"
             );
-            effort_rewrite = Some((effort_rewrite.map_or(from, |(first, _)| first), to));
+            record_adjustment(&mut adjustments, (header, from, to));
             response = state
                 .upstream
                 .send(UpstreamRequest {
@@ -2787,24 +2818,40 @@ async fn send_with_effort_retry(
                 .await?;
         }
     }
-    if let Some(value) = effort_rewrite
-        .and_then(|(from, to)| http::HeaderValue::from_str(&format!("{from}->{to}")).ok())
-    {
-        response.headers.insert("x-eavs-reasoning-effort", value);
-    }
+    report_adjustments(&mut response.headers, adjustments);
     Ok(response)
 }
 
-/// For a 400 naming the accepted reasoning efforts: record them and return
-/// the rewritten body. Otherwise restore the (already read) error body so the
+/// Add an adjustment, or update the target of one already applied (keeping
+/// the client's original value as `from`).
+fn record_adjustment(adjustments: &mut Vec<Adjustment>, (header, from, to): Adjustment) {
+    match adjustments
+        .iter_mut()
+        .find(|(known, _, _)| *known == header)
+    {
+        Some(existing) => existing.2 = to,
+        None => adjustments.push((header, from, to)),
+    }
+}
+
+fn report_adjustments(headers: &mut HeaderMap, adjustments: Vec<Adjustment>) {
+    for (header, from, to) in adjustments {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("{from}->{to}")) {
+            headers.insert(header, value);
+        }
+    }
+}
+
+/// For a 400 the gateway understands: record what it teaches and return the
+/// adjusted body. Otherwise restore the (already read) error body so the
 /// client receives it unchanged, and return `None`.
-async fn learn_from_effort_error(
+async fn learn_from_upstream_error(
     state: &AppState,
     provider_name: &str,
     model_name: &str,
     response: &mut UpstreamResponse,
     body: &[u8],
-) -> Option<(Vec<u8>, String, String)> {
+) -> Option<(Vec<u8>, Adjustment)> {
     if response.status != StatusCode::BAD_REQUEST {
         return None;
     }
@@ -2817,13 +2864,22 @@ async fn learn_from_effort_error(
     .ok()
     .and_then(Result::ok)
     .unwrap_or_default();
-    let retry = crate::reasoning_effort::parse_supported(&String::from_utf8_lossy(&error_bytes))
-        .and_then(|supported| {
+    let text = String::from_utf8_lossy(&error_bytes);
+    let retry = if crate::reasoning_effort::requires_adaptive(&text) {
+        state
+            .learned_adaptive
+            .learn(provider_name, model_name, true);
+        crate::reasoning_effort::to_adaptive_bytes(body)
+            .map(|(rewritten, from, to)| (rewritten, ("x-eavs-thinking", from, to)))
+    } else {
+        crate::reasoning_effort::parse_supported(&text).and_then(|supported| {
             state
                 .learned_efforts
                 .learn(provider_name, model_name, supported.clone());
             crate::reasoning_effort::rewrite_bytes(body, &supported)
-        });
+                .map(|(rewritten, from, to)| (rewritten, ("x-eavs-reasoning-effort", from, to)))
+        })
+    };
     if retry.is_none() {
         response.body = futures::stream::once(async move { Ok(error_bytes) }).boxed();
     }
@@ -4897,6 +4953,8 @@ fn normalize_upstream_error(
             v.pointer("/message").and_then(|v| v.as_str()),
             v.pointer("/error").and_then(|v| v.as_str()),
             v.pointer("/Message").and_then(|v| v.as_str()),
+            v.pointer("/detail").and_then(|v| v.as_str()),
+            v.pointer("/detail/0/msg").and_then(|v| v.as_str()),
         ];
         message = candidates
             .into_iter()
@@ -10326,5 +10384,93 @@ mod tests {
         );
         assert_eq!(mock.take_requests().await.len(), 0);
         Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn anthropic_adaptive_thinking_is_learned_and_retried_once() -> Result<(), anyhow::Error>
+    {
+        let rejection = ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"type": "error", "error": {"type": "invalid_request_error", "message": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}).to_string(),
+            )],
+        };
+        let mock = MockUpstream::new(vec![rejection, ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                type_: "anthropic".to_string(),
+                base_url: "http://anthropic".to_string(),
+                api_key: "sk-ant-test".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        let send = |budget: u64| {
+            let app = app.clone();
+            async move {
+                let req = http::Request::builder()
+                    .method("POST")
+                    .uri("/anthropic/v1/messages")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({
+                        "model": "claude-sonnet-5-5",
+                        "max_tokens": 32000,
+                        "thinking": {"type": "enabled", "budget_tokens": budget},
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }))?))?;
+                let response = app.oneshot(req).await?;
+                Ok::<_, anyhow::Error>((response.status(), response.headers().clone()))
+            }
+        };
+        let (status, headers) = send(16384).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-thinking"], "enabled->adaptive(high)");
+        let (status, headers) = send(2048).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-thinking"], "enabled->adaptive(low)");
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 3, "one retry, then adjusted up front");
+        let bodies: Vec<Value> = requests
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(bodies[0]["thinking"]["type"], "enabled");
+        assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[1]["output_config"]["effort"], "high");
+        assert_eq!(bodies[2]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[2]["output_config"]["effort"], "low");
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_error_messages_survive_normalization() {
+        let fastapi = json!({"detail": "Model 'x' is not loaded"}).to_string();
+        let (message, _, _) = normalize_upstream_error(
+            ProviderType::OpenAICompatible,
+            StatusCode::BAD_REQUEST,
+            &fastapi,
+            fastapi.as_bytes(),
+        );
+        assert_eq!(message, "Model 'x' is not loaded");
+        let validation =
+            json!({"detail": [{"loc": ["body", "max_tokens"], "msg": "must be positive"}]})
+                .to_string();
+        let (message, _, _) = normalize_upstream_error(
+            ProviderType::OpenAICompatible,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &validation,
+            validation.as_bytes(),
+        );
+        assert_eq!(message, "must be positive");
     }
 }
