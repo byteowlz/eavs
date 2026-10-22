@@ -133,6 +133,7 @@ impl CatalogModel {
                 cache_write: self.cost.cache_write,
             },
             compat: std::collections::HashMap::new(),
+            reasoning_efforts: Vec::new(),
         }
     }
 }

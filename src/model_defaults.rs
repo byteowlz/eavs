@@ -71,6 +71,7 @@ fn candidate_models(
             max_tokens: 16_384,
             cost: crate::config::ModelCost::default(),
             compat: std::collections::HashMap::new(),
+            reasoning_efforts: Vec::new(),
         }];
     }
 

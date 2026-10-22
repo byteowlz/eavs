@@ -39,6 +39,7 @@ mod provider_probe;
 mod provider_store;
 mod provider_templates;
 mod proxy;
+mod reasoning_effort;
 mod routing;
 mod runtime_state;
 mod setup;

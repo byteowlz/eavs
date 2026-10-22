@@ -472,3 +472,62 @@ async fn external_writer_catalog_auth() -> Result<()> {
     assert_eq!(f.tripwire.0.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions in fallible offline fixture"
+)]
+async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
+    let mut fixture = fixture().await?;
+    let mut config = (*fixture.state.config).clone();
+    let alpha = config
+        .providers
+        .get_mut("alpha")
+        .ok_or_else(|| anyhow!("fixture provider"))?;
+    for model in &mut alpha.models {
+        if model.id == "allowed" {
+            model.reasoning_efforts = vec!["low".into(), "xhigh".into()];
+        }
+    }
+    let learned = fixture.state.learned_efforts.clone();
+    fixture.state = AppState::new_with_upstream(config, fixture.tripwire.clone());
+    fixture.state.learned_efforts = learned;
+    fixture
+        .state
+        .key_store
+        .set(Arc::new(
+            KeyStore::new(&fixture.dir.path().join("keys2.sqlite")).await?,
+        ))
+        .map_err(|_| anyhow!("store already set"))?;
+    fixture
+        .state
+        .learned_efforts
+        .learn("alpha", "field", vec!["medium".into()]);
+    let token = key(&fixture.state, KeyPermissions::default()).await?;
+    let (status, _, value) = request(&fixture.state, Some(&token), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    let models: Vec<&Value> = value["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["models"].as_array().into_iter().flatten())
+        .collect();
+    let efforts = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| m.get("reasoning_efforts").cloned())
+    };
+    assert_eq!(
+        efforts("allowed"),
+        Some(Some(serde_json::json!(["low", "xhigh"])))
+    );
+    assert_eq!(efforts("field"), Some(Some(serde_json::json!(["medium"]))));
+    assert_eq!(efforts("blocked"), Some(None), "unknown values are omitted");
+    assert_eq!(
+        fixture.tripwire.0.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    Ok(())
+}

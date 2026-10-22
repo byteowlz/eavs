@@ -235,6 +235,16 @@ test_model = "my-model"  # Model to use for `eavs setup test` / `eavs setup test
 supports_store = false
 max_tokens_field = "max_tokens"
 supports_stream_options = false
+# Self-hosted servers often accept only some reasoning efforts. Declare them
+# and EAVS rewrites other client values (reasoning_effort / reasoning.effort)
+# to the nearest accepted level, preferring the next higher one
+# (minimal -> low, high -> xhigh). Undeclared models learn the set from the
+# first upstream 400 that names it (retried once, persisted to
+# $XDG_STATE_HOME/eavs/reasoning-efforts.json).
+# [[providers.vllm.models]]
+# id = "my-model"
+# reasoning = true
+# reasoning_efforts = ["low", "medium", "xhigh"]
 
 # =============================================================================
 # Test Model Resolution
