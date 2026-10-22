@@ -600,6 +600,26 @@ pub async fn proxy_handler_pinned(
         })
         .ok_or_else(|| {
             let available = state.config.provider_names();
+            if provider_selected_by_model {
+                // The model-name guess is only a hint: never let it name an
+                // unconfigured provider silently. Tell the client how to pin.
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        ProxyError::new(
+                            format!(
+                                "Model '{model}' looks like provider '{provider_name_requested}', \
+                                 which is not configured, and no 'default' provider exists. \
+                                 Select the provider explicitly via the /<provider>/v1/... path \
+                                 or the X-Provider header. Configured providers: {available:?}"
+                            ),
+                            "invalid_request_error",
+                        )
+                        .with_code("unknown_provider"),
+                    ),
+                )
+                    .into_response();
+            }
             (
                 StatusCode::BAD_REQUEST,
                 Json(ProxyError::new(
@@ -9677,6 +9697,89 @@ mod tests {
             }
         );
 
+        Ok(())
+    }
+
+    async fn unprefixed_chat(
+        providers: HashMap<String, ProviderConfig>,
+        model: &str,
+    ) -> Result<(StatusCode, Value, usize), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"{}")],
+        }]);
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))?))?;
+        let response = app.oneshot(req).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        Ok((status, body, mock.take_requests().await.len()))
+    }
+
+    fn fhgenie_only() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "fhgenie".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://fhgenie/v1".to_string(),
+                api_key: "sk-secret-fhgenie".to_string(),
+                ..Default::default()
+            },
+        );
+        providers
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unprefixed_v1_rejects_unconfigured_model_guess() -> Result<(), anyhow::Error> {
+        let (status, body, calls) =
+            unprefixed_chat(fhgenie_only(), "deepseek-ai/DeepSeek-V4.1-Flash").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unknown_provider", "body: {body}");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'deepseek'"), "names candidate: {message}");
+        assert!(message.contains("/<provider>/v1"), "path remedy: {message}");
+        assert!(message.contains("X-Provider"), "header remedy: {message}");
+        assert!(message.contains("fhgenie"), "lists configured: {message}");
+        assert!(!body.to_string().contains("sk-secret"), "no key material");
+        assert_eq!(calls, 0, "upstream must not be called");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unprefixed_v1_routes_configured_model_guess() -> Result<(), anyhow::Error> {
+        let mut providers = fhgenie_only();
+        providers.insert(
+            "deepseek".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://deepseek/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let (status, _, calls) = unprefixed_chat(providers, "deepseek-chat").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls, 1);
         Ok(())
     }
 }
