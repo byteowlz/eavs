@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Model availability maintenance: deactivate models without touching config, e.g.
+  when a GPU machine switches loadouts. `POST /eavs/maintenance/availability`
+  accepts the operator token or a new maintenance-only key (`eavs keys create
+  --maintenance`; such keys are rejected on every inference route) and supports
+  targeted updates plus `mode: "replace"` to announce a provider's complete
+  active set, with optional reason and TTL. Deactivated models vanish from
+  catalogs and direct requests answer a typed `model_unavailable` error naming
+  the reason and remedy. CLI: `eavs models availability|disable|enable`.
 - Per-model native API: models carry `api` (`openai-completions`, `openai-responses`,
   `anthropic-messages`), from config or, on gateways serving every format (OpenCode,
   OpenCode Go), from models.dev's per-model SDK. The serving catalog publishes `api` and

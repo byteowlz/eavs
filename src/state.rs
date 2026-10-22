@@ -58,6 +58,8 @@ pub struct AppState {
     pub learned_efforts: Arc<crate::reasoning_effort::LearnedEfforts>,
     /// Models learned to require Anthropic adaptive thinking.
     pub learned_adaptive: Arc<crate::reasoning_effort::LearnedAdaptive>,
+    /// Operator/fleet maintenance deactivations applied on top of config.
+    pub availability: Arc<crate::availability::Availability>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -512,6 +514,9 @@ impl AppState {
             )),
             learned_adaptive: Arc::new(crate::reasoning_effort::LearnedAdaptive::load(
                 crate::reasoning_effort::LearnedAdaptive::state_file("adaptive-thinking.json"),
+            )),
+            availability: Arc::new(crate::availability::Availability::load(
+                crate::availability::Availability::state_file(),
             )),
         }
     }

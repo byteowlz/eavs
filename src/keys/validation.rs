@@ -90,6 +90,12 @@ impl KeyValidator {
             return Err(KeyValidationError::InvalidKey);
         }
 
+        // Maintenance keys reconfigure the gateway; they never carry
+        // inference rights, so a leaked maintenance key cannot spend money.
+        if key.permissions.maintenance {
+            return Err(KeyValidationError::MaintenanceKey);
+        }
+
         // Check model permissions
         if !key.permissions.is_model_allowed(model) {
             return Err(KeyValidationError::ModelNotAllowed {
@@ -234,6 +240,8 @@ pub enum KeyValidationError {
     BudgetExceeded { limit: f64, used: f64 },
     /// Rate limit exceeded
     RateLimited(RateLimitError),
+    /// A maintenance-only key was used on an inference route
+    MaintenanceKey,
 }
 
 impl std::fmt::Display for KeyValidationError {
@@ -253,6 +261,10 @@ impl std::fmt::Display for KeyValidationError {
                 write!(f, "Budget exceeded: ${used:.4} used of ${limit:.4} limit")
             }
             Self::RateLimited(e) => write!(f, "{e}"),
+            Self::MaintenanceKey => write!(
+                f,
+                "This is a maintenance-only key (model availability). Create an inference key with 'eavs keys create'."
+            ),
         }
     }
 }
@@ -271,6 +283,7 @@ impl KeyValidationError {
             Self::ProviderNotAllowed { .. } => 403,
             Self::BudgetExceeded { .. } => 429,
             Self::RateLimited(_) => 429,
+            Self::MaintenanceKey => 403,
         }
     }
 
@@ -285,6 +298,7 @@ impl KeyValidationError {
             Self::ProviderNotAllowed { .. } => "provider_not_allowed",
             Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::RateLimited(_) => "rate_limit_exceeded",
+            Self::MaintenanceKey => "maintenance_key_rejected",
         }
     }
 }
@@ -299,6 +313,32 @@ mod tests {
         let rate_limiter = Arc::new(RateLimiter::new());
         let validator = KeyValidator::new(store.clone(), rate_limiter.clone());
         (store, rate_limiter, validator)
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Behavioral assertions in fallible fixture"
+    )]
+    async fn maintenance_keys_carry_no_inference_rights() -> anyhow::Result<()> {
+        let (store, _rate_limiter, validator) = setup().await;
+        let request = CreateKeyRequest {
+            permissions: KeyPermissions {
+                maintenance: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let key = store.create_key(request).await?;
+        let error = validator
+            .validate(&key.key, "any-model", "any-provider", None)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("maintenance key validated for inference"))?;
+        assert!(matches!(error, KeyValidationError::MaintenanceKey));
+        assert_eq!(error.status_code(), 403);
+        assert_eq!(error.error_code(), "maintenance_key_rejected");
+        Ok(())
     }
 
     #[tokio::test]

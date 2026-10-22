@@ -1082,7 +1082,18 @@ pub async fn proxy_handler_pinned(
     // Handle /v1/models endpoint for providers that don't support it natively
     // Return a synthetic response with known models for that provider
     if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
-        let models = provider_type.synthetic_models();
+        // A deactivated model must not be advertised.
+        let mut models = Vec::new();
+        for model in provider_type.synthetic_models() {
+            if state
+                .availability
+                .unavailable(&provider_name, model)
+                .await
+                .is_none()
+            {
+                models.push(model);
+            }
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -1365,6 +1376,30 @@ pub async fn proxy_handler_pinned(
         };
         (body, model)
     };
+
+    // Deactivated models (operator or fleet maintenance) never reach
+    // upstream; the answer names the reason and the remedy.
+    if let Some(unavailable) = state.availability.unavailable(&provider_name, &model).await {
+        let ttl = unavailable
+            .until
+            .map(|until| format!(" It returns automatically after {until}."))
+            .unwrap_or_default();
+        let reason = match unavailable.reason.as_deref() {
+            Some(reason) => format!(" Reason: {reason} (by {}).", unavailable.set_by),
+            None => format!(" Deactivated by {}.", unavailable.set_by),
+        };
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ProxyError::new(
+                format!(
+                    "Model '{model}' is currently unavailable on provider '{provider_name}'.{reason}{ttl} Restore it with 'eavs models enable {provider_name} {model}'."
+                ),
+                "invalid_request_error",
+            )
+            .with_code("model_unavailable")),
+        )
+            .into_response());
+    }
 
     // Construct URL with transformer's endpoint path if transforming
     // Override base URL for providers that use dynamic OAuth-derived URLs
@@ -10622,6 +10657,101 @@ mod tests {
             assert_eq!(&sent, original, "native body relayed unchanged");
             assert!(request.headers.get("x-opencode-session").is_some());
         }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn deactivated_models_are_hidden_and_rejected_with_a_remedy() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                type_: "mock".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let availability = state.availability.clone();
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        let request = |app: &Router, path: &'static str| {
+            let app = app.clone();
+            async move {
+                let body = if path == "models" {
+                    None
+                } else {
+                    Some(serde_json::to_vec(&json!({
+                        "model": "mock-model",
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }))?)
+                };
+                let mut builder = http::Request::builder()
+                    .method(if path == "models" { "GET" } else { "POST" })
+                    .uri(format!("/v1/{path}"))
+                    .header("X-Provider", "mock");
+                if body.is_some() {
+                    builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                }
+                let request = builder.body(body.map_or_else(Body::empty, Body::from))?;
+                let response = app.oneshot(request).await?;
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 64 << 10).await?;
+                Ok::<_, anyhow::Error>((status, bytes))
+            }
+        };
+
+        // Baseline: served.
+        let (status, _) = request(&app, "chat/completions").await?;
+        assert_eq!(status, StatusCode::OK);
+
+        // Deactivate: hidden from the synthetic /v1/models list, and a direct
+        // request answers a typed 404 with the reason and the remedy.
+        availability
+            .deactivate(
+                "mock",
+                &["mock-model".to_string()],
+                Some("loadout switch".to_string()),
+                None,
+                "opengo-1",
+            )
+            .await;
+        let (status, body) = request(&app, "models").await?;
+        assert_eq!(status, StatusCode::OK);
+        let models: Value = serde_json::from_slice(&body)?;
+        assert!(
+            !models["data"]
+                .as_array()
+                .is_some_and(|models| models.iter().any(|m| m["id"] == "mock-model")),
+            "deactivated model must not be advertised"
+        );
+        let (status, body) = request(&app, "chat/completions").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let error: Value = serde_json::from_slice(&body)?;
+        assert_eq!(error["error"]["code"], "model_unavailable");
+        assert!(error["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("loadout switch")
+                && message.contains("eavs models enable mock mock-model")
+        }));
+
+        // Re-enabled: advertised and served again.
+        availability.activate("mock", None).await;
+        let (status, _) = request(&app, "models").await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = request(&app, "chat/completions").await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "body: {}",
+            String::from_utf8_lossy(&body)
+        );
         Ok(())
     }
 }

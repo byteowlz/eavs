@@ -35,14 +35,50 @@ const VALID_INJECTION_ROLES: &[&str] = &["system", "user", "assistant"];
 #[derive(Clone)]
 pub struct ListenerAuth {
     token: std::sync::Arc<str>,
+    /// App handle so `/eavs/maintenance/*` can also accept maintenance-only
+    /// virtual keys. Every other route keeps failing closed on them.
+    app: Option<std::sync::Arc<AppState>>,
 }
 
 impl ListenerAuth {
     pub fn new(token: String) -> Self {
         Self {
             token: token.into(),
+            app: None,
         }
     }
+
+    /// Allow maintenance virtual keys on `/eavs/maintenance/*` routes.
+    pub fn with_app(mut self, app: std::sync::Arc<AppState>) -> Self {
+        self.app = Some(app);
+        self
+    }
+}
+
+/// Identity of a maintenance-key caller, inserted by the listener middleware.
+#[derive(Debug, Clone)]
+pub struct MaintenanceActor {
+    pub key_id: String,
+}
+
+/// Resolve `Authorization: Bearer <virtual key>` to a valid maintenance key,
+/// or `None`. `X-Eavs-Token` is deliberately not considered here.
+async fn maintenance_actor(app: &AppState, headers: &http::HeaderMap) -> Option<MaintenanceActor> {
+    let bearer = headers
+        .get(http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?
+        .trim();
+    if !crate::keys::is_virtual_key(bearer) {
+        return None;
+    }
+    let store = app.get_key_store()?;
+    let key = store.lookup_for_auth(bearer).await.ok()??;
+    if !key.permissions.maintenance || !key.is_valid() {
+        return None;
+    }
+    Some(MaintenanceActor { key_id: key.key_id })
 }
 
 fn listener_token_from_headers(headers: &HeaderMap) -> Option<&str> {
@@ -67,11 +103,32 @@ fn listener_request_is_authorized(headers: &HeaderMap, expected: &str) -> bool {
 /// Bearer auth is also accepted for control-plane clients.
 pub async fn require_listener_auth(
     State(auth): State<ListenerAuth>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     if listener_request_is_authorized(request.headers(), &auth.token) {
         return next.run(request).await;
+    }
+    if let Some(app) = &auth.app {
+        if request.uri().path().starts_with("/eavs/maintenance/") {
+            if request.method() == http::Method::OPTIONS {
+                return next.run(request).await;
+            }
+            return match maintenance_actor(app, request.headers()).await {
+                Some(actor) => {
+                    request.extensions_mut().insert(actor);
+                    next.run(request).await
+                }
+                None => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "A maintenance key is required for this route",
+                        "code": "maintenance_unauthorized"
+                    })),
+                )
+                    .into_response(),
+            };
+        }
     }
 
     (
@@ -1233,6 +1290,211 @@ pub async fn key_stats_handler(
 ///
 /// Returns the latest observed upstream rate limit quotas for all provider/account
 /// pairs that have been seen recently.
+/// Maintenance API: announce model availability (e.g. after a GPU loadout
+/// switch). Authenticated with the listener token or a maintenance key.
+#[derive(serde::Deserialize)]
+pub struct MaintenanceAvailabilityRequest {
+    pub provider: String,
+    /// With `mode: "replace"`: the complete active set. Otherwise: the models
+    /// to activate or deactivate.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// `false` deactivates `models`; `true` re-activates them.
+    #[serde(default)]
+    pub available: bool,
+    /// `"replace"`: `models` is the full active set, everything else on the
+    /// provider is deactivated. The default is a targeted update.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Deactivations lapse after this, e.g. "2h" or "30m".
+    #[serde(default)]
+    pub ttl: Option<String>,
+}
+
+fn valid_model_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+/// Validate the request; `Err` is the response to send.
+fn validated_maintenance_request(
+    request: &MaintenanceAvailabilityRequest,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, Box<Response>> {
+    let invalid = |code: &str, error: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error, "code": code })),
+        )
+            .into_response()
+    };
+    if request.models.len() > 512 || request.models.iter().any(|model| !valid_model_id(model)) {
+        return Err(Box::new(invalid(
+            "invalid_models",
+            "models must be at most 512 non-empty ids without control characters",
+        )));
+    }
+    if request
+        .reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > 512)
+    {
+        return Err(Box::new(invalid(
+            "invalid_reason",
+            "reason must be at most 512 characters",
+        )));
+    }
+    let until = match request.ttl.as_deref() {
+        None => None,
+        Some(ttl) => match crate::cli::parse_duration_string(ttl) {
+            Some(duration) => {
+                Some(chrono::Utc::now() + chrono::Duration::from_std(duration).unwrap_or_default())
+            }
+            None => {
+                return Err(Box::new(invalid(
+                    "invalid_ttl",
+                    "ttl must look like \"30m\", \"2h\" or \"7d\"",
+                )))
+            }
+        },
+    };
+    Ok(until)
+}
+
+fn maintenance_error(code: &str, error: &str, extra: Option<serde_json::Value>) -> Response {
+    let mut body = serde_json::json!({ "error": error, "code": code });
+    if let Some(extra) = extra {
+        body["providers"] = extra;
+    }
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+/// The model universe a `mode=replace` announce can deactivate: the
+/// provider's configured shortlist; when it serves a full catalog instead,
+/// the currently announced-active models plus the announced set.
+async fn maintenance_universe(state: &AppState, provider: &str, active: &[String]) -> Vec<String> {
+    let configured: Vec<String> = state
+        .resolve_provider(provider)
+        .map(|provider| {
+            provider
+                .config
+                .models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !configured.is_empty() {
+        return configured;
+    }
+    let mut universe: Vec<String> = state
+        .availability
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|entry| entry.provider == provider)
+        .flat_map(|entry| entry.models.into_keys())
+        .collect();
+    universe.extend(active.iter().cloned());
+    universe.sort();
+    universe.dedup();
+    universe
+}
+
+pub async fn maintenance_availability_handler(
+    State(state): State<AppState>,
+    actor: Option<axum::Extension<MaintenanceActor>>,
+    Json(request): Json<MaintenanceAvailabilityRequest>,
+) -> Response {
+    let set_by = match actor {
+        Some(axum::Extension(actor)) => actor.key_id,
+        None => "operator".to_owned(),
+    };
+    let until = match validated_maintenance_request(&request) {
+        Ok(until) => until,
+        Err(response) => return *response,
+    };
+    let Some(runtime) = state.resolve_provider(&request.provider) else {
+        let configured: Vec<String> = state.config.providers.keys().take(32).cloned().collect();
+        return maintenance_error(
+            "unknown_provider",
+            &format!("Provider '{}' is not configured", request.provider),
+            Some(serde_json::Value::from(configured)),
+        );
+    };
+    let replace = request.mode.as_deref() == Some("replace");
+    if !replace && !request.available && request.models.is_empty() {
+        return maintenance_error(
+            "invalid_models",
+            "models must not be empty to deactivate; use mode=replace to announce the full active set",
+            None,
+        );
+    }
+    let changed = if replace {
+        if request.models.is_empty() {
+            return maintenance_error(
+                "invalid_models",
+                "mode=replace needs the complete active model set",
+                None,
+            );
+        }
+        let universe = maintenance_universe(&state, &runtime.resolved_name, &request.models).await;
+        state
+            .availability
+            .replace_active(
+                &request.provider,
+                &request.models,
+                &universe,
+                request.reason,
+                until,
+                &set_by,
+            )
+            .await
+    } else if request.available {
+        state
+            .availability
+            .activate(
+                &request.provider,
+                if request.models.is_empty() {
+                    None
+                } else {
+                    Some(&request.models)
+                },
+            )
+            .await
+    } else {
+        state
+            .availability
+            .deactivate(
+                &request.provider,
+                &request.models,
+                request.reason,
+                until,
+                &set_by,
+            )
+            .await
+    };
+    let snapshot = state.availability.snapshot().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "provider": request.provider,
+            "changed": changed,
+            "availability": snapshot,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn maintenance_availability_snapshot_handler(State(state): State<AppState>) -> Response {
+    let availability = state.availability.snapshot().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "availability": availability })),
+    )
+        .into_response()
+}
+
 pub async fn upstream_quotas_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2287,6 +2549,7 @@ mod tests {
     use crate::state::Injection;
     use axum::{middleware, routing::get, Router};
     use std::collections::HashMap;
+    use tower::ServiceExt;
 
     /// Create a temp-file SQLite-backed OAuth store for handler tests.
     async fn test_oauth_store() -> OAuthStore {
@@ -2341,6 +2604,220 @@ mod tests {
         assert_eq!(effective_oauth_user(&state, "default").unwrap(), "default");
         let err = effective_oauth_user(&state, "victim").unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    /// Shared maintenance-API fixture: app router with listener auth, a
+    /// maintenance key and an ordinary inference key.
+    async fn maintenance_fixture() -> anyhow::Result<(Router, String, String, String)> {
+        use crate::keys::{is_virtual_key, CreateKeyRequest, KeyPermissions, KeyStore};
+
+        let mut config = AppConfig {
+            inference: crate::inference_ingress::Config::default(),
+            reload_restart_input: None,
+            server: ServerConfig::default(),
+            providers: HashMap::new(),
+            upstream: HashMap::new(),
+            logging: LoggingConfig::default(),
+            analysis: AnalysisConfig::default(),
+            policy: crate::policy::PolicyConfig::default(),
+            delegated_fetch: crate::delegated_fetch::DelegatedFetchConfig::default(),
+            state: StateConfig::default(),
+            keys: KeysConfig::default(),
+            capture: crate::config::CaptureConfig::default(),
+            transform: crate::config::TransformConfig::default(),
+            network: crate::config::NetworkConfig::default(),
+            egress: crate::config::EgressConfig::default(),
+            mock_responses: crate::config::MockResponsesConfig::default(),
+            native_pricing: crate::config::NativePricingConfig::default(),
+        };
+        config.providers.insert(
+            "rtx".to_string(),
+            ProviderConfig {
+                type_: "opencode-go".to_string(),
+                base_url: "https://fixture-private-host.invalid/v1".to_string(),
+                api_key: "env:FIXTURE_PRIVATE_KEY".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new(config);
+        let store = std::sync::Arc::new(KeyStore::in_memory().await?);
+        let maintenance = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    maintenance: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await?;
+        let inference = store.create_key(CreateKeyRequest::default()).await?;
+        assert!(is_virtual_key(&maintenance.key));
+        state
+            .key_store
+            .set(store)
+            .map_err(|_| anyhow::anyhow!("key store already set"))?;
+
+        let auth =
+            ListenerAuth::new("op-token".to_string()).with_app(std::sync::Arc::new(state.clone()));
+        let app = Router::new()
+            .route(
+                "/eavs/maintenance/availability",
+                axum::routing::post(maintenance_availability_handler)
+                    .get(maintenance_availability_snapshot_handler),
+            )
+            .with_state(state)
+            .layer(middleware::from_fn_with_state(auth, require_listener_auth));
+        Ok((app, maintenance.key, maintenance.key_id, inference.key))
+    }
+
+    async fn maintenance_call(
+        app: &Router,
+        method: &str,
+        auth_header: Option<(&str, &str)>,
+        body: Option<serde_json::Value>,
+    ) -> anyhow::Result<(axum::http::StatusCode, serde_json::Value)> {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri("/eavs/maintenance/availability");
+        if let Some((name, value)) = auth_header {
+            builder = builder.header(name, value);
+        }
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder.body(axum::body::Body::from(
+            body.map_or_else(String::new, |body| body.to_string()),
+        ))?;
+        let response = app.clone().oneshot(request).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 << 10).await?;
+        Ok((status, serde_json::from_slice(&bytes).unwrap_or_default()))
+    }
+
+    /// `/eavs/maintenance/*` accepts the operator token and maintenance-only
+    /// virtual keys — and nothing else. (Maintenance keys carry no inference
+    /// rights; see the validator test.)
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Behavioral assertions in fallible fixture"
+    )]
+    async fn maintenance_api_accepts_only_operator_and_maintenance_keys() -> anyhow::Result<()> {
+        let (app, maintenance, _maintenance_id, inference) = maintenance_fixture().await?;
+
+        // No credential: fail closed.
+        let (status, _) = maintenance_call(&app, "GET", None, None).await?;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+
+        // An ordinary inference key is not a maintenance credential.
+        let (status, _) = maintenance_call(
+            &app,
+            "GET",
+            Some(("authorization", &format!("Bearer {inference}"))),
+            None,
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+
+        // The operator token deactivates; the snapshot reflects it.
+        let (status, _) = maintenance_call(
+            &app,
+            "POST",
+            Some(("x-eavs-token", "op-token")),
+            Some(serde_json::json!({"provider": "rtx", "models": ["glm-5.3"], "available": false, "reason": "loadout"})),
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let (status, parsed) =
+            maintenance_call(&app, "GET", Some(("x-eavs-token", "op-token")), None).await?;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(parsed["availability"][0]["provider"], "rtx");
+        assert_eq!(
+            parsed["availability"][0]["models"]["glm-5.3"]["reason"],
+            "loadout"
+        );
+
+        // The maintenance key is accepted as a Bearer credential.
+        let (status, _) = maintenance_call(
+            &app,
+            "GET",
+            Some(("authorization", &format!("Bearer {maintenance}"))),
+            None,
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        Ok(())
+    }
+
+    /// `mode=replace` announces the complete active set of a provider: the
+    /// announced models are re-activated (or stay active), everything else
+    /// known on the provider is deactivated with the announce's reason/TTL.
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "Behavioral assertions in fallible fixture"
+    )]
+    async fn maintenance_replace_announces_the_active_set() -> anyhow::Result<()> {
+        let (app, maintenance, maintenance_id, _inference) = maintenance_fixture().await?;
+        let key = ("authorization", format!("Bearer {maintenance}"));
+
+        // Deactivate glm-5.3 first, then announce kimi-k3 as the active set.
+        let (status, _) = maintenance_call(
+            &app,
+            "POST",
+            Some(("x-eavs-token", "op-token")),
+            Some(serde_json::json!({"provider": "rtx", "models": ["glm-5.3"], "available": false, "reason": "loadout"})),
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        // A typo'd provider fails loudly (guard for fleet tools).
+        let (status, parsed) = maintenance_call(
+            &app,
+            "POST",
+            Some(("x-eavs-token", "op-token")),
+            Some(serde_json::json!({"provider": "rtx-typo", "models": ["qwen3.8"], "available": false})),
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(parsed["code"], "unknown_provider");
+
+        // Deactivating with no models and no replace is a mistake.
+        let (status, parsed) = maintenance_call(
+            &app,
+            "POST",
+            Some((key.0, key.1.as_str())),
+            Some(serde_json::json!({"provider": "rtx", "models": [], "available": false})),
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(parsed["code"], "invalid_models");
+
+        let (status, parsed) = maintenance_call(
+            &app,
+            "POST",
+            Some((key.0, key.1.as_str())),
+            Some(serde_json::json!({
+                "provider": "rtx",
+                "mode": "replace",
+                "models": ["kimi-k3"],
+                "available": false,
+                "ttl": "2h"
+            })),
+        )
+        .await?;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        // kimi-k3 is announced active: no deactivation entry. glm-5.3 stays
+        // deactivated, refreshed by the announce (new actor, TTL).
+        assert_eq!(parsed["changed"], 1);
+        assert_eq!(parsed["availability"][0]["provider"], "rtx");
+        assert!(parsed["availability"][0]["models"].get("kimi-k3").is_none());
+        assert_eq!(
+            parsed["availability"][0]["models"]["glm-5.3"]["set_by"],
+            maintenance_id
+        );
+        assert!(parsed["availability"][0]["models"]["glm-5.3"]["until"].is_string());
+        Ok(())
     }
 
     /// A caller cannot read, overwrite/list, or delete credentials for a

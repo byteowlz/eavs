@@ -151,6 +151,9 @@ pub enum Commands {
     Models {
         #[command(subcommand)]
         action: ModelCommands,
+        /// Config file for the gateway defaults (server port, auth token)
+        #[arg(long, global = true)]
+        config: Option<String>,
     },
 
     /// Show upstream rate limit quotas (requires running server)
@@ -189,6 +192,48 @@ pub enum ModelCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Show, activate or deactivate model availability (maintenance)
+    Availability {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deactivate models on a provider without touching config (maintenance)
+    Disable {
+        /// Provider name (e.g. qwen38-rtx)
+        provider: String,
+        /// Model ids; with --replace this is the complete active set
+        models: Vec<String>,
+        /// Why (shown to clients that hit the model)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Deactivation lapses after this, e.g. "2h" (default: until enabled)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Treat `models` as the complete active set; everything else on the
+        /// provider is deactivated (one call per loadout switch)
+        #[arg(long)]
+        replace: bool,
+        /// Gateway base URL (default: the configured listener)
+        #[arg(long)]
+        server: Option<String>,
+        /// Operator token or maintenance key (default: configured auth token)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Re-activate models on a provider (maintenance)
+    Enable {
+        /// Provider name
+        provider: String,
+        /// Model ids; omit to re-activate everything on the provider
+        models: Vec<String>,
+        /// Gateway base URL (default: the configured listener)
+        #[arg(long)]
+        server: Option<String>,
+        /// Operator token or maintenance key (default: configured auth token)
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Export configured providers and models for an agent harness
     ///
@@ -487,6 +532,10 @@ pub enum KeyCommands {
         /// Maximum budget in USD
         #[arg(long)]
         budget: Option<f64>,
+
+        /// Maintenance-only key: manages model availability, no inference
+        #[arg(long)]
+        maintenance: bool,
 
         /// Key expiration (e.g., "30d", "24h", "never")
         #[arg(long, default_value = "never")]
@@ -1414,6 +1463,7 @@ pub struct CreateKeyArgs {
     pub tpm: Option<u32>,
     pub rpd: Option<u32>,
     pub budget: Option<f64>,
+    pub maintenance: bool,
     pub expires: String,
 }
 
@@ -1433,6 +1483,7 @@ pub async fn run_key_create_direct(
         tpm,
         rpd,
         budget,
+        maintenance,
         expires,
     } = args;
     let request = CreateKeyRequest {
@@ -1459,6 +1510,7 @@ pub async fn run_key_create_direct(
             rpd_limit: rpd,
             max_budget_usd: budget,
             budget_window: None,
+            maintenance,
         },
         metadata: serde_json::Value::Null,
         owner,
@@ -3065,7 +3117,7 @@ fn guess_image_mime(path: &str) -> Option<&'static str> {
 }
 
 /// Parse duration string like "30s", "1m", "5m30s" into Duration
-fn parse_duration_string(s: &str) -> Option<Duration> {
+pub fn parse_duration_string(s: &str) -> Option<Duration> {
     let s = s.trim().to_lowercase();
     let mut total_secs = 0u64;
     let mut current_num = String::new();
@@ -4256,6 +4308,200 @@ use crate::oauth::{
     anthropic, github_copilot, openai_codex, pkce, OAuthBackend, OAuthCredentials, OAuthProvider,
     OAuthStore,
 };
+
+/// Resolve the gateway base URL and credential for maintenance commands.
+fn maintenance_target(
+    config: &crate::config::AppConfig,
+    server: Option<&str>,
+    token: Option<&str>,
+) -> Result<(String, String), CliError> {
+    let base = server.map_or_else(
+        || format!("http://127.0.0.1:{}", config.server.port),
+        |url| url.trim_end_matches('/').to_owned(),
+    );
+    let credential = token
+        .map(str::to_owned)
+        .or_else(|| config.resolved_listener_auth_token())
+        .ok_or_else(|| {
+            CliError::Other(
+                "No credential: pass --token, or configure server.auth_token".to_string(),
+            )
+        })?;
+    Ok((base, credential))
+}
+
+async fn maintenance_post(
+    base: &str,
+    credential: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, CliError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/eavs/maintenance/availability"))
+        .bearer_auth(credential)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| CliError::Other(format!("Request to {base} failed: {e}")))?;
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.unwrap_or_default();
+    if !status.is_success() {
+        let message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("request rejected");
+        return Err(CliError::Other(format!(
+            "Gateway answered {}: {message}",
+            status.as_u16()
+        )));
+    }
+    Ok(payload)
+}
+
+/// `eavs models availability|disable|enable`: maintenance commands.
+/// `eavs models availability`: show deactivated models.
+async fn maintenance_snapshot_command(
+    config: &crate::config::AppConfig,
+    json: bool,
+) -> Result<(), CliError> {
+    let (base, credential) = maintenance_target(config, None, None)?;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base}/eavs/maintenance/availability"))
+        .bearer_auth(&credential)
+        .send()
+        .await
+        .map_err(|e| CliError::Other(format!("Request to {base} failed: {e}")))?;
+    let status = response.status();
+    let payload = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(CliError::Other(format!(
+            "Gateway answered {}: {}",
+            status.as_u16(),
+            payload
+        )));
+    }
+    if json {
+        println!("{payload}");
+        return Ok(());
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+    let providers = parsed
+        .get("availability")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if providers.is_empty() {
+        println!("No models are deactivated.");
+        return Ok(());
+    }
+    for provider in providers {
+        let name = provider
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let models = provider
+            .get("models")
+            .and_then(serde_json::Value::as_object)
+            .map(|models| models.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        println!("{name}: {}", models.join(", "));
+    }
+    Ok(())
+}
+
+/// POST one availability update; prints the changed count.
+async fn maintenance_update(
+    config: &crate::config::AppConfig,
+    server: Option<&str>,
+    token: Option<&str>,
+    body: serde_json::Value,
+    provider: &str,
+) -> Result<(), CliError> {
+    let (base, credential) = maintenance_target(config, server, token)?;
+    let payload = maintenance_post(&base, &credential, &body).await?;
+    println!(
+        "{} model(s) changed on '{provider}'.",
+        payload
+            .get("changed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    );
+    Ok(())
+}
+
+/// `eavs models availability|disable|enable`: maintenance commands.
+pub async fn run_models_maintenance(
+    action: ModelCommands,
+    config_path: Option<&str>,
+) -> Result<(), CliError> {
+    let config = config_path.map_or_else(
+        || {
+            Ok(crate::config::AppConfig::load())
+                .map(|loaded| loaded.unwrap_or_else(|_| crate::config::AppConfig::with_defaults()))
+        },
+        |path| {
+            crate::config::AppConfig::load_from(path)
+                .map_err(|e| CliError::Other(format!("Failed to load config: {e}")))
+        },
+    )?;
+    match action {
+        ModelCommands::Availability { json } => maintenance_snapshot_command(&config, json).await,
+        ModelCommands::Disable {
+            provider,
+            models,
+            reason,
+            ttl,
+            replace,
+            server,
+            token,
+        } => {
+            let mut body = serde_json::json!({
+                "provider": provider,
+                "models": models,
+                "available": false,
+            });
+            if replace {
+                body["mode"] = serde_json::Value::String("replace".into());
+            }
+            if let Some(reason) = reason {
+                body["reason"] = serde_json::Value::String(reason);
+            }
+            if let Some(ttl) = ttl {
+                body["ttl"] = serde_json::Value::String(ttl);
+            }
+            maintenance_update(
+                &config,
+                server.as_deref(),
+                token.as_deref(),
+                body,
+                &provider,
+            )
+            .await
+        }
+        ModelCommands::Enable {
+            provider,
+            models,
+            server,
+            token,
+        } => {
+            maintenance_update(
+                &config,
+                server.as_deref(),
+                token.as_deref(),
+                serde_json::json!({
+                    "provider": provider,
+                    "models": models,
+                    "available": true,
+                }),
+                &provider,
+            )
+            .await
+        }
+        _ => Err(CliError::Other("Not a maintenance command".to_string())),
+    }
+}
 
 /// Resolve the OAuth backend from config.
 fn resolve_oauth_backend(config: &crate::config::AppConfig) -> OAuthBackend {

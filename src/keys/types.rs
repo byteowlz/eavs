@@ -91,6 +91,11 @@ pub struct KeyPermissions {
     /// Budget reset window
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_window: Option<BudgetWindow>,
+
+    /// Maintenance-only key: may reconfigure model availability through
+    /// `/eavs/maintenance/*` but is rejected on every inference route.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maintenance: bool,
 }
 
 /// Budget reset window options.
