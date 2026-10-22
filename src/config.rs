@@ -491,6 +491,12 @@ pub struct ModelShortlistEntry {
     /// Passed through to models.json as-is.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub compat: HashMap<String, serde_json::Value>,
+    /// Reasoning-effort values this model's server accepts (e.g.
+    /// `["low", "medium", "xhigh"]`). Unsupported client values are rewritten to the
+    /// nearest supported level, preferring the next higher one. Empty means
+    /// undeclared: values learned from upstream errors are used instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 fn default_input_modalities() -> Vec<String> {

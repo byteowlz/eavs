@@ -1547,6 +1547,20 @@ pub async fn proxy_handler_pinned(
         }
     }
 
+    // Rewrite a reasoning effort the upstream is known not to accept
+    // (declared on the model, or learned from an earlier upstream 400).
+    let effort_capable = !is_native_inference && provider_type != ProviderType::Bedrock;
+    let (request_body, effort_rewrite) = if effort_capable {
+        apply_known_efforts(
+            &state,
+            provider_config,
+            &provider_name,
+            &model_name,
+            request_body,
+        )
+    } else {
+        (request_body, None)
+    };
     let request_body = Bytes::from(request_body);
 
     // Build upstream request
@@ -1800,7 +1814,16 @@ pub async fn proxy_handler_pinned(
     } else {
         None
     };
-    let upstream_res = state.upstream.send(upstream_req).await.map_err(|e| {
+    let upstream_res = send_with_effort_retry(
+        &state,
+        &provider_name,
+        &model_name,
+        upstream_req,
+        effort_capable,
+        effort_rewrite,
+    )
+    .await
+    .map_err(|e| {
         tracing::error!("Upstream request failed: {}", e);
         (
             StatusCode::BAD_GATEWAY,
@@ -2629,6 +2652,139 @@ fn with_terminal_usage_record(
             Poll::Pending => Poll::Pending,
         },
     )
+}
+
+/// Rewrite the request's reasoning effort to one the upstream accepts, when
+/// the accepted set is known. Returns the body and the rewrite, if any.
+fn apply_known_efforts(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model_name: &str,
+    body: Vec<u8>,
+) -> (Vec<u8>, Option<(String, String)>) {
+    let Some((rewritten, from, to)) =
+        reasoning_efforts_for(state, provider_config, provider_name, model_name)
+            .and_then(|supported| crate::reasoning_effort::rewrite_bytes(&body, &supported))
+    else {
+        return (body, None);
+    };
+    tracing::info!(
+        provider = %provider_name,
+        model = %model_name,
+        from = %from,
+        to = %to,
+        "Rewrote unsupported reasoning effort"
+    );
+    (rewritten, Some((from, to)))
+}
+
+/// Send upstream; if the upstream rejects the request's reasoning effort with
+/// a 400 that names the accepted set, learn it and resend once with the
+/// nearest accepted value. Any other response passes through unchanged.
+/// Adds `x-eavs-reasoning-effort: from->to` when the effort was rewritten.
+async fn send_with_effort_retry(
+    state: &AppState,
+    provider_name: &str,
+    model_name: &str,
+    request: UpstreamRequest,
+    effort_capable: bool,
+    mut effort_rewrite: Option<(String, String)>,
+) -> Result<UpstreamResponse, std::io::Error> {
+    let carries_effort = effort_capable
+        && serde_json::from_slice::<Value>(&request.body)
+            .ok()
+            .and_then(|body| crate::reasoning_effort::requested(&body))
+            .is_some();
+    let resend = carries_effort.then(|| {
+        (
+            request.method.clone(),
+            request.url.clone(),
+            request.headers.clone(),
+            request.body.clone(),
+        )
+    });
+    let mut response = state.upstream.send(request).await?;
+    if let Some((method, url, headers, body)) = resend {
+        if let Some((rewritten, from, to)) =
+            learn_from_effort_error(state, provider_name, model_name, &mut response, &body).await
+        {
+            tracing::info!(
+                provider = %provider_name,
+                model = %model_name,
+                from = %from,
+                to = %to,
+                "Upstream rejected reasoning effort; learned supported values and retrying once"
+            );
+            effort_rewrite = Some((effort_rewrite.map_or(from, |(first, _)| first), to));
+            response = state
+                .upstream
+                .send(UpstreamRequest {
+                    method,
+                    url,
+                    headers,
+                    body: Bytes::from(rewritten),
+                })
+                .await?;
+        }
+    }
+    if let Some(value) = effort_rewrite
+        .and_then(|(from, to)| http::HeaderValue::from_str(&format!("{from}->{to}")).ok())
+    {
+        response.headers.insert("x-eavs-reasoning-effort", value);
+    }
+    Ok(response)
+}
+
+/// For a 400 naming the accepted reasoning efforts: record them and return
+/// the rewritten body. Otherwise restore the (already read) error body so the
+/// client receives it unchanged, and return `None`.
+async fn learn_from_effort_error(
+    state: &AppState,
+    provider_name: &str,
+    model_name: &str,
+    response: &mut UpstreamResponse,
+    body: &[u8],
+) -> Option<(Vec<u8>, String, String)> {
+    if response.status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let error_stream = std::mem::replace(&mut response.body, futures::stream::empty().boxed());
+    let error_bytes = tokio::time::timeout(
+        upstream_error_body_timeout(),
+        collect_stream_bytes(error_stream),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    let retry = crate::reasoning_effort::parse_supported(&String::from_utf8_lossy(&error_bytes))
+        .and_then(|supported| {
+            state
+                .learned_efforts
+                .learn(provider_name, model_name, supported.clone());
+            crate::reasoning_effort::rewrite_bytes(body, &supported)
+        });
+    if retry.is_none() {
+        response.body = futures::stream::once(async move { Ok(error_bytes) }).boxed();
+    }
+    retry
+}
+
+/// Reasoning-effort values the upstream accepts for `model`: the model's
+/// config declaration wins over values learned from upstream errors.
+pub fn reasoning_efforts_for(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model: &str,
+) -> Option<Vec<String>> {
+    provider_config
+        .models
+        .iter()
+        .find(|entry| entry.id == model && !entry.reasoning_efforts.is_empty())
+        .map(|entry| entry.reasoning_efforts.clone())
+        .or_else(|| state.learned_efforts.get(provider_name, model))
 }
 
 async fn collect_stream_bytes(
@@ -9780,6 +9936,150 @@ mod tests {
         let (status, _, calls) = unprefixed_chat(providers, "deepseek-chat").await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(calls, 1);
+        Ok(())
+    }
+
+    fn effort_provider(declared: &[&str]) -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "rtx".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://rtx/v1".to_string(),
+                models: vec![crate::config::ModelShortlistEntry {
+                    id: "qwen".to_string(),
+                    name: "qwen".to_string(),
+                    reasoning: true,
+                    input: vec!["text".to_string()],
+                    context_window: 1000,
+                    max_tokens: 100,
+                    cost: crate::config::ModelCost::default(),
+                    compat: HashMap::new(),
+                    reasoning_efforts: declared.iter().map(|v| (*v).to_string()).collect(),
+                }],
+                ..Default::default()
+            },
+        );
+        providers
+    }
+
+    fn ok_spec() -> ResponseSpec {
+        ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"{}")],
+        }
+    }
+
+    fn vllm_effort_400() -> ResponseSpec {
+        ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"error": {"code": "BadRequestError", "message": "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.", "type": "invalid_request_error"}}).to_string(),
+            )],
+        }
+    }
+
+    async fn effort_request(
+        app: &Router,
+        effort: &str,
+    ) -> Result<(StatusCode, HeaderMap, Bytes), anyhow::Error> {
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/rtx/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": effort
+            }))?))?;
+        let response = app.clone().oneshot(req).await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((status, headers, body))
+    }
+
+    fn sent_effort(request: &crate::upstream::UpstreamRequest) -> Result<String, anyhow::Error> {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        Ok(body["reasoning_effort"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    fn effort_app(mock: &MockUpstream, declared: &[&str]) -> Router {
+        let state = AppState::new_with_upstream(
+            make_config(effort_provider(declared)),
+            Arc::new(mock.clone()),
+        );
+        Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state)
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn declared_reasoning_efforts_rewrite_before_forwarding() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec()]);
+        let app = effort_app(&mock, &["low", "medium", "xhigh"]);
+        let (status, headers, _) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-reasoning-effort"], "high->xhigh");
+        let (_, headers, _) = effort_request(&app, "medium").await?;
+        assert!(headers.get("x-eavs-reasoning-effort").is_none());
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2, "no retries needed");
+        assert_eq!(sent_effort(&requests[0])?, "xhigh");
+        assert_eq!(sent_effort(&requests[1])?, "medium");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn rejected_reasoning_effort_is_learned_and_retried_once() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![vllm_effort_400(), ok_spec(), ok_spec()]);
+        let app = effort_app(&mock, &[]);
+        let (status, headers, _) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-reasoning-effort"], "high->xhigh");
+        // Learned: the next request is rewritten up front, without a 400.
+        let (status, _, _) = effort_request(&app, "minimal").await?;
+        assert_eq!(status, StatusCode::OK);
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(sent_effort(&requests[0])?, "high");
+        assert_eq!(sent_effort(&requests[1])?, "xhigh");
+        assert_eq!(sent_effort(&requests[2])?, "low");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unrelated_400_passes_through_without_retry() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"error": {"message": "max_tokens too large", "type": "invalid_request_error"}})
+                    .to_string(),
+            )],
+        }]);
+        let app = effort_app(&mock, &[]);
+        let (status, _, body) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("max_tokens too large"));
+        assert_eq!(mock.take_requests().await.len(), 1);
         Ok(())
     }
 }

@@ -870,6 +870,15 @@
               "compat": {
                 "type": "object",
                 "additionalProperties": {}
+              },
+              "reasoning_efforts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["none", "off", "minimal", "low", "medium", "high", "xhigh"]
+                },
+                "description": "Reasoning-effort values this model's server accepts. Unsupported client values (reasoning_effort / reasoning.effort) are rewritten to the nearest accepted level, preferring the next higher one. Omit to rely on values EAVS learns from upstream errors.",
+                "examples": [["low", "medium", "xhigh"]]
               }
             },
             "required": [

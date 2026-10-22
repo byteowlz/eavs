@@ -54,6 +54,8 @@ pub struct AppState {
     pub model_catalog: Arc<OnceCell<ModelCatalog>>,
     /// Upstream rate limit quota tracker
     pub quota_tracker: QuotaTracker,
+    /// Reasoning-effort values learned from upstream errors.
+    pub learned_efforts: Arc<crate::reasoning_effort::LearnedEfforts>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -503,6 +505,13 @@ impl AppState {
             cost_calculator: Arc::new(OnceCell::new()),
             model_catalog: Arc::new(OnceCell::new()),
             quota_tracker: QuotaTracker::new(),
+            learned_efforts: Arc::new(crate::reasoning_effort::LearnedEfforts::load(
+                if cfg!(test) {
+                    None
+                } else {
+                    crate::reasoning_effort::LearnedEfforts::default_path()
+                },
+            )),
         }
     }
 

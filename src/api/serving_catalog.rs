@@ -49,6 +49,10 @@ pub struct ServingModel {
     pub max_tokens: u64,
     pub compat: BTreeMap<String, serde_json::Value>,
     pub pricing: Option<Estimate>,
+    /// Reasoning-effort values the upstream accepts (declared or learned).
+    /// Omitted when unknown; other values are rewritten by the gateway.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -297,6 +301,13 @@ fn project(
             } else {
                 model.id.clone()
             };
+            let reasoning_efforts = crate::proxy::reasoning_efforts_for(
+                state,
+                &candidate.config,
+                &candidate.id,
+                &model.id,
+            )
+            .unwrap_or_default();
             models.insert(
                 model.id.clone(),
                 ServingModel {
@@ -308,6 +319,7 @@ fn project(
                     max_tokens: model.max_tokens,
                     compat: model_compat(&model.compat),
                     pricing: estimate(&model.cost),
+                    reasoning_efforts,
                 },
             );
         }
