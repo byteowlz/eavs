@@ -990,7 +990,7 @@ async fn run_server(
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
         // One shared inventory for native HTTP, media, jobs, Pi and WebSockets.
-        .merge(inference_routes::router())
+        .merge(inference_routes::router(&state))
         .with_state(state.clone())
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal

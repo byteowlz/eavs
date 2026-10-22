@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Breaking:** an unprefixed `/v1` request whose model name suggests a provider kind
+  (e.g. `deepseek-*`) is routed only to a provider of that name, or to the single
+  configured provider of that type (so `[providers.default] type = "openai"` still
+  serves `gpt-*`). Otherwise it returns 400 `unknown_provider` naming the guess and the
+  remedy instead of silently falling back to `default`. Clients relying on the old
+  fallback should send `X-Provider` or use `/<provider>/v1/...` (eavs-achj).
+- Unknown providers (path or `X-Provider`) return 400 `unknown_provider` and no longer
+  list every configured provider to any caller.
+- Non-inference provider paths return a JSON 404 `unknown_endpoint` naming the expected
+  endpoints instead of an empty 404.
+- These errors add "Providers available to this key: ..." for a valid virtual key,
+  computed like the key-filtered catalog; unauthenticated callers get no list.
+
 ## [0.9.0] - 2026-10-22
 
 ### Added

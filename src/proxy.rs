@@ -545,10 +545,28 @@ pub async fn proxy_handler_pinned(
     };
 
     let model_detected_provider = detect_provider_from_model(&model);
+    // The guess names a provider kind. Use the provider of that name, else the
+    // single configured provider of that type (e.g. `default` with
+    // type = "openai" for a gpt-* model); anything else is rejected below.
+    let model_matched_provider = model_detected_provider.map(|guess| {
+        if state.resolve_provider(guess).is_some() {
+            return guess.to_string();
+        }
+        let mut of_type = state
+            .config
+            .providers
+            .iter()
+            .filter(|(_, config)| config.type_.eq_ignore_ascii_case(guess))
+            .map(|(name, _)| name);
+        match (of_type.next(), of_type.next()) {
+            (Some(name), None) => name.clone(),
+            _ => guess.to_string(),
+        }
+    });
 
     let provider_name_requested = pre_body_provider
         .or(runtime_default_provider.as_deref())
-        .or(model_detected_provider)
+        .or(model_matched_provider.as_deref())
         .unwrap_or("default")
         .to_string();
 
@@ -582,55 +600,21 @@ pub async fn proxy_handler_pinned(
         );
     }
 
-    // Resolve provider config.
-    //
-    // If the provider was auto-detected from the model but isn't configured, fall back to
-    // the configured "default" provider (backwards compatible with older configs).
+    // Resolve provider config. A model-name guess only selects a provider
+    // that is configured; otherwise the client gets the remedy, never a
+    // silent fallback to "default".
     let provider_selected_by_model = pre_body_provider.is_none()
         && runtime_default_provider.is_none()
         && model_detected_provider.is_some();
-    let provider_lookup = state
-        .resolve_provider(&provider_name_requested)
-        .or_else(|| {
-            if provider_selected_by_model {
-                state.resolve_provider("default")
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            let available = state.config.provider_names();
-            if provider_selected_by_model {
-                // The model-name guess is only a hint: never let it name an
-                // unconfigured provider silently. Tell the client how to pin.
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        ProxyError::new(
-                            format!(
-                                "Model '{model}' looks like provider '{provider_name_requested}', \
-                                 which is not configured, and no 'default' provider exists. \
-                                 Select the provider explicitly via the /<provider>/v1/... path \
-                                 or the X-Provider header. Configured providers: {available:?}"
-                            ),
-                            "invalid_request_error",
-                        )
-                        .with_code("unknown_provider"),
-                    ),
-                )
-                    .into_response();
-            }
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(
-                    format!(
-                        "Unknown provider '{provider_name_requested}'. Available providers: {available:?}"
-                    ),
-                    "invalid_provider",
-                )),
-            )
-                .into_response()
-        })?;
+    let Some(provider_lookup) = state.resolve_provider(&provider_name_requested) else {
+        return Err(unknown_provider_response(
+            &state,
+            &parts.headers,
+            &provider_name_requested,
+            provider_selected_by_model.then_some(model.as_str()),
+        )
+        .await);
+    };
 
     let provider_config = &provider_lookup.config;
     if matches!(
@@ -768,13 +752,7 @@ pub async fn proxy_handler_pinned(
     let resolved_provider = provider_lookup.resolved_name.clone();
     let provider_name = resolved_provider.clone();
 
-    if provider_selected_by_model && provider_name_requested != provider_name {
-        tracing::debug!(
-            requested = %provider_name_requested,
-            resolved = %provider_name,
-            "Auto-detected provider not configured; using default"
-        );
-    } else if provider_name_requested != provider_name {
+    if provider_name_requested != provider_name {
         tracing::debug!(
             requested = %provider_name_requested,
             resolved = %provider_name,
@@ -2652,6 +2630,87 @@ fn with_terminal_usage_record(
             Poll::Pending => Poll::Pending,
         },
     )
+}
+
+/// " Providers available to this key: a, b." for a valid virtual key, built
+/// exactly like the key-filtered serving catalog. Empty for anyone else, so
+/// errors never disclose configuration to unauthenticated callers.
+pub async fn provider_hint(state: &AppState, headers: &http::HeaderMap) -> String {
+    let token = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
+    let Some(token) = token else {
+        return String::new();
+    };
+    match crate::api::serving_catalog::build(state, token).await {
+        Ok(catalog) if catalog.providers.is_empty() => {
+            " This key has no usable providers.".to_string()
+        }
+        Ok(catalog) => format!(
+            " Providers available to this key: {}.",
+            catalog
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(_) => String::new(),
+    }
+}
+
+/// 400 `unknown_provider`: the requested or guessed provider is not configured.
+async fn unknown_provider_response(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    requested: &str,
+    guessed_from_model: Option<&str>,
+) -> Response {
+    let remedy = "Select a provider with the /<provider>/v1/... path or the X-Provider header.";
+    let message = match guessed_from_model {
+        Some(model) => format!(
+            "Model '{model}' does not identify a configured provider (guessed '{requested}'). {remedy}"
+        ),
+        None if requested == "default" => {
+            format!("No provider selected and no default provider is configured. {remedy}")
+        }
+        None => format!("Provider '{requested}' is not configured. {remedy}"),
+    };
+    let hint = provider_hint(state, headers).await;
+    (
+        StatusCode::BAD_REQUEST,
+        Json(
+            ProxyError::new(format!("{message}{hint}"), "invalid_request_error")
+                .with_code("unknown_provider"),
+        ),
+    )
+        .into_response()
+}
+
+/// 404 `unknown_endpoint` for a provider/API path that is not an inference
+/// endpoint, naming the expected shapes.
+pub async fn unknown_endpoint_response(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    path: &str,
+) -> Response {
+    let hint = provider_hint(state, headers).await;
+    (
+        StatusCode::NOT_FOUND,
+        Json(
+            ProxyError::new(
+                format!(
+                    "'{path}' is not an inference endpoint. Expected /<provider>/v1/chat/completions, \
+                     /<provider>/v1/responses, /<provider>/v1/messages or /<provider>/v1/models.{hint}"
+                ),
+                "invalid_request_error",
+            )
+            .with_code("unknown_endpoint"),
+        ),
+    )
+        .into_response()
 }
 
 /// Rewrite the request's reasoning effort to one the upstream accepts, when
@@ -5953,6 +6012,7 @@ mod tests {
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-provider", "default")
             .body(Body::from(
                 serde_json::to_vec(&unsafe_body).context("body(...) returned None or Err")?,
             ))
@@ -5977,6 +6037,7 @@ mod tests {
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-provider", "default")
             .body(Body::from(control_bytes.clone()))
             .context("unexpected None or Err")?;
         let _ = app
@@ -6109,6 +6170,7 @@ mod tests {
                 .method("POST")
                 .uri("/v1/responses")
                 .header(http::header::CONTENT_TYPE, "application/json")
+                .header("x-provider", "default")
                 .header(http::header::AUTHORIZATION, format!("Bearer {key}"))
                 .body(Body::from(
                     serde_json::to_vec(&body).context("body(...) returned None or Err")?,
@@ -9912,7 +9974,10 @@ mod tests {
         assert!(message.contains("'deepseek'"), "names candidate: {message}");
         assert!(message.contains("/<provider>/v1"), "path remedy: {message}");
         assert!(message.contains("X-Provider"), "header remedy: {message}");
-        assert!(message.contains("fhgenie"), "lists configured: {message}");
+        assert!(
+            !message.contains("fhgenie"),
+            "no provider list without a key: {message}"
+        );
         assert!(!body.to_string().contains("sk-secret"), "no key material");
         assert_eq!(calls, 0, "upstream must not be called");
         Ok(())
@@ -10080,6 +10145,186 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(String::from_utf8_lossy(&body).contains("max_tokens too large"));
         assert_eq!(mock.take_requests().await.len(), 1);
+        Ok(())
+    }
+
+    fn chat_provider(base_url: &str) -> ProviderConfig {
+        ProviderConfig {
+            type_: "openai-compatible".to_string(),
+            base_url: base_url.to_string(),
+            models: vec![crate::config::ModelShortlistEntry {
+                id: "m".to_string(),
+                name: "m".to_string(),
+                reasoning: false,
+                input: vec!["text".to_string()],
+                context_window: 1000,
+                max_tokens: 100,
+                cost: crate::config::ModelCost::default(),
+                compat: HashMap::new(),
+                reasoning_efforts: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// App over all inference routes with keys enabled; returns a key scoped
+    /// to `allowed` providers.
+    async fn hint_app(
+        providers: HashMap<String, ProviderConfig>,
+        allowed: &[&str],
+    ) -> Result<(Router, String, MockUpstream), anyhow::Error> {
+        let mock = MockUpstream::new(vec![]);
+        let mut config = make_config(providers);
+        config.keys.enabled = true;
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+        let store = Arc::new(KeyStore::in_memory().await?);
+        state
+            .key_validator
+            .set(Arc::new(KeyValidator::new(
+                store.clone(),
+                Arc::new(RateLimiter::new()),
+            )))
+            .ok()
+            .context("validator already set")?;
+        state
+            .key_store
+            .set(store.clone())
+            .ok()
+            .context("store already set")?;
+        let key = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    allowed_providers: Some(allowed.iter().map(|p| (*p).to_string()).collect()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await?
+            .key;
+        let app = crate::inference_routes::router(&state).with_state(state);
+        Ok((app, key, mock))
+    }
+
+    async fn hint_request(
+        app: &Router,
+        uri: &str,
+        key: Option<&str>,
+        model: &str,
+    ) -> Result<(StatusCode, Value), anyhow::Error> {
+        let mut req = http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(http::header::CONTENT_TYPE, "application/json");
+        if let Some(key) = key {
+            req = req.header("authorization", format!("Bearer {key}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(req.body(Body::from(serde_json::to_vec(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))?))?)
+            .await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
+    }
+
+    fn three_providers() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert("default".to_string(), chat_provider("http://default/v1"));
+        providers.insert("fhgenie".to_string(), chat_provider("http://fhgenie/v1"));
+        providers.insert("secret-lab".to_string(), chat_provider("http://lab/v1"));
+        providers
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unconfigured_model_guess_rejects_even_with_default_and_hints_key_scope(
+    ) -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie", "default"]).await?;
+        let (status, body) = hint_request(
+            &app,
+            "/v1/chat/completions",
+            Some(&key),
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_provider");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'deepseek'"), "{message}");
+        assert!(
+            message.contains("Providers available to this key: default, fhgenie"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("secret-lab"),
+            "out-of-scope provider leaked: {message}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unknown_pinned_provider_names_remedy_and_key_scope() -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie"]).await?;
+        let (status, body) =
+            hint_request(&app, "/nope/v1/chat/completions", Some(&key), "m").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_provider");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'nope'"), "{message}");
+        assert!(
+            message.contains("Providers available to this key: fhgenie"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("secret-lab") && !message.contains("default,"),
+            "{message}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn non_inference_path_names_expected_endpoints() -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie"]).await?;
+        let (status, body) =
+            hint_request(&app, "/fhgenie/v1/chat/complete", Some(&key), "m").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_endpoint");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("/<provider>/v1/chat/completions"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Providers available to this key: fhgenie"),
+            "{message}"
+        );
+        let (status, body) = hint_request(&app, "/fhgenie/v1/chat/complete", None, "m").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            !body.to_string().contains("fhgenie,")
+                && !body.to_string().contains("available to this key"),
+            "no list without key: {body}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
         Ok(())
     }
 }
