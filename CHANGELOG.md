@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Per-model native API: models carry `api` (`openai-completions`, `openai-responses`,
+  `anthropic-messages`), from config or, on gateways serving every format (OpenCode,
+  OpenCode Go), from models.dev's per-model SDK. The serving catalog publishes `api` and
+  `request_path` per model when it differs from the provider's, so clients use e.g.
+  Anthropic Messages for Qwen3.8/MiniMax and Responses for GPT on OpenCode Go.
+- models.dev `reasoning_options` effort values seed accepted reasoning efforts (after
+  config and learned values); `max` is a recognized effort level. The models.dev cache
+  file is now `models_catalog.v2.json` so these fields are fetched immediately.
 - Session affinity for every provider: the client's conversation id (`x-session-affinity`,
   `x-opencode-session`, `x-session-id`, `session_id` or `X-Conversation-ID`) is sent
   upstream as an opaque id scoped to the virtual key and provider, in the provider's

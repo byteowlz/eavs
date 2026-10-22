@@ -60,6 +60,43 @@ pub struct CatalogModel {
     pub knowledge: String,
     #[serde(default)]
     pub release_date: String,
+    /// Per-model provider override; `npm` names the model's native API SDK
+    /// (e.g. "@ai-sdk/anthropic" on a mostly OpenAI-compatible gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<CatalogModelProvider>,
+    /// Reasoning controls, e.g. `[{"type": "effort", "values": ["low", "high"]}]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_options: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CatalogModelProvider {
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub api: Option<String>,
+}
+
+/// The native API of an AI SDK package, as a catalog API name.
+pub fn api_for_npm(npm: &str) -> Option<&'static str> {
+    match npm {
+        "@ai-sdk/anthropic" => Some("anthropic-messages"),
+        "@ai-sdk/openai" => Some("openai-responses"),
+        "@ai-sdk/openai-compatible" => Some("openai-completions"),
+        _ => None,
+    }
+}
+
+/// Effort values from models.dev `reasoning_options` (`type: "effort"`).
+fn effort_values(options: &[serde_json::Value]) -> Vec<String> {
+    options
+        .iter()
+        .filter(|option| option.get("type").and_then(serde_json::Value::as_str) == Some("effort"))
+        .filter_map(|option| option.get("values").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -133,7 +170,13 @@ impl CatalogModel {
                 cache_write: self.cost.cache_write,
             },
             compat: std::collections::HashMap::new(),
-            reasoning_efforts: Vec::new(),
+            reasoning_efforts: effort_values(&self.reasoning_options),
+            api: self
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.npm.as_deref())
+                .and_then(api_for_npm)
+                .map(str::to_owned),
         }
     }
 }
@@ -188,6 +231,15 @@ impl ModelCatalog {
             providers.values().map(|p| p.models.len()).sum::<usize>()
         );
         Ok(Self { providers })
+    }
+
+    /// One models.dev model of a provider, as a shortlist entry.
+    pub fn model(&self, provider_id: &str, model_id: &str) -> Option<ModelShortlistEntry> {
+        self.providers
+            .get(provider_id)?
+            .models
+            .get(model_id)
+            .map(CatalogModel::to_shortlist_entry)
     }
 
     /// Get models for a provider.
@@ -320,7 +372,8 @@ pub fn eavs_to_catalog_id<'a>(eavs_name: &'a str, eavs_type: &str) -> &'a str {
 
 fn cache_file_path() -> PathBuf {
     let data_dir = crate::paths::data_dir().unwrap_or_else(|_| std::env::temp_dir());
-    data_dir.join("eavs").join("models_catalog.json")
+    // v2: per-model `provider` and `reasoning_options` (older caches lack them).
+    data_dir.join("eavs").join("models_catalog.v2.json")
 }
 
 fn try_load_cache(path: &PathBuf) -> Option<HashMap<String, CatalogProvider>> {
@@ -374,4 +427,49 @@ async fn fetch_catalog() -> Result<HashMap<String, CatalogProvider>> {
         .context("Failed to parse models.dev catalog")?;
 
     Ok(providers)
+}
+
+#[cfg(test)]
+mod per_model_tests {
+    use super::*;
+
+    #[test]
+    fn models_dev_per_model_api_and_efforts() -> anyhow::Result<()> {
+        let provider: CatalogProvider = serde_json::from_value(serde_json::json!({
+            "id": "opencode-go",
+            "npm": "@ai-sdk/openai-compatible",
+            "models": {
+                "qwen3.8-flash": {
+                    "id": "qwen3.8-flash",
+                    "provider": {"npm": "@ai-sdk/anthropic", "api": "https://x/anthropic/v1"},
+                    "reasoning": true,
+                    "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "medium", "xhigh"]}, {"type": "budget_tokens"}]
+                },
+                "gpt-6-luna": {"id": "gpt-6-luna", "provider": {"npm": "@ai-sdk/openai"}},
+                "kimi-k3": {"id": "kimi-k3", "provider": {"api": "https://x/openai/v1"}},
+                "gemini": {"id": "gemini", "provider": {"npm": "@ai-sdk/google"}}
+            }
+        }))?;
+        let entry = |id: &str| {
+            provider
+                .models
+                .get(id)
+                .map(CatalogModel::to_shortlist_entry)
+        };
+        let qwen = entry("qwen3.8-flash").ok_or_else(|| anyhow::anyhow!("qwen"))?;
+        anyhow::ensure!(qwen.api.as_deref() == Some("anthropic-messages"));
+        anyhow::ensure!(qwen.reasoning_efforts == ["low", "medium", "xhigh"]);
+        anyhow::ensure!(
+            entry("gpt-6-luna").and_then(|m| m.api).as_deref() == Some("openai-responses")
+        );
+        anyhow::ensure!(
+            entry("kimi-k3").and_then(|m| m.api).is_none(),
+            "no npm: provider default"
+        );
+        anyhow::ensure!(
+            entry("gemini").and_then(|m| m.api).is_none(),
+            "unsupported API"
+        );
+        Ok(())
+    }
 }

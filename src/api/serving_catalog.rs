@@ -49,6 +49,12 @@ pub struct ServingModel {
     pub max_tokens: u64,
     pub compat: BTreeMap<String, serde_json::Value>,
     pub pricing: Option<Estimate>,
+    /// The model's native API when it differs from the provider's `api`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<&'static str>,
+    /// Request path for `api`, e.g. `/opencode-go/v1/messages`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_path: Option<String>,
     /// Reasoning-effort values the upstream accepts (declared or learned).
     /// Omitted when unknown; other values are rewritten by the gateway.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -126,6 +132,25 @@ fn route(config: &ProviderConfig) -> Option<(&'static str, &'static str)> {
         | P::Mock => Some(("openai-completions", "/v1/chat/completions")),
         _ => None,
     }
+}
+
+/// Catalog route of a per-model API override.
+fn route_for_api(api: &str) -> Option<(&'static str, &'static str)> {
+    match api {
+        "openai-completions" => Some(("openai-completions", "/v1/chat/completions")),
+        "openai-responses" => Some(("openai-responses", "/v1/responses")),
+        "anthropic-messages" => Some(("anthropic-messages", "/v1/messages")),
+        _ => None,
+    }
+}
+
+/// Gateways that natively serve every catalog API format at one base URL, so
+/// models.dev per-model formats can be trusted without operator declaration.
+fn serves_all_formats(config: &ProviderConfig) -> bool {
+    matches!(
+        ProviderType::try_from_str(&config.type_),
+        Some(ProviderType::OpenCode | ProviderType::OpenCodeGo)
+    )
 }
 
 fn public_text(value: &str, limit: usize) -> bool {
@@ -279,11 +304,23 @@ fn project(
             if !public_text(&model.id, 512) || !scope.is_model_allowed(&model.id) {
                 continue;
             }
+            // A model's own native API, when it differs from the provider's:
+            // operator-declared, or from models.dev on multi-format gateways.
+            let model_route = model
+                .api
+                .as_deref()
+                .filter(|_| {
+                    candidate.metadata_source == "operator_declaration"
+                        || serves_all_formats(&candidate.config)
+                })
+                .and_then(route_for_api)
+                .filter(|(model_api, _)| *model_api != api);
+            let model_path = model_route.map_or(path, |(_, model_path)| model_path);
             let mut body = serde_json::json!({"model": model.id});
             if state
                 .config
                 .policy
-                .apply(&candidate.id, path, &mut body)
+                .apply(&candidate.id, model_path, &mut body)
                 .is_err()
                 || body.get("model").and_then(serde_json::Value::as_str) != Some(model.id.as_str())
             {
@@ -330,6 +367,9 @@ fn project(
                     compat,
                     pricing: estimate(&model.cost),
                     reasoning_efforts,
+                    api: model_route.map(|(model_api, _)| model_api),
+                    request_path: model_route
+                        .map(|(_, model_path)| format!("/{}{model_path}", candidate.id)),
                 },
             );
         }

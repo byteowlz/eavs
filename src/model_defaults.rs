@@ -72,6 +72,7 @@ fn candidate_models(
             cost: crate::config::ModelCost::default(),
             compat: std::collections::HashMap::new(),
             reasoning_efforts: Vec::new(),
+            api: None,
         }];
     }
 

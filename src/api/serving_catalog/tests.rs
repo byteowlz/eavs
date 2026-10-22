@@ -488,6 +488,14 @@ async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
     for model in &mut alpha.models {
         if model.id == "allowed" {
             model.reasoning_efforts = vec!["low".into(), "xhigh".into()];
+            // Same as the provider's API: not repeated per model.
+            model.api = Some("openai-completions".into());
+        }
+        if model.id == "field" {
+            model.api = Some("anthropic-messages".into());
+        }
+        if model.id == "blocked" {
+            model.api = Some("google-generative-ai".into());
         }
     }
     let learned = fixture.state.learned_efforts.clone();
@@ -534,6 +542,25 @@ async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
     };
     assert_eq!(adaptive("field"), Some(serde_json::json!(true)));
     assert_eq!(adaptive("allowed"), None);
+    let route = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| (m.get("api").cloned(), m.get("request_path").cloned()))
+    };
+    assert_eq!(
+        route("field"),
+        Some((
+            Some(serde_json::json!("anthropic-messages")),
+            Some(serde_json::json!("/alpha/v1/messages"))
+        ))
+    );
+    assert_eq!(route("allowed"), Some((None, None)));
+    assert_eq!(
+        route("blocked"),
+        Some((None, None)),
+        "unsupported APIs are ignored"
+    );
     assert_eq!(
         fixture.tripwire.0.load(std::sync::atomic::Ordering::SeqCst),
         0

@@ -885,10 +885,15 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["none", "off", "minimal", "low", "medium", "high", "xhigh"]
+                  "enum": ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
                 },
                 "description": "Reasoning-effort values this model's server accepts. Unsupported client values (reasoning_effort / reasoning.effort) are rewritten to the nearest accepted level, preferring the next higher one. Omit to rely on values EAVS learns from upstream errors.",
                 "examples": [["low", "medium", "xhigh"]]
+              },
+              "api": {
+                "type": "string",
+                "enum": ["openai-completions", "openai-responses", "anthropic-messages"],
+                "description": "Native API of this model when it differs from the provider's, for gateways serving several formats at one base URL. Published per model in the serving catalog. OpenCode/OpenCode Go models get this from models.dev automatically."
               }
             },
             "required": [

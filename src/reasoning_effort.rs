@@ -19,7 +19,7 @@ use std::sync::RwLock;
 use serde_json::Value;
 
 /// Known levels from lowest to highest. `off` is an alias of `none`.
-const LADDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+const LADDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn rank(level: &str) -> Option<usize> {
     let level = level.trim().to_ascii_lowercase();

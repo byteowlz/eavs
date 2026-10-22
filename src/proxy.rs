@@ -2893,8 +2893,8 @@ async fn learn_from_upstream_error(
     retry
 }
 
-/// Reasoning-effort values the upstream accepts for `model`: the model's
-/// config declaration wins over values learned from upstream errors.
+/// Reasoning-effort values the upstream accepts for `model`: declared in
+/// config, else learned from upstream errors, else models.dev metadata.
 pub fn reasoning_efforts_for(
     state: &AppState,
     provider_config: &crate::config::ProviderConfig,
@@ -2907,6 +2907,16 @@ pub fn reasoning_efforts_for(
         .find(|entry| entry.id == model && !entry.reasoning_efforts.is_empty())
         .map(|entry| entry.reasoning_efforts.clone())
         .or_else(|| state.learned_efforts.get(provider_name, model))
+        .or_else(|| {
+            let catalog_id =
+                crate::model_catalog::eavs_to_catalog_id(provider_name, &provider_config.type_);
+            state
+                .model_catalog
+                .get()?
+                .model(catalog_id, model)
+                .map(|entry| entry.reasoning_efforts)
+                .filter(|efforts| !efforts.is_empty())
+        })
 }
 
 async fn collect_stream_bytes(
@@ -10166,6 +10176,7 @@ mod tests {
                     cost: crate::config::ModelCost::default(),
                     compat: HashMap::new(),
                     reasoning_efforts: declared.iter().map(|v| (*v).to_string()).collect(),
+                    api: None,
                 }],
                 ..Default::default()
             },
@@ -10307,6 +10318,7 @@ mod tests {
                 cost: crate::config::ModelCost::default(),
                 compat: HashMap::new(),
                 reasoning_efforts: Vec::new(),
+                api: None,
             }],
             ..Default::default()
         }
@@ -10559,5 +10571,57 @@ mod tests {
             validation.as_bytes(),
         );
         assert_eq!(message, "must be positive");
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn multi_format_gateway_relays_native_messages_and_responses() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "ocgo".to_string(),
+            ProviderConfig {
+                type_: "opencode-go".to_string(),
+                base_url: "https://opencode.example/zen/go/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        let anthropic = json!({"model": "qwen3.8-flash", "max_tokens": 16, "system": "s", "messages": [{"role": "user", "content": "hi"}]});
+        let responses =
+            json!({"model": "gpt-6-luna", "input": "hi", "reasoning": {"effort": "low"}});
+        for (path, body) in [("messages", &anthropic), ("responses", &responses)] {
+            let req = http::Request::builder()
+                .method("POST")
+                .uri(format!("/ocgo/v1/{path}"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header("x-session-affinity", "pi-1")
+                .body(Body::from(body.to_string()))?;
+            let _ = app.clone().oneshot(req).await?;
+        }
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].url,
+            "https://opencode.example/zen/go/v1/messages"
+        );
+        assert_eq!(
+            requests[1].url,
+            "https://opencode.example/zen/go/v1/responses"
+        );
+        for (request, original) in requests.iter().zip([&anthropic, &responses]) {
+            let sent: Value = serde_json::from_slice(&request.body)?;
+            assert_eq!(&sent, original, "native body relayed unchanged");
+            assert!(request.headers.get("x-opencode-session").is_some());
+        }
+        Ok(())
     }
 }

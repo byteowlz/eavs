@@ -506,6 +506,11 @@ pub struct ModelShortlistEntry {
     /// undeclared: values learned from upstream errors are used instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<String>,
+    /// Native API of this model when it differs from the provider's
+    /// (`openai-completions`, `openai-responses`, `anthropic-messages`), for
+    /// gateways serving several formats. Published in the serving catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
 }
 
 fn default_input_modalities() -> Vec<String> {
