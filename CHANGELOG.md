@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-22
+
+### Added
+- Reasoning-effort normalization (eavs-5a8d): per-model `reasoning_efforts`; unsupported
+  `reasoning_effort` / `reasoning.effort` values are rewritten to the nearest accepted
+  level (preferring higher). Undeclared models learn the accepted set from the first
+  upstream 400 that names it (persisted, one retry). Published in `/v1/eavs/catalog`;
+  rewrites are reported via `x-eavs-reasoning-effort`.
+- Scoped device onboarding, native Pi streaming, administration clients and an Oqto Pi
+  invitation command with private QR publication.
+- Opt-in CORS and a scoped native inference listener.
+- Realtime speech, tenant-bound async jobs, rerank bridge and native inference HTTP
+  shapes with provider-scoped auth; metering for budgeted jobs and Cohere/Voyage rerank.
+- OpenCode and OpenCode Go providers; modernized OpenAI Responses/Codex request shaping.
+
+### Changed
+- Unprefixed `/v1` requests whose model name suggests an unconfigured provider (and no
+  default exists) now return 400 `unknown_provider` naming the guess and the
+  `/<provider>/v1` / `X-Provider` remedies (eavs-achj).
+- Authoritative live key admission across processes.
+
+### Fixed
+- Bounded upstream error-body reads so slow or unterminated errors never hang.
+- Security audit findings across proxy, keys, OAuth, probe and egress; OAuth ownership
+  and effective model scope guards; delegated media and native budget gates.
+
 ## [0.8.3] - 2026-08-27
 
 ### Security
