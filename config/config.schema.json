@@ -39,7 +39,9 @@
         },
         "cors_allowed_origins": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Exact HTTP(S) browser origins allowed on the operator listener, without trailing slash. Empty disables cross-origin access; cookies are not enabled. Not authorization."
         },
@@ -58,8 +60,20 @@
       "additionalProperties": false,
       "description": "Default-disabled ordinary-key-only native inference listener, separate from operator/device surfaces.",
       "properties": {
-        "listen": { "type": ["string", "null"], "description": "Explicit nonzero loopback IP:port; omit to disable" },
-        "cors_allowed_origins": { "type": "array", "items": { "type": "string" }, "default": [] }
+        "listen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Explicit nonzero loopback IP:port; omit to disable"
+        },
+        "cors_allowed_origins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
       }
     },
     "providers": {
@@ -739,12 +753,18 @@
         "session_header": {
           "type": "string",
           "description": "Upstream header carrying the per-conversation session id (opaque, scoped to the virtual key). Default by type: x-opencode-session for OpenCode, x-session-id for OpenRouter, none otherwise. Empty string disables.",
-          "examples": ["x-session-affinity", ""]
+          "examples": [
+            "x-session-affinity",
+            ""
+          ]
         },
         "user_agent": {
           "type": "string",
           "description": "User-Agent sent upstream. {client} is the client's User-Agent, {eavs} is eavs/<version>. Default: '{client} {eavs}'. Empty string sends none.",
-          "examples": ["{client} {eavs}", "my-agent/1.0 {eavs}"]
+          "examples": [
+            "{client} {eavs}",
+            "my-agent/1.0 {eavs}"
+          ]
         },
         "aws_region": {
           "type": "string",
@@ -885,20 +905,58 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
+                  "enum": [
+                    "none",
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
                 },
                 "description": "Reasoning-effort values this model's server accepts. Unsupported client values (reasoning_effort / reasoning.effort) are rewritten to the nearest accepted level, preferring the next higher one. Omit to rely on values EAVS learns from upstream errors.",
-                "examples": [["low", "medium", "xhigh"]]
+                "examples": [
+                  [
+                    "low",
+                    "medium",
+                    "xhigh"
+                  ]
+                ]
               },
               "api": {
                 "type": "string",
-                "enum": ["openai-completions", "openai-responses", "anthropic-messages"],
+                "enum": [
+                  "openai-completions",
+                  "openai-responses",
+                  "anthropic-messages"
+                ],
                 "description": "Native API of this model when it differs from the provider's, for gateways serving several formats at one base URL. Published per model in the serving catalog. OpenCode/OpenCode Go models get this from models.dev automatically."
               }
             },
             "required": [
               "id"
             ]
+          }
+        },
+        "probe": {
+          "type": "object",
+          "description": "Local-runtime availability probe: periodically GET /models (never a generation) and deactivate configured models the runtime no longer serves.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "interval": {
+              "type": "string",
+              "description": "Probe cadence, e.g. \"30s\", \"1m\" (default 60s)."
+            },
+            "timeout": {
+              "type": "string",
+              "description": "Per-request timeout (default 5s)."
+            }
           }
         }
       }

@@ -50,10 +50,33 @@ pub struct Unavailable {
 /// provider -> model -> deactivation.
 type Entries = BTreeMap<String, BTreeMap<String, Deactivation>>;
 
+/// Outcome of the last availability probe of a local runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeStatus {
+    pub at: DateTime<Utc>,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Model ids the runtime last reported serving.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served: Vec<String>,
+}
+
+/// Persisted availability state: deactivations plus per-provider probe
+/// bookkeeping.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Persisted {
+    #[serde(default)]
+    deactivations: Entries,
+    #[serde(default)]
+    probe: BTreeMap<String, ProbeStatus>,
+}
+
 /// Process-wide deactivations, persisted best-effort.
 pub struct Availability {
     path: Option<PathBuf>,
     entries: RwLock<Entries>,
+    probe: RwLock<BTreeMap<String, ProbeStatus>>,
 }
 
 /// One provider's slice of the snapshot.
@@ -66,14 +89,27 @@ pub struct ProviderAvailability {
 
 impl Availability {
     pub fn load(path: Option<PathBuf>) -> Self {
-        let entries = path
+        let persisted = path
             .as_ref()
             .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| {
+                // v2: {deactivations, probe}. v1 files held the bare map.
+                serde_json::from_slice::<Persisted>(&bytes)
+                    .ok()
+                    .or_else(|| {
+                        serde_json::from_slice::<Entries>(&bytes)
+                            .ok()
+                            .map(|deactivations| Persisted {
+                                deactivations,
+                                probe: BTreeMap::new(),
+                            })
+                    })
+            })
             .unwrap_or_default();
         Self {
             path,
-            entries: RwLock::new(entries),
+            entries: RwLock::new(persisted.deactivations),
+            probe: RwLock::new(persisted.probe),
         }
     }
 
@@ -246,11 +282,122 @@ impl Availability {
         changed
     }
 
+    /// Fold one local-runtime probe result into the store. `served` is what
+    /// the runtime currently lists, `universe` every model it could serve
+    /// (configured shortlist, else the union of previous and current probe
+    /// results). Models in the universe but not served are deactivated with
+    /// `set_by = "probe"`; probe entries never overwrite operator or
+    /// maintenance deactivations. Models that are served again lose their
+    /// probe deactivation; operator entries survive. Returns how many models
+    /// were deactivated and re-activated by this probe.
+    pub async fn apply_probe(
+        &self,
+        provider: &str,
+        served: &[String],
+        universe: &[String],
+        error: Option<&str>,
+    ) -> (usize, usize) {
+        const PROBE: &str = "probe";
+        let reason = error.map_or_else(
+            || "Not served by the runtime (availability probe)".to_owned(),
+            |error| format!("Runtime did not answer its model list: {error}"),
+        );
+        let mut deactivated = 0;
+        let mut reactivated = 0;
+        let persist_state = {
+            let mut entries = self.entries.write().await;
+            let now = Utc::now();
+            let slot = entries.entry(provider.to_owned()).or_default();
+            for model in universe {
+                if served.contains(model) {
+                    continue;
+                }
+                let probe_managed = slot
+                    .get(model)
+                    .is_none_or(|existing| existing.set_by == PROBE);
+                let deactivation = Deactivation {
+                    reason: Some(reason.clone()),
+                    until: None,
+                    set_by: PROBE.to_owned(),
+                    set_at: now,
+                };
+                if probe_managed && slot.get(model) != Some(&deactivation) {
+                    deactivated += 1;
+                    slot.insert(model.clone(), deactivation);
+                }
+            }
+            for model in served {
+                let was_probe = matches!(
+                    slot.get(model),
+                    Some(Deactivation { set_by, .. }) if set_by == PROBE
+                );
+                reactivated += usize::from(was_probe);
+                slot.remove(model);
+            }
+            if slot.is_empty() {
+                entries.remove(provider);
+            }
+            let mut probe = self.probe.write().await;
+            probe.insert(
+                provider.to_owned(),
+                ProbeStatus {
+                    at: now,
+                    ok: error.is_none(),
+                    error: error.map(str::to_owned),
+                    served: served.to_vec(),
+                },
+            );
+            Persisted {
+                deactivations: entries.clone(),
+                probe: probe.clone(),
+            }
+        };
+        let current = {
+            let entries = self.entries.read().await;
+            let deactivations = entries.clone();
+            let probe_map = self.probe.read().await;
+            let probe = probe_map.clone();
+            drop(entries);
+            drop(probe_map);
+            Persisted {
+                deactivations,
+                probe,
+            }
+        };
+        if current != persist_state {
+            self.persist().await;
+        }
+        (deactivated, reactivated)
+    }
+
+    /// What the last probe saw a runtime serving, for the probe universe of
+    /// providers that serve a full catalog instead of a shortlist.
+    pub async fn last_served(&self, provider: &str) -> Vec<String> {
+        self.probe
+            .read()
+            .await
+            .get(provider)
+            .map(|status| status.served.clone())
+            .unwrap_or_default()
+    }
+
+    /// Last probe outcome per provider, for status displays.
+    pub async fn probe_snapshot(&self) -> BTreeMap<String, ProbeStatus> {
+        self.probe.read().await.clone()
+    }
+
     async fn persist(&self) {
         let Some(path) = &self.path else { return };
         let bytes = {
             let entries = self.entries.read().await;
-            serde_json::to_vec_pretty(&*entries).unwrap_or_default()
+            let probe = self.probe.read().await;
+            let state = Persisted {
+                deactivations: entries.clone(),
+                probe: probe.clone(),
+            };
+            drop(entries);
+            drop(probe);
+            serde_json::to_vec_pretty(&state).unwrap_or_default()
         };
         let result = path
             .parent()
@@ -364,6 +511,74 @@ mod tests {
         assert!(availability.unavailable("rtx", "old").await.is_some());
         assert!(availability.unavailable("rtx", "kimi").await.is_some());
         assert!(availability.unavailable("rtx", "ghost").await.is_some());
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "unavailable() results are asserted directly"
+    )]
+    async fn probe_folds_into_the_store() {
+        let availability = store();
+        // Operator hard-disables glm: the probe must never resurrect it.
+        availability
+            .deactivate(
+                "rtx",
+                &models(["glm"]),
+                Some("operator choice".into()),
+                None,
+                "operator",
+            )
+            .await;
+        let universe = models(["glm", "qwen3.8", "kimi"]);
+
+        // Runtime serves qwen3.8 and kimi, not glm.
+        let (deactivated, reactivated) = availability
+            .apply_probe("rtx", &models(["qwen3.8", "kimi"]), &universe, None)
+            .await;
+        assert_eq!((deactivated, reactivated), (0, 0));
+        assert!(availability.unavailable("rtx", "glm").await.is_some());
+
+        // The loadout drops kimi: probe deactivates it, glm keeps the
+        // operator's entry (not overwritten with a probe one).
+        let (deactivated, reactivated) = availability
+            .apply_probe("rtx", &models(["qwen3.8"]), &universe, None)
+            .await;
+        assert_eq!((deactivated, reactivated), (1, 0));
+        let kimi = availability.unavailable("rtx", "kimi").await.unwrap();
+        assert_eq!(kimi.set_by, "probe");
+        assert_eq!(
+            availability.unavailable("rtx", "glm").await.unwrap().set_by,
+            "operator"
+        );
+
+        // kimi back (qwen3.8 left the loadout earlier, so it re-deactivates):
+        // probe entries clear, operator entries survive anything.
+        let (deactivated, reactivated) = availability
+            .apply_probe("rtx", &models(["kimi"]), &universe, None)
+            .await;
+        assert_eq!((deactivated, reactivated), (1, 1));
+        assert!(availability.unavailable("rtx", "kimi").await.is_none());
+        assert_eq!(
+            availability
+                .unavailable("rtx", "qwen3.8")
+                .await
+                .unwrap()
+                .set_by,
+            "probe"
+        );
+
+        // Runtime unreachable: probe-managed models deactivate, operator
+        // entries are left alone.
+        let (deactivated, _) = availability
+            .apply_probe("rtx", &[], &universe, Some("connection refused"))
+            .await;
+        assert_eq!(deactivated, 2);
+        assert!(availability.unavailable("rtx", "kimi").await.is_some());
+        assert_eq!(
+            availability.unavailable("rtx", "glm").await.unwrap().set_by,
+            "operator"
+        );
     }
 
     #[tokio::test]

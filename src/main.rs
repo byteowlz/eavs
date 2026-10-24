@@ -35,6 +35,7 @@ mod paths;
 mod pi_messages;
 mod plugins;
 mod policy;
+mod prober;
 mod program_status;
 mod provider;
 mod provider_probe;
@@ -1033,6 +1034,9 @@ async fn run_server(
     } else {
         None
     };
+
+    // Local-runtime availability prober (providers with [providers.*.probe])
+    prober::spawn(std::sync::Arc::new(state.clone()));
 
     // Start mitmproxy capture if enabled
     let _capture_handle = if capture_config.enabled {

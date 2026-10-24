@@ -544,3 +544,21 @@ max_conversations = 10000  # Max 10k concurrent conversations (0 = unlimited)
 # host = "model-gateway"       # Exact SNI or HTTP Host identity
 # address = "100.100.100.1"      # Exact destination address
 # port = 8080                   # Exact destination port; deny_domains still wins
+
+# ------------------------------------------------------------------------------
+# Local-runtime availability probe
+# ------------------------------------------------------------------------------
+# For self-hosted runtimes (llama.cpp, vLLM, ollama, llama-swap, ...) EAVS can
+# periodically ask for the served model list — a plain GET /models, never a
+# generation — and deactivate configured models the runtime no longer serves.
+# They vanish from catalogs and direct requests answer a typed error until the
+# runtime serves them again. Toggle: `eavs models availability|enable|disable`.
+#
+# [providers.my-local-rtx]
+# type = "openai-compatible"
+# base_url = "http://127.0.0.1:8080/v1"
+# api_key = "none"
+# [providers.my-local-rtx.probe]
+# enabled = true
+# interval = "60s"   # default 60s
+# timeout = "5s"     # default 5s

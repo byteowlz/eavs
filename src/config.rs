@@ -408,6 +408,40 @@ fn redact_prefixed_key(input: &str, prefix: &str) -> String {
     result
 }
 
+/// Availability-probe settings for a local runtime (llama.cpp, vLLM, ollama,
+/// llama-swap, ...). The probe only asks for the model list; it never
+/// generates, so checking availability costs no tokens and no quota.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeConfig {
+    /// Off unless the operator turns it on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How often to probe, e.g. "30s", "1m" (default 60s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    /// Per-request timeout (default 5s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+impl ProbeConfig {
+    /// Resolved probe cadence.
+    pub fn resolved_interval(&self) -> std::time::Duration {
+        self.interval
+            .as_deref()
+            .and_then(crate::cli::parse_duration_string)
+            .unwrap_or(std::time::Duration::from_secs(60))
+    }
+
+    /// Resolved per-request timeout.
+    pub fn resolved_timeout(&self) -> std::time::Duration {
+        self.timeout
+            .as_deref()
+            .and_then(crate::cli::parse_duration_string)
+            .unwrap_or(std::time::Duration::from_secs(5))
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ProviderConfig {
     /// Provider type: openai, anthropic, google, azure, mistral, groq, cerebras, xai, openrouter, ollama, etc.
@@ -427,6 +461,12 @@ pub struct ProviderConfig {
     /// Custom headers to add to requests
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// Local-runtime availability probe: periodically asks the runtime for its
+    /// served model list (a plain `GET /models`, never a generation) and
+    /// deactivates configured models the runtime no longer serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ProbeConfig>,
     /// Upstream header carrying the per-conversation session id (opaque,
     /// scoped to the virtual key). Default by type: `x-opencode-session` for
     /// `OpenCode`, `x-session-id` for `OpenRouter`, none otherwise. Empty disables.
@@ -565,6 +605,7 @@ impl Default for ProviderConfig {
             api_version: None,
             compat: CompatSettings::default(),
             headers: HashMap::new(),
+            probe: None,
             session_header: None,
             user_agent: None,
             aws_region: String::new(),

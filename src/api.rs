@@ -1488,11 +1488,45 @@ pub async fn maintenance_availability_handler(
 
 pub async fn maintenance_availability_snapshot_handler(State(state): State<AppState>) -> Response {
     let availability = state.availability.snapshot().await;
+    let probe = state.availability.probe_snapshot().await;
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "availability": availability })),
+        Json(serde_json::json!({
+            "availability": availability,
+            "probe": probe,
+            "providers": configured_model_universe(&state),
+        })),
     )
         .into_response()
+}
+
+/// Every configured provider with its models (id and display name), for
+/// maintenance clients and the admin UI. Full-catalog providers carry an
+/// empty `models` list; their universe is whatever the probe last saw.
+fn configured_model_universe(state: &AppState) -> Vec<serde_json::Value> {
+    let mut providers: Vec<serde_json::Value> = state
+        .config
+        .providers
+        .iter()
+        .map(|(name, config)| {
+            serde_json::json!({
+                "provider": name,
+                "type": config.type_,
+                "probe_enabled": config.probe.as_ref().is_some_and(|probe| probe.enabled),
+                "models": config.models.iter().map(|model| serde_json::json!({
+                    "id": model.id,
+                    "name": model.name,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    providers.sort_by(|a, b| {
+        a["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["provider"].as_str().unwrap_or_default())
+    });
+    providers
 }
 
 pub async fn upstream_quotas_handler(

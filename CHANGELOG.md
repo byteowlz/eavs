@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Local-runtime availability probe: `[providers.*.probe] enabled = true` makes
+  EAVS periodically ask a self-hosted runtime (llama.cpp, vLLM, ollama,
+  llama-swap) for its served model list — a plain `GET /models`, never a
+  generation — and deactivate configured models the runtime no longer serves,
+  with the reason and probe time in the snapshot. Operator deactivations are
+  never overridden by probes. Probe results appear in
+  `GET /eavs/maintenance/availability` alongside each provider's configured
+  model universe.
 - Model availability maintenance: deactivate models without touching config, e.g.
   when a GPU machine switches loadouts. `POST /eavs/maintenance/availability`
   accepts the operator token or a new maintenance-only key (`eavs keys create
