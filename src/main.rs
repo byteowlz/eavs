@@ -4,6 +4,7 @@
 //! operations. See the repository usage reference for supported protocols and
 //! the architecture decisions for planned provisioning boundaries.
 
+mod admin_pwa;
 mod api;
 mod availability;
 mod aws_credentials;
@@ -992,6 +993,15 @@ async fn run_server(
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         .route("/admin/quotas", get(api::upstream_quotas_handler))
         .route("/catalog/lookup", get(api::catalog_lookup_handler))
+        // Admin console (PWA shell; data routes below stay authenticated)
+        .route("/admin", get(api::console_index_handler))
+        .route("/admin/app", get(api::console_app_handler))
+        .route(
+            "/admin/manifest.webmanifest",
+            get(api::console_manifest_handler),
+        )
+        .route("/admin/sw.js", get(api::console_sw_handler))
+        .route("/admin/icon.svg", get(api::console_icon_handler))
         // Maintenance API (operator token or maintenance-only virtual key)
         .route(
             "/eavs/maintenance/availability",

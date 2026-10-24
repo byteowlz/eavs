@@ -55,6 +55,69 @@ impl ListenerAuth {
     }
 }
 
+/// Exact paths of the embedded console shell. Nothing dynamic, nothing
+/// secret — data flows only through authenticated API calls.
+const CONSOLE_ASSETS: &[&str] = &[
+    "/admin",
+    "/admin/app",
+    "/admin/manifest.webmanifest",
+    "/admin/sw.js",
+    "/admin/icon.svg",
+];
+
+/// GET /admin — the console shell.
+pub async fn console_index_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        crate::admin_pwa::INDEX,
+    )
+}
+
+/// GET /admin/app — console script and styles, inlined into the shell; this
+/// path exists so the service worker can cache one URL for offline install.
+pub async fn console_app_handler() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "max-age=300"),
+        ],
+        crate::admin_pwa::INDEX,
+    )
+}
+
+/// GET /admin/manifest.webmanifest
+pub async fn console_manifest_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/manifest+json",
+        )],
+        crate::admin_pwa::MANIFEST,
+    )
+}
+
+/// GET /admin/sw.js
+pub async fn console_sw_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "max-age=300"),
+        ],
+        crate::admin_pwa::SW,
+    )
+}
+
+/// GET /admin/icon.svg
+pub async fn console_icon_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        crate::admin_pwa::ICON,
+    )
+}
+
 /// Identity of a maintenance-key caller, inserted by the listener middleware.
 #[derive(Debug, Clone)]
 pub struct MaintenanceActor {
@@ -107,6 +170,11 @@ pub async fn require_listener_auth(
     next: Next,
 ) -> Response {
     if listener_request_is_authorized(request.headers(), &auth.token) {
+        return next.run(request).await;
+    }
+    // The console shell is generic UI code with no data; every request it
+    // makes carries the credential and is authenticated above.
+    if request.method() == http::Method::GET && CONSOLE_ASSETS.contains(&request.uri().path()) {
         return next.run(request).await;
     }
     if let Some(app) = &auth.app {
@@ -2781,6 +2849,49 @@ mod tests {
         .await?;
         assert_eq!(status, axum::http::StatusCode::OK);
         Ok(())
+    }
+
+    /// The console shell is reachable without a credential (it holds no
+    /// data) while everything behind it stays authenticated.
+    #[tokio::test]
+    #[expect(clippy::unwrap_used, reason = "router assertions in a plain test")]
+    async fn console_shell_is_public_but_data_is_not() {
+        let state = mock_state();
+        let auth =
+            ListenerAuth::new("op-token".to_string()).with_app(std::sync::Arc::new(state.clone()));
+        let app = Router::new()
+            .route("/admin", get(console_index_handler))
+            .route("/admin/keys", get(list_keys_handler))
+            .with_state(state)
+            .layer(middleware::from_fn_with_state(auth, require_listener_auth));
+        let shell = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shell.status(), StatusCode::OK);
+        assert!(shell
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/html")));
+
+        // Data route without a credential: fail closed.
+        let keys = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/keys")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(keys.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// `mode=replace` announces the complete active set of a provider: the

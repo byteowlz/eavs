@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Admin console: an installable PWA at `/admin`. Provider/model overview with
+  live availability and probe status (click a model to enable/disable), virtual
+  key management, and OAuth account status. The shell is static, data flows
+  only through authenticated calls (operator token or maintenance key).
 - Local-runtime availability probe: `[providers.*.probe] enabled = true` makes
   EAVS periodically ask a self-hosted runtime (llama.cpp, vLLM, ollama,
   llama-swap) for its served model list — a plain `GET /models`, never a
