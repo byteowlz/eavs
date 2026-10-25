@@ -65,9 +65,12 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 </header>
 <main>
   <div id="gate" class="card">
-    <h2>Operator token</h2>
-    <p class="muted">Paste the listener token (<code>server.auth_token</code>) or a maintenance key.</p>
+    <h2>Operator credentials</h2>
+    <p class="muted">The listener token unlocks the gateway boundary; the master key unlocks keys and accounts. Availability also accepts a maintenance-only key instead.</p>
+    <label>Listener token (<code>server.auth_token</code>) or maintenance key</label>
     <input id="token" type="password" placeholder="eavs_… or sk-eavs-…">
+    <label>Master key (<code>keys.master_key</code>) — for Keys / Accounts</label>
+    <input id="master" type="password" placeholder="052abc…">
     <button class="act" onclick="saveToken()">Unlock</button>
   </div>
   <div id="app" class="hidden">
@@ -83,13 +86,17 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 <script>
 const $=s=>document.querySelector(s);
 let token=localStorage.getItem("eavs_token")||"";
+let master=localStorage.getItem("eavs_master")||"";
 let view="availability", timer=null;
 
 function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");
   setTimeout(()=>t.classList.remove("show"),2600);}
-function saveToken(){token=$("#token").value.trim();localStorage.setItem("eavs_token",token);
+function saveToken(){
+  token=$("#token").value.trim();master=$("#master").value.trim();
+  localStorage.setItem("eavs_token",token);localStorage.setItem("eavs_master",master);
   $("#gate").classList.add("hidden");$("#app").classList.remove("hidden");refresh();}
-function headers(){return{"x-eavs-token":token,"content-type":"application/json"};}
+function headers(){return{"x-eavs-token":token,...(master?{"authorization":"Bearer "+master}:{}),
+  "content-type":"application/json"};}
 
 async function api(path,options){
   const r=await fetch(path,{...options,headers:headers()});
