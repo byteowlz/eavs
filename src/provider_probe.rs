@@ -1088,10 +1088,7 @@ mod tests {
     /// the active config (base URL and credential) server-side, and the
     /// credential never appears in the response.
     #[tokio::test]
-    #[expect(
-        clippy::unwrap_used,
-        reason = "test fixture assertions"
-    )]
+    #[expect(clippy::unwrap_used, reason = "test fixture assertions")]
     async fn saved_probe_uses_the_active_provider_without_echoing_its_key() {
         use axum::extract::State;
         use axum::Json;
