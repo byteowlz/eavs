@@ -4,11 +4,14 @@
 //! operations. See the repository usage reference for supported protocols and
 //! the architecture decisions for planned provisioning boundaries.
 
+mod admin_pwa;
 mod api;
+mod availability;
 mod aws_credentials;
 mod aws_sigv4;
 mod capture;
 mod cli;
+mod client_identity;
 mod config;
 mod cors;
 mod delegated_fetch;
@@ -33,12 +36,14 @@ mod paths;
 mod pi_messages;
 mod plugins;
 mod policy;
+mod prober;
 mod program_status;
 mod provider;
 mod provider_probe;
 mod provider_store;
 mod provider_templates;
 mod proxy;
+mod reasoning_effort;
 mod routing;
 mod runtime_state;
 mod setup;
@@ -54,13 +59,13 @@ mod upstream_quota;
 mod integration_tests;
 
 use crate::cli::{
-    ensure_server_running, run_auth_logout, run_auth_status, run_login, run_secret_delete,
-    run_secret_get, run_secret_list, run_secret_set, run_service_logs, run_service_restart,
-    run_service_start, run_service_status, run_service_stop, run_test_bench, run_test_chat,
-    run_test_health, run_test_image, run_test_oauth, run_test_rate_limit, run_test_routing,
-    run_test_tool_call, AuthCommands, BenchmarkArgs, Cli, Commands, EavsClient, KeyCommands,
-    ModelCommands, OAuthTestArgs, ProviderCommands, SecretCommands, ServiceCommands, SetupCommands,
-    TestCommands,
+    ensure_server_running, run_auth_logout, run_auth_status, run_login, run_models_maintenance,
+    run_secret_delete, run_secret_get, run_secret_list, run_secret_set, run_service_logs,
+    run_service_restart, run_service_start, run_service_status, run_service_stop, run_test_bench,
+    run_test_chat, run_test_health, run_test_image, run_test_oauth, run_test_rate_limit,
+    run_test_routing, run_test_tool_call, AuthCommands, BenchmarkArgs, Cli, Commands, EavsClient,
+    KeyCommands, ModelCommands, OAuthTestArgs, ProviderCommands, SecretCommands, ServiceCommands,
+    SetupCommands, TestCommands,
 };
 use crate::config::AppConfig;
 use crate::logging::{start_logging_task, Logger};
@@ -175,8 +180,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Models { action } => {
-            if let Err(e) = run_models_command(action).await {
+        Commands::Models { action, config } => {
+            if let Err(e) = run_models_command(action, config.as_deref()).await {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -275,10 +280,22 @@ fn run_secret_command(action: SecretCommands) -> Result<(), cli::CliError> {
     }
 }
 
-async fn run_models_command(action: ModelCommands) -> Result<(), cli::CliError> {
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "CLI dispatch mirrors the command tree; every arm delegates to a focused handler"
+)]
+async fn run_models_command(
+    action: ModelCommands,
+    config: Option<&str>,
+) -> Result<(), cli::CliError> {
     use crate::model_catalog::ModelCatalog;
 
     match action {
+        ModelCommands::Availability { .. }
+        | ModelCommands::Disable { .. }
+        | ModelCommands::Enable { .. } => {
+            run_models_maintenance(action, config).await?;
+        }
         ModelCommands::List { provider, json } => {
             let catalog = ModelCatalog::load()
                 .await
@@ -976,6 +993,21 @@ async fn run_server(
         .route("/admin/pricing/update", post(api::update_pricing_handler))
         .route("/admin/quotas", get(api::upstream_quotas_handler))
         .route("/catalog/lookup", get(api::catalog_lookup_handler))
+        // Admin console (PWA shell; data routes below stay authenticated)
+        .route("/admin", get(api::console_index_handler))
+        .route("/admin/app", get(api::console_app_handler))
+        .route(
+            "/admin/manifest.webmanifest",
+            get(api::console_manifest_handler),
+        )
+        .route("/admin/sw.js", get(api::console_sw_handler))
+        .route("/admin/icon.svg", get(api::console_icon_handler))
+        // Maintenance API (operator token or maintenance-only virtual key)
+        .route(
+            "/eavs/maintenance/availability",
+            post(api::maintenance_availability_handler)
+                .get(api::maintenance_availability_snapshot_handler),
+        )
         // OAuth API
         .route("/auth/login/:provider", post(api::oauth_login_handler))
         .route("/auth/callback", post(api::oauth_callback_handler))
@@ -989,13 +1021,13 @@ async fn run_server(
         // Self-provisioning endpoint
         .route("/keys/provision", post(api::provision_key_handler))
         // One shared inventory for native HTTP, media, jobs, Pi and WebSockets.
-        .merge(inference_routes::router())
+        .merge(inference_routes::router(&state))
         .with_state(state.clone())
         // Loopback reachability is not authorization. Protect every HTTP and
         // WebSocket route at the listener boundary before handlers can reveal
         // configuration or process requests.
         .layer(middleware::from_fn_with_state(
-            api::ListenerAuth::new(listener_token),
+            api::ListenerAuth::new(listener_token).with_app(std::sync::Arc::new(state.clone())),
             api::require_listener_auth,
         ))
         // Outermost: preflight has no capability; actual requests still pass auth.
@@ -1012,6 +1044,9 @@ async fn run_server(
     } else {
         None
     };
+
+    // Local-runtime availability prober (providers with [providers.*.probe])
+    prober::spawn(std::sync::Arc::new(state.clone()));
 
     // Start mitmproxy capture if enabled
     let _capture_handle = if capture_config.enabled {
@@ -1117,6 +1152,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
             tpm,
             rpd,
             budget,
+            maintenance,
             expires,
             format,
             url: _, // Not needed for direct DB access
@@ -1140,6 +1176,7 @@ async fn run_key_command(action: KeyCommands) -> Result<(), cli::CliError> {
                     tpm,
                     rpd,
                     budget,
+                    maintenance,
                     expires,
                 },
                 format,

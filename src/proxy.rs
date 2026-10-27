@@ -545,10 +545,28 @@ pub async fn proxy_handler_pinned(
     };
 
     let model_detected_provider = detect_provider_from_model(&model);
+    // The guess names a provider kind. Use the provider of that name, else the
+    // single configured provider of that type (e.g. `default` with
+    // type = "openai" for a gpt-* model); anything else is rejected below.
+    let model_matched_provider = model_detected_provider.map(|guess| {
+        if state.resolve_provider(guess).is_some() {
+            return guess.to_string();
+        }
+        let mut of_type = state
+            .config
+            .providers
+            .iter()
+            .filter(|(_, config)| config.type_.eq_ignore_ascii_case(guess))
+            .map(|(name, _)| name);
+        match (of_type.next(), of_type.next()) {
+            (Some(name), None) => name.clone(),
+            _ => guess.to_string(),
+        }
+    });
 
     let provider_name_requested = pre_body_provider
         .or(runtime_default_provider.as_deref())
-        .or(model_detected_provider)
+        .or(model_matched_provider.as_deref())
         .unwrap_or("default")
         .to_string();
 
@@ -582,35 +600,21 @@ pub async fn proxy_handler_pinned(
         );
     }
 
-    // Resolve provider config.
-    //
-    // If the provider was auto-detected from the model but isn't configured, fall back to
-    // the configured "default" provider (backwards compatible with older configs).
+    // Resolve provider config. A model-name guess only selects a provider
+    // that is configured; otherwise the client gets the remedy, never a
+    // silent fallback to "default".
     let provider_selected_by_model = pre_body_provider.is_none()
         && runtime_default_provider.is_none()
         && model_detected_provider.is_some();
-    let provider_lookup = state
-        .resolve_provider(&provider_name_requested)
-        .or_else(|| {
-            if provider_selected_by_model {
-                state.resolve_provider("default")
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            let available = state.config.provider_names();
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ProxyError::new(
-                    format!(
-                        "Unknown provider '{provider_name_requested}'. Available providers: {available:?}"
-                    ),
-                    "invalid_provider",
-                )),
-            )
-                .into_response()
-        })?;
+    let Some(provider_lookup) = state.resolve_provider(&provider_name_requested) else {
+        return Err(unknown_provider_response(
+            &state,
+            &parts.headers,
+            &provider_name_requested,
+            provider_selected_by_model.then_some(model.as_str()),
+        )
+        .await);
+    };
 
     let provider_config = &provider_lookup.config;
     if matches!(
@@ -748,13 +752,7 @@ pub async fn proxy_handler_pinned(
     let resolved_provider = provider_lookup.resolved_name.clone();
     let provider_name = resolved_provider.clone();
 
-    if provider_selected_by_model && provider_name_requested != provider_name {
-        tracing::debug!(
-            requested = %provider_name_requested,
-            resolved = %provider_name,
-            "Auto-detected provider not configured; using default"
-        );
-    } else if provider_name_requested != provider_name {
+    if provider_name_requested != provider_name {
         tracing::debug!(
             requested = %provider_name_requested,
             resolved = %provider_name,
@@ -1084,7 +1082,18 @@ pub async fn proxy_handler_pinned(
     // Handle /v1/models endpoint for providers that don't support it natively
     // Return a synthetic response with known models for that provider
     if api_path == "/v1/models" && !provider_type.supports_models_endpoint() {
-        let models = provider_type.synthetic_models();
+        // A deactivated model must not be advertised.
+        let mut models = Vec::new();
+        for model in provider_type.synthetic_models() {
+            if state
+                .availability
+                .unavailable(&provider_name, model)
+                .await
+                .is_none()
+            {
+                models.push(model);
+            }
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -1368,6 +1377,30 @@ pub async fn proxy_handler_pinned(
         (body, model)
     };
 
+    // Deactivated models (operator or fleet maintenance) never reach
+    // upstream; the answer names the reason and the remedy.
+    if let Some(unavailable) = state.availability.unavailable(&provider_name, &model).await {
+        let ttl = unavailable
+            .until
+            .map(|until| format!(" It returns automatically after {until}."))
+            .unwrap_or_default();
+        let reason = match unavailable.reason.as_deref() {
+            Some(reason) => format!(" Reason: {reason} (by {}).", unavailable.set_by),
+            None => format!(" Deactivated by {}.", unavailable.set_by),
+        };
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ProxyError::new(
+                format!(
+                    "Model '{model}' is currently unavailable on provider '{provider_name}'.{reason}{ttl} Restore it with 'eavs models enable {provider_name} {model}'."
+                ),
+                "invalid_request_error",
+            )
+            .with_code("model_unavailable")),
+        )
+            .into_response());
+    }
+
     // Construct URL with transformer's endpoint path if transforming
     // Override base URL for providers that use dynamic OAuth-derived URLs
     let base = if is_openai_codex_oauth {
@@ -1527,6 +1560,20 @@ pub async fn proxy_handler_pinned(
         }
     }
 
+    // Adjust for upstream behavior already known for this model (accepted
+    // reasoning efforts, adaptive thinking), declared or learned from a 400.
+    let effort_capable = !is_native_inference && provider_type != ProviderType::Bedrock;
+    let (request_body, adjustments) = if effort_capable {
+        apply_known_adjustments(
+            &state,
+            provider_config,
+            &provider_name,
+            &model_name,
+            request_body,
+        )
+    } else {
+        (request_body, Vec::new())
+    };
     let request_body = Bytes::from(request_body);
 
     // Build upstream request
@@ -1546,7 +1593,14 @@ pub async fn proxy_handler_pinned(
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
-    apply_opencode_session_headers(&mut upstream_headers, provider_type, &conversation_id);
+    apply_client_identity(
+        &mut upstream_headers,
+        &parts.headers,
+        provider_config,
+        provider_type,
+        &provider_name,
+        validated_key.as_ref().map(|key| key.key_hash.as_str()),
+    );
 
     // Add custom headers from provider config
     for (key, value) in &provider_config.headers {
@@ -1780,7 +1834,16 @@ pub async fn proxy_handler_pinned(
     } else {
         None
     };
-    let upstream_res = state.upstream.send(upstream_req).await.map_err(|e| {
+    let upstream_res = send_with_adjustment_retry(
+        &state,
+        &provider_name,
+        &model_name,
+        upstream_req,
+        effort_capable,
+        adjustments,
+    )
+    .await
+    .map_err(|e| {
         tracing::error!("Upstream request failed: {}", e);
         (
             StatusCode::BAD_GATEWAY,
@@ -2611,6 +2674,286 @@ fn with_terminal_usage_record(
     )
 }
 
+/// " Providers available to this key: a, b." for a valid virtual key, built
+/// exactly like the key-filtered serving catalog. Empty for anyone else, so
+/// errors never disclose configuration to unauthenticated callers.
+pub async fn provider_hint(state: &AppState, headers: &http::HeaderMap) -> String {
+    let token = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
+    let Some(token) = token else {
+        return String::new();
+    };
+    match crate::api::serving_catalog::build(state, token).await {
+        Ok(catalog) if catalog.providers.is_empty() => {
+            " This key has no usable providers.".to_string()
+        }
+        Ok(catalog) => format!(
+            " Providers available to this key: {}.",
+            catalog
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(_) => String::new(),
+    }
+}
+
+/// 400 `unknown_provider`: the requested or guessed provider is not configured.
+async fn unknown_provider_response(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    requested: &str,
+    guessed_from_model: Option<&str>,
+) -> Response {
+    let remedy = "Select a provider with the /<provider>/v1/... path or the X-Provider header.";
+    let message = match guessed_from_model {
+        Some(model) => format!(
+            "Model '{model}' does not identify a configured provider (guessed '{requested}'). {remedy}"
+        ),
+        None if requested == "default" => {
+            format!("No provider selected and no default provider is configured. {remedy}")
+        }
+        None => format!("Provider '{requested}' is not configured. {remedy}"),
+    };
+    let hint = provider_hint(state, headers).await;
+    (
+        StatusCode::BAD_REQUEST,
+        Json(
+            ProxyError::new(format!("{message}{hint}"), "invalid_request_error")
+                .with_code("unknown_provider"),
+        ),
+    )
+        .into_response()
+}
+
+/// 404 `unknown_endpoint` for a provider/API path that is not an inference
+/// endpoint, naming the expected shapes.
+pub async fn unknown_endpoint_response(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    path: &str,
+) -> Response {
+    let hint = provider_hint(state, headers).await;
+    (
+        StatusCode::NOT_FOUND,
+        Json(
+            ProxyError::new(
+                format!(
+                    "'{path}' is not an inference endpoint. Expected /<provider>/v1/chat/completions, \
+                     /<provider>/v1/responses, /<provider>/v1/messages or /<provider>/v1/models.{hint}"
+                ),
+                "invalid_request_error",
+            )
+            .with_code("unknown_endpoint"),
+        ),
+    )
+        .into_response()
+}
+
+/// A request adjustment reported to the client as `header: from->to`.
+type Adjustment = (&'static str, String, String);
+
+/// Whether `model` is known to require Anthropic adaptive thinking: declared
+/// via model compat `forceAdaptiveThinking = true`, or learned.
+pub fn requires_adaptive_thinking(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model: &str,
+) -> bool {
+    provider_config
+        .models
+        .iter()
+        .find(|entry| entry.id == model)
+        .and_then(|entry| entry.compat.get("forceAdaptiveThinking"))
+        .and_then(Value::as_bool)
+        .or_else(|| state.learned_adaptive.get(provider_name, model))
+        .unwrap_or(false)
+}
+
+/// Apply adjustments already known for this upstream model (accepted
+/// reasoning efforts, adaptive thinking) before sending.
+fn apply_known_adjustments(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model_name: &str,
+    mut body: Vec<u8>,
+) -> (Vec<u8>, Vec<Adjustment>) {
+    let mut adjustments = Vec::new();
+    if let Some((rewritten, from, to)) =
+        reasoning_efforts_for(state, provider_config, provider_name, model_name)
+            .and_then(|supported| crate::reasoning_effort::rewrite_bytes(&body, &supported))
+    {
+        body = rewritten;
+        adjustments.push(("x-eavs-reasoning-effort", from, to));
+    }
+    if requires_adaptive_thinking(state, provider_config, provider_name, model_name) {
+        if let Some((rewritten, from, to)) = crate::reasoning_effort::to_adaptive_bytes(&body) {
+            body = rewritten;
+            adjustments.push(("x-eavs-thinking", from, to));
+        }
+    }
+    for (header, from, to) in &adjustments {
+        tracing::info!(provider = %provider_name, model = %model_name, %header, %from, %to, "Adjusted request for known upstream behavior");
+    }
+    (body, adjustments)
+}
+
+/// Whether a request carries something the gateway can adjust after an
+/// upstream rejection.
+fn adjustable(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|body| {
+        crate::reasoning_effort::requested(&body).is_some()
+            || crate::reasoning_effort::uses_enabled_thinking(&body)
+    })
+}
+
+/// Send upstream; if the upstream rejects the request with a 400 the gateway
+/// understands (unsupported reasoning effort naming the accepted set, or a
+/// model requiring adaptive thinking), learn it and resend once, adjusted.
+/// Any other response passes through unchanged. Adjustments are reported as
+/// `x-eavs-reasoning-effort` / `x-eavs-thinking: from->to` headers.
+async fn send_with_adjustment_retry(
+    state: &AppState,
+    provider_name: &str,
+    model_name: &str,
+    request: UpstreamRequest,
+    capable: bool,
+    mut adjustments: Vec<Adjustment>,
+) -> Result<UpstreamResponse, std::io::Error> {
+    let resend = (capable && adjustable(&request.body)).then(|| {
+        (
+            request.method.clone(),
+            request.url.clone(),
+            request.headers.clone(),
+            request.body.clone(),
+        )
+    });
+    let mut response = state.upstream.send(request).await?;
+    if let Some((method, url, headers, body)) = resend {
+        if let Some((rewritten, (header, from, to))) =
+            learn_from_upstream_error(state, provider_name, model_name, &mut response, &body).await
+        {
+            tracing::info!(
+                provider = %provider_name,
+                model = %model_name,
+                %header,
+                %from,
+                %to,
+                "Upstream rejected request; learned its requirement and retrying once"
+            );
+            record_adjustment(&mut adjustments, (header, from, to));
+            response = state
+                .upstream
+                .send(UpstreamRequest {
+                    method,
+                    url,
+                    headers,
+                    body: Bytes::from(rewritten),
+                })
+                .await?;
+        }
+    }
+    report_adjustments(&mut response.headers, adjustments);
+    Ok(response)
+}
+
+/// Add an adjustment, or update the target of one already applied (keeping
+/// the client's original value as `from`).
+fn record_adjustment(adjustments: &mut Vec<Adjustment>, (header, from, to): Adjustment) {
+    match adjustments
+        .iter_mut()
+        .find(|(known, _, _)| *known == header)
+    {
+        Some(existing) => existing.2 = to,
+        None => adjustments.push((header, from, to)),
+    }
+}
+
+fn report_adjustments(headers: &mut HeaderMap, adjustments: Vec<Adjustment>) {
+    for (header, from, to) in adjustments {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("{from}->{to}")) {
+            headers.insert(header, value);
+        }
+    }
+}
+
+/// For a 400 the gateway understands: record what it teaches and return the
+/// adjusted body. Otherwise restore the (already read) error body so the
+/// client receives it unchanged, and return `None`.
+async fn learn_from_upstream_error(
+    state: &AppState,
+    provider_name: &str,
+    model_name: &str,
+    response: &mut UpstreamResponse,
+    body: &[u8],
+) -> Option<(Vec<u8>, Adjustment)> {
+    if response.status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let error_stream = std::mem::replace(&mut response.body, futures::stream::empty().boxed());
+    let error_bytes = tokio::time::timeout(
+        upstream_error_body_timeout(),
+        collect_stream_bytes(error_stream),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    let text = String::from_utf8_lossy(&error_bytes);
+    let retry = if crate::reasoning_effort::requires_adaptive(&text) {
+        state
+            .learned_adaptive
+            .learn(provider_name, model_name, true);
+        crate::reasoning_effort::to_adaptive_bytes(body)
+            .map(|(rewritten, from, to)| (rewritten, ("x-eavs-thinking", from, to)))
+    } else {
+        crate::reasoning_effort::parse_supported(&text).and_then(|supported| {
+            state
+                .learned_efforts
+                .learn(provider_name, model_name, supported.clone());
+            crate::reasoning_effort::rewrite_bytes(body, &supported)
+                .map(|(rewritten, from, to)| (rewritten, ("x-eavs-reasoning-effort", from, to)))
+        })
+    };
+    if retry.is_none() {
+        response.body = futures::stream::once(async move { Ok(error_bytes) }).boxed();
+    }
+    retry
+}
+
+/// Reasoning-effort values the upstream accepts for `model`: declared in
+/// config, else learned from upstream errors, else models.dev metadata.
+pub fn reasoning_efforts_for(
+    state: &AppState,
+    provider_config: &crate::config::ProviderConfig,
+    provider_name: &str,
+    model: &str,
+) -> Option<Vec<String>> {
+    provider_config
+        .models
+        .iter()
+        .find(|entry| entry.id == model && !entry.reasoning_efforts.is_empty())
+        .map(|entry| entry.reasoning_efforts.clone())
+        .or_else(|| state.learned_efforts.get(provider_name, model))
+        .or_else(|| {
+            let catalog_id =
+                crate::model_catalog::eavs_to_catalog_id(provider_name, &provider_config.type_);
+            state
+                .model_catalog
+                .get()?
+                .model(catalog_id, model)
+                .map(|entry| entry.reasoning_efforts)
+                .filter(|efforts| !efforts.is_empty())
+        })
+}
+
 async fn collect_stream_bytes(
     mut stream: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
 ) -> Result<Bytes, std::io::Error> {
@@ -3213,6 +3556,8 @@ async fn ws_proxy_handler_inner(
         .policy_for_key_metadata(validated_key.as_ref().map(|key| &key.metadata));
     let delegated_fetch_analysis_tx = state.analysis_tx.clone();
 
+    let client_headers = headers.clone();
+    let key_scope = validated_key.as_ref().map(|key| key.key_hash.clone());
     ws.on_upgrade(move |mut client_socket| async move {
         let (session_token, mut injection_rx) = state.ws_sessions.register(&ns_conversation);
         let _session_guard = WsSessionGuard {
@@ -3230,7 +3575,14 @@ async fn ws_proxy_handler_inner(
 
         apply_ws_auth_headers(&mut request, provider_type, &api_key);
         apply_ws_extra_headers(&mut request, provider_type);
-        apply_opencode_session_headers(&mut request, provider_type, &conversation_id);
+        apply_client_identity(
+            &mut request,
+            &client_headers,
+            &provider_config,
+            provider_type,
+            &provider_name,
+            key_scope.as_deref(),
+        );
 
         // Custom provider headers
         for (key, value) in &provider_config.headers {
@@ -4268,24 +4620,41 @@ pub fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: Provider
     apply_extra_headers(headers, provider_type);
 }
 
-/// `OpenCode` providers (opencode, opencode-go) route each request to a session via
-/// the `x-opencode-session` header, derived from the conversation id.
-fn apply_opencode_session_headers<H: HeadersExt>(
+/// Session affinity and User-Agent for the upstream request (see
+/// `client_identity`). Provider `headers` applied afterwards still override.
+fn apply_client_identity<H: HeadersExt>(
     headers: &mut H,
+    client_headers: &HeaderMap,
+    provider_config: &crate::config::ProviderConfig,
     provider_type: ProviderType,
-    session_id: &str,
+    provider_name: &str,
+    key_hash: Option<&str>,
 ) {
-    if matches!(
+    if let Some(name) = crate::client_identity::session_header(
         provider_type,
-        ProviderType::OpenCode | ProviderType::OpenCodeGo
-    ) && !session_id.is_empty()
-    {
-        if let Ok(value) = http::HeaderValue::from_str(session_id) {
-            headers.insert_header(
-                http::header::HeaderName::from_static("x-opencode-session"),
-                value,
-            );
+        provider_config.session_header.as_deref(),
+    ) {
+        let session = crate::client_identity::upstream_session(
+            key_hash.unwrap_or("operator"),
+            provider_name,
+            crate::client_identity::client_session(client_headers),
+        );
+        if let (Ok(name), Ok(value)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_str(&session),
+        ) {
+            headers.insert_header(name, value);
         }
+    }
+    if let Some(value) = crate::client_identity::user_agent(
+        provider_config.user_agent.as_deref(),
+        client_headers
+            .get(http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .and_then(|agent| http::HeaderValue::from_str(&agent).ok())
+    {
+        headers.insert_header(http::header::USER_AGENT, value);
     }
 }
 
@@ -4662,6 +5031,8 @@ fn normalize_upstream_error(
             v.pointer("/message").and_then(|v| v.as_str()),
             v.pointer("/error").and_then(|v| v.as_str()),
             v.pointer("/Message").and_then(|v| v.as_str()),
+            v.pointer("/detail").and_then(|v| v.as_str()),
+            v.pointer("/detail/0/msg").and_then(|v| v.as_str()),
         ];
         message = candidates
             .into_iter()
@@ -4922,40 +5293,94 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "assertions are intentional in tests"
     )]
-    #[test]
-    fn opencode_session_header_is_applied() -> Result<(), anyhow::Error> {
-        let mut headers = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut headers, ProviderType::OpenCodeGo, "sess-1");
-        assert_eq!(
-            headers
-                .get("x-opencode-session")
-                .context("get(...) returned None or Err")?
-                .to_str()
-                .context("to_str(...) returned None or Err")?,
-            "sess-1"
+    #[tokio::test]
+    async fn upstream_gets_scoped_session_and_client_user_agent() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec(), ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        for (name, type_) in [("ocgo", "opencode-go"), ("oai", "openai")] {
+            providers.insert(
+                name.to_string(),
+                ProviderConfig {
+                    type_: type_.to_string(),
+                    base_url: format!("http://{name}/v1"),
+                    api_key: "sk-test".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        providers.insert(
+            "custom".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://custom/v1".to_string(),
+                session_header: Some("X-Session-Affinity".to_string()),
+                user_agent: Some(format!(
+                    "my-agent/2 {}",
+                    crate::client_identity::EAVS_PLACEHOLDER
+                )),
+                ..Default::default()
+            },
         );
-
-        // OpenCode (Zen) also gets the session header.
-        let mut h2 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h2, ProviderType::OpenCode, "sess-2");
-        assert_eq!(
-            h2.get("x-opencode-session")
-                .context("get(...) returned None or Err")?
-                .to_str()
-                .context("to_str(...) returned None or Err")?,
-            "sess-2"
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        for (provider, session) in [
+            ("ocgo", Some("pi-session-1")),
+            ("ocgo", None),
+            ("oai", Some("pi-session-1")),
+            ("custom", Some("pi-session-1")),
+        ] {
+            let mut req = http::Request::builder()
+                .method("POST")
+                .uri(format!("/{provider}/v1/chat/completions"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::USER_AGENT, "pi (darwin 25.0; arm64)");
+            if let Some(session) = session {
+                req = req.header("x-session-affinity", session);
+            }
+            let _ = app
+                .clone()
+                .oneshot(
+                    req.body(Body::from(
+                        json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+                            .to_string(),
+                    ))?,
+                )
+                .await?;
+        }
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 4);
+        let header = |i: usize, name: &str| {
+            requests[i]
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let eavs = crate::client_identity::eavs_agent();
+        let with_session = header(0, "x-opencode-session").context("ocgo session header")?;
+        assert!(with_session.starts_with("eavs-"), "{with_session}");
+        assert!(
+            !with_session.contains("pi-session-1"),
+            "raw client id leaked"
         );
-
-        // Non-OpenCode providers must NOT receive the header.
-        let mut h3 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h3, ProviderType::OpenAI, "sess-3");
-        assert!(h3.get("x-opencode-session").is_none());
-
-        // Empty session id -> no header.
-        let mut h4 = http::HeaderMap::new();
-        apply_opencode_session_headers(&mut h4, ProviderType::OpenCodeGo, "");
-        assert!(h4.get("x-opencode-session").is_none());
-
+        let without_session = header(1, "x-opencode-session").context("fallback session")?;
+        assert_ne!(with_session, without_session);
+        assert_ne!(without_session, "default");
+        assert_eq!(
+            header(0, "user-agent").as_deref(),
+            Some(format!("pi (darwin 25.0; arm64) {eavs}").as_str())
+        );
+        assert_eq!(
+            header(2, "x-opencode-session"),
+            None,
+            "openai: no session header"
+        );
+        assert_eq!(header(2, "x-session-id"), None);
+        assert!(header(2, "user-agent").is_some());
+        assert!(header(3, "x-session-affinity").is_some_and(|v| v.starts_with("eavs-")));
+        assert_eq!(header(3, "user-agent"), Some(format!("my-agent/2 {eavs}")));
         Ok(())
     }
 
@@ -5777,6 +6202,7 @@ mod tests {
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-provider", "default")
             .body(Body::from(
                 serde_json::to_vec(&unsafe_body).context("body(...) returned None or Err")?,
             ))
@@ -5801,6 +6227,7 @@ mod tests {
             .method("POST")
             .uri("/v1/responses")
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-provider", "default")
             .body(Body::from(control_bytes.clone()))
             .context("unexpected None or Err")?;
         let _ = app
@@ -5933,6 +6360,7 @@ mod tests {
                 .method("POST")
                 .uri("/v1/responses")
                 .header(http::header::CONTENT_TYPE, "application/json")
+                .header("x-provider", "default")
                 .header(http::header::AUTHORIZATION, format!("Bearer {key}"))
                 .body(Body::from(
                     serde_json::to_vec(&body).context("body(...) returned None or Err")?,
@@ -9677,6 +10105,653 @@ mod tests {
             }
         );
 
+        Ok(())
+    }
+
+    async fn unprefixed_chat(
+        providers: HashMap<String, ProviderConfig>,
+        model: &str,
+    ) -> Result<(StatusCode, Value, usize), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"{}")],
+        }]);
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))?))?;
+        let response = app.oneshot(req).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        Ok((status, body, mock.take_requests().await.len()))
+    }
+
+    fn fhgenie_only() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "fhgenie".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://fhgenie/v1".to_string(),
+                api_key: "sk-secret-fhgenie".to_string(),
+                ..Default::default()
+            },
+        );
+        providers
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unprefixed_v1_rejects_unconfigured_model_guess() -> Result<(), anyhow::Error> {
+        let (status, body, calls) =
+            unprefixed_chat(fhgenie_only(), "deepseek-ai/DeepSeek-V4.1-Flash").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unknown_provider", "body: {body}");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'deepseek'"), "names candidate: {message}");
+        assert!(message.contains("/<provider>/v1"), "path remedy: {message}");
+        assert!(message.contains("X-Provider"), "header remedy: {message}");
+        assert!(
+            !message.contains("fhgenie"),
+            "no provider list without a key: {message}"
+        );
+        assert!(!body.to_string().contains("sk-secret"), "no key material");
+        assert_eq!(calls, 0, "upstream must not be called");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unprefixed_v1_routes_configured_model_guess() -> Result<(), anyhow::Error> {
+        let mut providers = fhgenie_only();
+        providers.insert(
+            "deepseek".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://deepseek/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let (status, _, calls) = unprefixed_chat(providers, "deepseek-chat").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls, 1);
+        Ok(())
+    }
+
+    fn effort_provider(declared: &[&str]) -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "rtx".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://rtx/v1".to_string(),
+                models: vec![crate::config::ModelShortlistEntry {
+                    id: "qwen".to_string(),
+                    name: "qwen".to_string(),
+                    reasoning: true,
+                    input: vec!["text".to_string()],
+                    context_window: 1000,
+                    max_tokens: 100,
+                    cost: crate::config::ModelCost::default(),
+                    compat: HashMap::new(),
+                    reasoning_efforts: declared.iter().map(|v| (*v).to_string()).collect(),
+                    api: None,
+                }],
+                ..Default::default()
+            },
+        );
+        providers
+    }
+
+    fn ok_spec() -> ResponseSpec {
+        ResponseSpec {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(b"{}")],
+        }
+    }
+
+    fn vllm_effort_400() -> ResponseSpec {
+        ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"error": {"code": "BadRequestError", "message": "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.", "type": "invalid_request_error"}}).to_string(),
+            )],
+        }
+    }
+
+    async fn effort_request(
+        app: &Router,
+        effort: &str,
+    ) -> Result<(StatusCode, HeaderMap, Bytes), anyhow::Error> {
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/rtx/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": effort
+            }))?))?;
+        let response = app.clone().oneshot(req).await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((status, headers, body))
+    }
+
+    fn sent_effort(request: &crate::upstream::UpstreamRequest) -> Result<String, anyhow::Error> {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        Ok(body["reasoning_effort"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    fn effort_app(mock: &MockUpstream, declared: &[&str]) -> Router {
+        let state = AppState::new_with_upstream(
+            make_config(effort_provider(declared)),
+            Arc::new(mock.clone()),
+        );
+        Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state)
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn declared_reasoning_efforts_rewrite_before_forwarding() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec()]);
+        let app = effort_app(&mock, &["low", "medium", "xhigh"]);
+        let (status, headers, _) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-reasoning-effort"], "high->xhigh");
+        let (_, headers, _) = effort_request(&app, "medium").await?;
+        assert!(headers.get("x-eavs-reasoning-effort").is_none());
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2, "no retries needed");
+        assert_eq!(sent_effort(&requests[0])?, "xhigh");
+        assert_eq!(sent_effort(&requests[1])?, "medium");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn rejected_reasoning_effort_is_learned_and_retried_once() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![vllm_effort_400(), ok_spec(), ok_spec()]);
+        let app = effort_app(&mock, &[]);
+        let (status, headers, _) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-reasoning-effort"], "high->xhigh");
+        // Learned: the next request is rewritten up front, without a 400.
+        let (status, _, _) = effort_request(&app, "minimal").await?;
+        assert_eq!(status, StatusCode::OK);
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(sent_effort(&requests[0])?, "high");
+        assert_eq!(sent_effort(&requests[1])?, "xhigh");
+        assert_eq!(sent_effort(&requests[2])?, "low");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unrelated_400_passes_through_without_retry() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"error": {"message": "max_tokens too large", "type": "invalid_request_error"}})
+                    .to_string(),
+            )],
+        }]);
+        let app = effort_app(&mock, &[]);
+        let (status, _, body) = effort_request(&app, "high").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("max_tokens too large"));
+        assert_eq!(mock.take_requests().await.len(), 1);
+        Ok(())
+    }
+
+    fn chat_provider(base_url: &str) -> ProviderConfig {
+        ProviderConfig {
+            type_: "openai-compatible".to_string(),
+            base_url: base_url.to_string(),
+            models: vec![crate::config::ModelShortlistEntry {
+                id: "m".to_string(),
+                name: "m".to_string(),
+                reasoning: false,
+                input: vec!["text".to_string()],
+                context_window: 1000,
+                max_tokens: 100,
+                cost: crate::config::ModelCost::default(),
+                compat: HashMap::new(),
+                reasoning_efforts: Vec::new(),
+                api: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// App over all inference routes with keys enabled; returns a key scoped
+    /// to `allowed` providers.
+    async fn hint_app(
+        providers: HashMap<String, ProviderConfig>,
+        allowed: &[&str],
+    ) -> Result<(Router, String, MockUpstream), anyhow::Error> {
+        let mock = MockUpstream::new(vec![]);
+        let mut config = make_config(providers);
+        config.keys.enabled = true;
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+        let store = Arc::new(KeyStore::in_memory().await?);
+        state
+            .key_validator
+            .set(Arc::new(KeyValidator::new(
+                store.clone(),
+                Arc::new(RateLimiter::new()),
+            )))
+            .ok()
+            .context("validator already set")?;
+        state
+            .key_store
+            .set(store.clone())
+            .ok()
+            .context("store already set")?;
+        let key = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    allowed_providers: Some(allowed.iter().map(|p| (*p).to_string()).collect()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await?
+            .key;
+        let app = crate::inference_routes::router(&state).with_state(state);
+        Ok((app, key, mock))
+    }
+
+    async fn hint_request(
+        app: &Router,
+        uri: &str,
+        key: Option<&str>,
+        model: &str,
+    ) -> Result<(StatusCode, Value), anyhow::Error> {
+        let mut req = http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(http::header::CONTENT_TYPE, "application/json");
+        if let Some(key) = key {
+            req = req.header("authorization", format!("Bearer {key}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(req.body(Body::from(serde_json::to_vec(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))?))?)
+            .await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
+    }
+
+    fn three_providers() -> HashMap<String, ProviderConfig> {
+        let mut providers = HashMap::new();
+        providers.insert("default".to_string(), chat_provider("http://default/v1"));
+        providers.insert("fhgenie".to_string(), chat_provider("http://fhgenie/v1"));
+        providers.insert("secret-lab".to_string(), chat_provider("http://lab/v1"));
+        providers
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unconfigured_model_guess_rejects_even_with_default_and_hints_key_scope(
+    ) -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie", "default"]).await?;
+        let (status, body) = hint_request(
+            &app,
+            "/v1/chat/completions",
+            Some(&key),
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_provider");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'deepseek'"), "{message}");
+        assert!(
+            message.contains("Providers available to this key: default, fhgenie"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("secret-lab"),
+            "out-of-scope provider leaked: {message}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn unknown_pinned_provider_names_remedy_and_key_scope() -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie"]).await?;
+        let (status, body) =
+            hint_request(&app, "/nope/v1/chat/completions", Some(&key), "m").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_provider");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("'nope'"), "{message}");
+        assert!(
+            message.contains("Providers available to this key: fhgenie"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("secret-lab") && !message.contains("default,"),
+            "{message}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn non_inference_path_names_expected_endpoints() -> Result<(), anyhow::Error> {
+        let (app, key, mock) = hint_app(three_providers(), &["fhgenie"]).await?;
+        let (status, body) =
+            hint_request(&app, "/fhgenie/v1/chat/complete", Some(&key), "m").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_endpoint");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("/<provider>/v1/chat/completions"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Providers available to this key: fhgenie"),
+            "{message}"
+        );
+        let (status, body) = hint_request(&app, "/fhgenie/v1/chat/complete", None, "m").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            !body.to_string().contains("fhgenie,")
+                && !body.to_string().contains("available to this key"),
+            "no list without key: {body}"
+        );
+        assert_eq!(mock.take_requests().await.len(), 0);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn anthropic_adaptive_thinking_is_learned_and_retried_once() -> Result<(), anyhow::Error>
+    {
+        let rejection = ResponseSpec {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from(
+                json!({"type": "error", "error": {"type": "invalid_request_error", "message": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}).to_string(),
+            )],
+        };
+        let mock = MockUpstream::new(vec![rejection, ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                type_: "anthropic".to_string(),
+                base_url: "http://anthropic".to_string(),
+                api_key: "sk-ant-test".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        let send = |budget: u64| {
+            let app = app.clone();
+            async move {
+                let req = http::Request::builder()
+                    .method("POST")
+                    .uri("/anthropic/v1/messages")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({
+                        "model": "claude-sonnet-5-5",
+                        "max_tokens": 32000,
+                        "thinking": {"type": "enabled", "budget_tokens": budget},
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }))?))?;
+                let response = app.oneshot(req).await?;
+                Ok::<_, anyhow::Error>((response.status(), response.headers().clone()))
+            }
+        };
+        let (status, headers) = send(16384).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-thinking"], "enabled->adaptive(high)");
+        let (status, headers) = send(2048).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-eavs-thinking"], "enabled->adaptive(low)");
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 3, "one retry, then adjusted up front");
+        let bodies: Vec<Value> = requests
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(bodies[0]["thinking"]["type"], "enabled");
+        assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[1]["output_config"]["effort"], "high");
+        assert_eq!(bodies[2]["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(bodies[2]["output_config"]["effort"], "low");
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_error_messages_survive_normalization() {
+        let fastapi = json!({"detail": "Model 'x' is not loaded"}).to_string();
+        let (message, _, _) = normalize_upstream_error(
+            ProviderType::OpenAICompatible,
+            StatusCode::BAD_REQUEST,
+            &fastapi,
+            fastapi.as_bytes(),
+        );
+        assert_eq!(message, "Model 'x' is not loaded");
+        let validation =
+            json!({"detail": [{"loc": ["body", "max_tokens"], "msg": "must be positive"}]})
+                .to_string();
+        let (message, _, _) = normalize_upstream_error(
+            ProviderType::OpenAICompatible,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &validation,
+            validation.as_bytes(),
+        );
+        assert_eq!(message, "must be positive");
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn multi_format_gateway_relays_native_messages_and_responses() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec()]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "ocgo".to_string(),
+            ProviderConfig {
+                type_: "opencode-go".to_string(),
+                base_url: "https://opencode.example/zen/go/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let app = Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state);
+        let anthropic = json!({"model": "qwen3.8-flash", "max_tokens": 16, "system": "s", "messages": [{"role": "user", "content": "hi"}]});
+        let responses =
+            json!({"model": "gpt-6-luna", "input": "hi", "reasoning": {"effort": "low"}});
+        for (path, body) in [("messages", &anthropic), ("responses", &responses)] {
+            let req = http::Request::builder()
+                .method("POST")
+                .uri(format!("/ocgo/v1/{path}"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header("x-session-affinity", "pi-1")
+                .body(Body::from(body.to_string()))?;
+            let _ = app.clone().oneshot(req).await?;
+        }
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].url,
+            "https://opencode.example/zen/go/v1/messages"
+        );
+        assert_eq!(
+            requests[1].url,
+            "https://opencode.example/zen/go/v1/responses"
+        );
+        for (request, original) in requests.iter().zip([&anthropic, &responses]) {
+            let sent: Value = serde_json::from_slice(&request.body)?;
+            assert_eq!(&sent, original, "native body relayed unchanged");
+            assert!(request.headers.get("x-opencode-session").is_some());
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn deactivated_models_are_hidden_and_rejected_with_a_remedy() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(vec![]);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "mock".to_string(),
+            ProviderConfig {
+                type_: "mock".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        let availability = state.availability.clone();
+        let app = Router::new()
+            .route("/v1/*path", any(proxy_handler))
+            .with_state(state);
+
+        let request = |app: &Router, path: &'static str| {
+            let app = app.clone();
+            async move {
+                let body = if path == "models" {
+                    None
+                } else {
+                    Some(serde_json::to_vec(&json!({
+                        "model": "mock-model",
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }))?)
+                };
+                let mut builder = http::Request::builder()
+                    .method(if path == "models" { "GET" } else { "POST" })
+                    .uri(format!("/v1/{path}"))
+                    .header("X-Provider", "mock");
+                if body.is_some() {
+                    builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                }
+                let request = builder.body(body.map_or_else(Body::empty, Body::from))?;
+                let response = app.oneshot(request).await?;
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 64 << 10).await?;
+                Ok::<_, anyhow::Error>((status, bytes))
+            }
+        };
+
+        // Baseline: served.
+        let (status, _) = request(&app, "chat/completions").await?;
+        assert_eq!(status, StatusCode::OK);
+
+        // Deactivate: hidden from the synthetic /v1/models list, and a direct
+        // request answers a typed 404 with the reason and the remedy.
+        availability
+            .deactivate(
+                "mock",
+                &["mock-model".to_string()],
+                Some("loadout switch".to_string()),
+                None,
+                "opengo-1",
+            )
+            .await;
+        let (status, body) = request(&app, "models").await?;
+        assert_eq!(status, StatusCode::OK);
+        let models: Value = serde_json::from_slice(&body)?;
+        assert!(
+            !models["data"]
+                .as_array()
+                .is_some_and(|models| models.iter().any(|m| m["id"] == "mock-model")),
+            "deactivated model must not be advertised"
+        );
+        let (status, body) = request(&app, "chat/completions").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let error: Value = serde_json::from_slice(&body)?;
+        assert_eq!(error["error"]["code"], "model_unavailable");
+        assert!(error["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("loadout switch")
+                && message.contains("eavs models enable mock mock-model")
+        }));
+
+        // Re-enabled: advertised and served again.
+        availability.activate("mock", None).await;
+        let (status, _) = request(&app, "models").await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = request(&app, "chat/completions").await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "body: {}",
+            String::from_utf8_lossy(&body)
+        );
         Ok(())
     }
 }

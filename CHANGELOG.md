@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-10-25
+
+### Fixed
+- Admin console data views: the listener token unlocks the gateway boundary, but
+  keys and accounts handlers also need the `master_key` (Bearer). The gate now
+  takes both credentials and sends them together; availability still accepts a
+  maintenance-only key alone. Verified live on the Mac: availability, keys and
+  accounts all answer 200 with the pair.
+
+## [0.9.1] - 2026-10-25
+
+### Added
+- Admin console: an installable PWA at `/admin`. Provider/model overview with
+  live availability and probe status (click a model to enable/disable), virtual
+  key management, and OAuth account status. The shell is static, data flows
+  only through authenticated calls (operator token or maintenance key).
+- Local-runtime availability probe: `[providers.*.probe] enabled = true` makes
+  EAVS periodically ask a self-hosted runtime (llama.cpp, vLLM, ollama,
+  llama-swap) for its served model list — a plain `GET /models`, never a
+  generation — and deactivate configured models the runtime no longer serves,
+  with the reason and probe time in the snapshot. Operator deactivations are
+  never overridden by probes. Probe results appear in
+  `GET /eavs/maintenance/availability` alongside each provider's configured
+  model universe.
+- Model availability maintenance: deactivate models without touching config, e.g.
+  when a GPU machine switches loadouts. `POST /eavs/maintenance/availability`
+  accepts the operator token or a new maintenance-only key (`eavs keys create
+  --maintenance`; such keys are rejected on every inference route) and supports
+  targeted updates plus `mode: "replace"` to announce a provider's complete
+  active set, with optional reason and TTL. Deactivated models vanish from
+  catalogs and direct requests answer a typed `model_unavailable` error naming
+  the reason and remedy. CLI: `eavs models availability|disable|enable`.
+- Per-model native API: models carry `api` (`openai-completions`, `openai-responses`,
+  `anthropic-messages`), from config or, on gateways serving every format (OpenCode,
+  OpenCode Go), from models.dev's per-model SDK. The serving catalog publishes `api` and
+  `request_path` per model when it differs from the provider's, so clients use e.g.
+  Anthropic Messages for Qwen3.8/MiniMax and Responses for GPT on OpenCode Go.
+- models.dev `reasoning_options` effort values seed accepted reasoning efforts (after
+  config and learned values); `max` is a recognized effort level. The models.dev cache
+  file is now `models_catalog.v2.json` so these fields are fetched immediately.
+- Session affinity for every provider: the client's conversation id (`x-session-affinity`,
+  `x-opencode-session`, `x-session-id`, `session_id` or `X-Conversation-ID`) is sent
+  upstream as an opaque id scoped to the virtual key and provider, in the provider's
+  header (`x-opencode-session` for OpenCode, `x-session-id` for OpenRouter; configurable
+  via `session_header`). Without one, the id is stable per key; previously OpenCode got
+  the literal `default` for every conversation of every key.
+- Upstream User-Agent: previously none was sent. Default is `<client UA> eavs/<version>`;
+  configurable per provider via `user_agent` with `{client}` and `{eavs}`.
+- Anthropic adaptive thinking: models that reject `thinking.type: "enabled"` (e.g. Claude
+  Sonnet 5.5) get `{type: "adaptive"}` plus `output_config.effort` derived from the token
+  budget. Learned from the first upstream 400 (persisted, one retry) or declared via model
+  compat `forceAdaptiveThinking = true`; published in the catalog's model `compat`.
+  Reported via `x-eavs-thinking: enabled->adaptive(<effort>)`.
+- FastAPI-style upstream errors (`{"detail": ...}`) keep their message when normalized.
+
+### Changed
+- **Breaking:** an unprefixed `/v1` request whose model name suggests a provider kind
+  (e.g. `deepseek-*`) is routed only to a provider of that name, or to the single
+  configured provider of that type (so `[providers.default] type = "openai"` still
+  serves `gpt-*`). Otherwise it returns 400 `unknown_provider` naming the guess and the
+  remedy instead of silently falling back to `default`. Clients relying on the old
+  fallback should send `X-Provider` or use `/<provider>/v1/...` (eavs-achj).
+- Unknown providers (path or `X-Provider`) return 400 `unknown_provider` and no longer
+  list every configured provider to any caller.
+- Non-inference provider paths return a JSON 404 `unknown_endpoint` naming the expected
+  endpoints instead of an empty 404.
+- These errors add "Providers available to this key: ..." for a valid virtual key,
+  computed like the key-filtered catalog; unauthenticated callers get no list.
+
+## [0.9.0] - 2026-10-22
+
+### Added
+- Reasoning-effort normalization (eavs-5a8d): per-model `reasoning_efforts`; unsupported
+  `reasoning_effort` / `reasoning.effort` values are rewritten to the nearest accepted
+  level (preferring higher). Undeclared models learn the accepted set from the first
+  upstream 400 that names it (persisted, one retry). Published in `/v1/eavs/catalog`;
+  rewrites are reported via `x-eavs-reasoning-effort`.
+- Scoped device onboarding, native Pi streaming, administration clients and an Oqto Pi
+  invitation command with private QR publication.
+- Opt-in CORS and a scoped native inference listener.
+- Realtime speech, tenant-bound async jobs, rerank bridge and native inference HTTP
+  shapes with provider-scoped auth; metering for budgeted jobs and Cohere/Voyage rerank.
+- OpenCode and OpenCode Go providers; modernized OpenAI Responses/Codex request shaping.
+
+### Changed
+- Unprefixed `/v1` requests whose model name suggests an unconfigured provider (and no
+  default exists) now return 400 `unknown_provider` naming the guess and the
+  `/<provider>/v1` / `X-Provider` remedies (eavs-achj).
+- Authoritative live key admission across processes.
+
+### Fixed
+- Bounded upstream error-body reads so slow or unterminated errors never hang.
+- Security audit findings across proxy, keys, OAuth, probe and egress; OAuth ownership
+  and effective model scope guards; delegated media and native budget gates.
+
 ## [0.8.3] - 2026-08-27
 
 ### Security

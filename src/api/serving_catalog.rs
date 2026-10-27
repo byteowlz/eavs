@@ -49,6 +49,16 @@ pub struct ServingModel {
     pub max_tokens: u64,
     pub compat: BTreeMap<String, serde_json::Value>,
     pub pricing: Option<Estimate>,
+    /// The model's native API when it differs from the provider's `api`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<&'static str>,
+    /// Request path for `api`, e.g. `/opencode-go/v1/messages`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_path: Option<String>,
+    /// Reasoning-effort values the upstream accepts (declared or learned).
+    /// Omitted when unknown; other values are rewritten by the gateway.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -124,6 +134,25 @@ fn route(config: &ProviderConfig) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Catalog route of a per-model API override.
+fn route_for_api(api: &str) -> Option<(&'static str, &'static str)> {
+    match api {
+        "openai-completions" => Some(("openai-completions", "/v1/chat/completions")),
+        "openai-responses" => Some(("openai-responses", "/v1/responses")),
+        "anthropic-messages" => Some(("anthropic-messages", "/v1/messages")),
+        _ => None,
+    }
+}
+
+/// Gateways that natively serve every catalog API format at one base URL, so
+/// models.dev per-model formats can be trusted without operator declaration.
+fn serves_all_formats(config: &ProviderConfig) -> bool {
+    matches!(
+        ProviderType::try_from_str(&config.type_),
+        Some(ProviderType::OpenCode | ProviderType::OpenCodeGo)
+    )
+}
+
 fn public_text(value: &str, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
@@ -160,6 +189,7 @@ fn model_compat(
         "requiresToolResultName",
         "requiresAssistantAfterToolResult",
         "requiresThinkingAsText",
+        "forceAdaptiveThinking",
     ] {
         if let Some(value) = values.get(name).and_then(serde_json::Value::as_bool) {
             result.insert(name.to_owned(), serde_json::Value::Bool(value));
@@ -256,7 +286,87 @@ async fn collect_candidates(state: &AppState) -> Result<Vec<Candidate>, Failure>
     Ok(candidates)
 }
 
-fn project(
+/// One candidate model as a serving-catalog entry, or `None` when it must
+/// not be offered: deactivated, not key-visible, policy-rewritten away, or
+/// unusable metadata.
+async fn project_model(
+    state: &AppState,
+    candidate: &Candidate,
+    api: &'static str,
+    path: &'static str,
+    scope: &KeyPermissions,
+    mut model: crate::config::ModelShortlistEntry,
+) -> Option<ServingModel> {
+    if !public_text(&model.id, 512) || !scope.is_model_allowed(&model.id) {
+        return None;
+    }
+    if state
+        .availability
+        .unavailable(&candidate.id, &model.id)
+        .await
+        .is_some()
+    {
+        return None; // deactivated by operator or fleet maintenance
+    }
+    // A model's own native API, when it differs from the provider's:
+    // operator-declared, or from models.dev on multi-format gateways.
+    let model_route = model
+        .api
+        .as_deref()
+        .filter(|_| {
+            candidate.metadata_source == "operator_declaration"
+                || serves_all_formats(&candidate.config)
+        })
+        .and_then(route_for_api)
+        .filter(|(model_api, _)| *model_api != api);
+    let model_path = model_route.map_or(path, |(_, model_path)| model_path);
+    let mut body = serde_json::json!({"model": model.id});
+    if state
+        .config
+        .policy
+        .apply(&candidate.id, model_path, &mut body)
+        .is_err()
+        || body.get("model").and_then(serde_json::Value::as_str) != Some(model.id.as_str())
+    {
+        return None; // no alias/rewrite metadata or inherited capabilities
+    }
+    let input: Vec<String> = model
+        .input
+        .drain(..)
+        .filter(|v| matches!(v.as_str(), "text" | "image"))
+        .collect();
+    if !input.iter().any(|v| v == "text") {
+        return None;
+    }
+    let name = if public_text(&model.name, 512) {
+        model.name
+    } else {
+        model.id.clone()
+    };
+    let reasoning_efforts =
+        crate::proxy::reasoning_efforts_for(state, &candidate.config, &candidate.id, &model.id)
+            .unwrap_or_default();
+    let mut compat = model_compat(&model.compat);
+    if crate::proxy::requires_adaptive_thinking(state, &candidate.config, &candidate.id, &model.id)
+    {
+        compat.insert("forceAdaptiveThinking".into(), true.into());
+    }
+    Some(ServingModel {
+        id: model.id,
+        name,
+        reasoning: model.reasoning,
+        input,
+        context_window: model.context_window,
+        max_tokens: model.max_tokens,
+        compat,
+        pricing: estimate(&model.cost),
+        reasoning_efforts,
+        api: model_route.map(|(model_api, _)| model_api),
+        request_path: model_route.map(|(_, model_path)| format!("/{}{model_path}", candidate.id)),
+    })
+}
+
+async fn project(
     state: &AppState,
     scope: &KeyPermissions,
     candidates: Vec<Candidate>,
@@ -270,46 +380,13 @@ fn project(
             continue;
         };
         let mut models = BTreeMap::new();
-        for model in candidate.models {
-            if !public_text(&model.id, 512) || !scope.is_model_allowed(&model.id) {
+        for model in &candidate.models {
+            let Some(projected) =
+                project_model(state, &candidate, api, path, scope, model.clone()).await
+            else {
                 continue;
-            }
-            let mut body = serde_json::json!({"model": model.id});
-            if state
-                .config
-                .policy
-                .apply(&candidate.id, path, &mut body)
-                .is_err()
-                || body.get("model").and_then(serde_json::Value::as_str) != Some(model.id.as_str())
-            {
-                continue; // no alias/rewrite metadata or inherited capabilities
-            }
-            let input: Vec<String> = model
-                .input
-                .into_iter()
-                .filter(|v| matches!(v.as_str(), "text" | "image"))
-                .collect();
-            if !input.iter().any(|v| v == "text") {
-                continue;
-            }
-            let name = if public_text(&model.name, 512) {
-                model.name
-            } else {
-                model.id.clone()
             };
-            models.insert(
-                model.id.clone(),
-                ServingModel {
-                    id: model.id,
-                    name,
-                    reasoning: model.reasoning,
-                    input,
-                    context_window: model.context_window,
-                    max_tokens: model.max_tokens,
-                    compat: model_compat(&model.compat),
-                    pricing: estimate(&model.cost),
-                },
-            );
+            models.insert(projected.id.clone(), projected);
         }
         if !models.is_empty() {
             providers.push(ServingProvider {
@@ -336,7 +413,7 @@ pub async fn build(state: &AppState, token: &str) -> Result<ServingCatalog, Fail
     let candidates = collect_candidates(&state).await?;
     // Reauthenticate after DB awaits; project with current scope synchronously.
     let scope = permissions(&state, token).await?;
-    let providers = project(&state, &scope, candidates);
+    let providers = project(&state, &scope, candidates).await;
     let result = ServingCatalog {
         schema_version: 1,
         scope: "key-filtered-chat-candidates",

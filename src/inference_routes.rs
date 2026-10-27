@@ -2,10 +2,9 @@
 //! Operator/configuration/credential routes must never be registered here.
 use crate::{api, jobs, proxy, state::AppState};
 use axum::{
-    extract::Request,
-    http::StatusCode,
+    extract::{Request, State},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{any, get, post},
     Router,
 };
@@ -21,7 +20,11 @@ pub(crate) fn api_path(path: &str) -> &str {
             .unwrap_or("")
     }
 }
-async fn inference_path_only(request: Request, next: Next) -> Response {
+async fn inference_path_only(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     let path = api_path(request.uri().path());
     if !crate::proxy::is_inference_path(path)
         && !matches!(
@@ -41,12 +44,13 @@ async fn inference_path_only(request: Request, next: Next) -> Response {
                 .iter()
                 .any(|action| path.ends_with(action)))
     {
-        return StatusCode::NOT_FOUND.into_response();
+        let path = request.uri().path().to_owned();
+        return proxy::unknown_endpoint_response(&state, request.headers(), &path).await;
     }
     next.run(request).await
 }
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/v1/eavs/catalog", get(api::serving_catalog::handler))
         .route("/v1/realtime", get(proxy::ws_proxy_handler))
@@ -80,18 +84,30 @@ pub fn router() -> Router<AppState> {
         .route("/:provider/v1/eavs/jobs/:handle/cancel", post(jobs::cancel))
         .route(
             "/:provider/v1/*path",
-            any(proxy::provider_proxy_handler).layer(middleware::from_fn(inference_path_only)),
+            any(proxy::provider_proxy_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                inference_path_only,
+            )),
         )
         .route(
             "/:provider/v2/*path",
-            any(proxy::provider_proxy_handler).layer(middleware::from_fn(inference_path_only)),
+            any(proxy::provider_proxy_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                inference_path_only,
+            )),
         )
         .route(
             "/v1/*path",
-            any(proxy::proxy_handler).layer(middleware::from_fn(inference_path_only)),
+            any(proxy::proxy_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                inference_path_only,
+            )),
         )
         .route(
             "/v2/*path",
-            any(proxy::proxy_handler).layer(middleware::from_fn(inference_path_only)),
+            any(proxy::proxy_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                inference_path_only,
+            )),
         )
 }

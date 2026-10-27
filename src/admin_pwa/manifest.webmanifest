@@ -1,0 +1,13 @@
+{
+  "name": "EAVS Console",
+  "short_name": "EAVS",
+  "description": "Admin console for the EAVS LLM gateway",
+  "start_url": "/admin",
+  "scope": "/admin/",
+  "display": "standalone",
+  "background_color": "#0c0e12",
+  "theme_color": "#0c0e12",
+  "icons": [
+    { "src": "/admin/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

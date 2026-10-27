@@ -320,7 +320,7 @@ pub fn router(state: AppState, forbidden: Vec<String>) -> Result<Router, &'stati
             axum::http::HeaderName::from_static("x-stainless-read-timeout"),
             axum::http::HeaderName::from_static("x-stainless-connect-timeout"),
         ]);
-    let native = crate::inference_routes::router().with_state(state.clone());
+    let native = crate::inference_routes::router(&state).with_state(state.clone());
     let ingress = Ingress {
         state,
         forbidden: Arc::new(

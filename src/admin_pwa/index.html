@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0c0e12">
+<title>EAVS Console</title>
+<link rel="manifest" href="/admin/manifest.webmanifest">
+<link rel="icon" href="/admin/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/admin/icon.svg">
+<style>
+:root{
+  --bg:#0c0e12;--panel:#141821;--panel2:#1a1f2b;--line:#262c3a;--text:#e6e9f0;
+  --dim:#8b93a7;--accent:#6ea8fe;--ok:#3ecf8e;--bad:#ff6b6b;--warn:#f5b453;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;
+     -webkit-font-smoothing:antialiased;min-height:100dvh}
+header{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--line);
+       position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);z-index:5}
+header h1{font-size:17px;font-weight:650;letter-spacing:.2px}
+header .spacer{flex:1}
+#status{font-size:12px;color:var(--dim)}
+main{max-width:1080px;margin:0 auto;padding:20px}
+nav{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+nav button{background:none;border:1px solid var(--line);color:var(--dim);padding:7px 14px;border-radius:999px;
+           cursor:pointer;font-size:13.5px}
+nav button[aria-selected=true]{background:var(--panel2);color:var(--text);border-color:var(--accent)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.card h2{font-size:13px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;
+         display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
+.models{display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:8px;font-size:13px;
+      background:var(--panel2);border:1px solid var(--line);cursor:pointer;user-select:none}
+.chip.off{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);text-decoration:line-through}
+.chip:hover{border-color:var(--accent)}
+.reason{display:block;font-size:11px;color:var(--dim);text-decoration:none;line-height:1.3;max-width:260px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--dim);font-weight:500;font-size:12px}
+button.act{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:5px 10px;border-radius:7px;
+           cursor:pointer;font-size:12.5px}
+button.act:hover{border-color:var(--accent)}
+input{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:8px;
+      font-size:14px;width:100%}
+label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+.muted{color:var(--dim);font-size:13px}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;
+    overflow-x:auto;user-select:all}
+#gate{max-width:380px;margin:12vh auto;text-align:center}
+#gate input{margin:14px 0}
+.hidden{display:none!important}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);
+       border:1px solid var(--line);padding:10px 18px;border-radius:10px;font-size:13.5px;opacity:0;
+       transition:opacity .2s;pointer-events:none;max-width:90vw}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>EAVS Console</h1><span class="spacer"></span><span id="status"></span>
+</header>
+<main>
+  <div id="gate" class="card">
+    <h2>Operator credentials</h2>
+    <p class="muted">The listener token unlocks the gateway boundary; the master key unlocks keys and accounts. Availability also accepts a maintenance-only key instead.</p>
+    <label>Listener token (<code>server.auth_token</code>) or maintenance key</label>
+    <input id="token" type="password" placeholder="eavs_… or sk-eavs-…">
+    <label>Master key (<code>keys.master_key</code>) — for Keys / Accounts</label>
+    <input id="master" type="password" placeholder="052abc…">
+    <button class="act" onclick="saveToken()">Unlock</button>
+  </div>
+  <div id="app" class="hidden">
+    <nav>
+      <button data-v="availability" aria-selected=true>Availability</button>
+      <button data-v="keys">Keys</button>
+      <button data-v="oauth">Accounts</button>
+    </nav>
+    <div id="view"></div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.getItem("eavs_token")||"";
+let master=localStorage.getItem("eavs_master")||"";
+let view="availability", timer=null;
+
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),2600);}
+function saveToken(){
+  token=$("#token").value.trim();master=$("#master").value.trim();
+  localStorage.setItem("eavs_token",token);localStorage.setItem("eavs_master",master);
+  $("#gate").classList.add("hidden");$("#app").classList.remove("hidden");refresh();}
+function headers(){return{"x-eavs-token":token,...(master?{"authorization":"Bearer "+master}:{}),
+  "content-type":"application/json"};}
+
+async function api(path,options){
+  const r=await fetch(path,{...options,headers:headers()});
+  if(r.status===401){$("#gate").classList.remove("hidden");$("#app").classList.add("hidden");
+    throw new Error("unauthorized");}
+  if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);
+  return r.json();
+}
+
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+async function refresh(){
+  try{
+    $("#status").textContent="synced "+new Date().toLocaleTimeString();
+    if(view==="availability")await renderAvailability();
+    if(view==="keys")await renderKeys();
+    if(view==="oauth")await renderOauth();
+  }catch(e){if(e.message!=="unauthorized")toast(e.message);}
+}
+
+async function renderAvailability(){
+  const [snap]=await Promise.all([api("/eavs/maintenance/availability")]);
+  const deact={};
+  (snap.availability||[]).forEach(p=>Object.entries(p.models||{}).forEach(([m,d])=>deact[p.provider+"/"+m]=d));
+  const probe=snap.probe||{};
+  $("#view").innerHTML=(snap.providers||[]).map(p=>{
+    const pr=probe[p.provider];
+    const status=!p.probe_enabled?"":pr?(pr.ok?"":"bad"):"warn";
+    const hint=!p.probe_enabled?"probe off"
+      :!pr?"waiting for first probe"
+      :pr.ok?`serving ${pr.served.length} · ${new Date(pr.at).toLocaleTimeString()}`
+      :`probe error: ${esc(pr.error||"")}`;
+    const chips=p.models.map(m=>{
+      const key=p.provider+"/"+m.id, d=deact[key];
+      return `<span class="chip ${d?"off":""}" onclick="toggle('${esc(p.provider)}','${esc(m.id)}',${d?"true":"false"})"
+        title="${esc(d?.reason||"available")}">${esc(m.id)}
+        ${d?`<span class="reason">${esc(d.reason||"deactivated")} · by ${esc(d.set_by)}</span>`:""}</span>`;
+    }).join("");
+    return `<div class="card"><h2><span class="dot ${status}"></span>${esc(p.provider)}
+      <span style="text-transform:none;font-weight:400">${esc(p.type)}</span>
+      <span style="margin-left:auto;text-transform:none;font-weight:400">${hint}</span></h2>
+      <div class="models">${chips||'<span class="muted">no configured models</span>'}</div></div>`;
+  }).join("")||'<div class="card muted">No providers configured.</div>';
+}
+
+async function toggle(provider,model,deactivated){
+  try{
+    await api("/eavs/maintenance/availability",{method:"POST",body:JSON.stringify(
+      deactivated?{provider,models:[model],available:true}
+                 :{provider,models:[model],available:false,reason:"disabled from console"})});
+    toast(deactivated?`Enabled ${model}`:`Disabled ${model}`);
+    refresh();
+  }catch(e){toast(e.message);}
+}
+
+async function renderKeys(){
+  const keys=await api("/admin/keys");
+  $("#view").innerHTML=`<div class="card"><h2>Virtual keys</h2>
+    <table><tr><th>Key</th><th>Created</th><th>Requests</th><th></th></tr>
+    ${(keys||[]).map(k=>`<tr><td>${esc(k.name||k.key_id)} ${k.permissions?.maintenance?'<span class="muted">(maintenance)</span>':""}</td>
+      <td class="muted">${esc((k.created_at||"").slice(0,10))}</td>
+      <td>${k.usage?.total_requests??0}</td>
+      <td><button class="act" onclick="delKey('${esc(k.key_hash)}')">revoke</button></td></tr>`).join("")}
+    </table></div>
+    <div class="card"><h2>Create key</h2>
+      <label>Name</label><input id="kn" placeholder="my-agent">
+      <label>Model patterns (comma-separated, empty = all)</label><input id="km" placeholder="eavs/qwen3.8-*">
+      <label><input type="checkbox" id="kmain" style="width:auto"> maintenance-only</label>
+      <p><button class="act" onclick="createKey()">Create</button></p>
+      <pre id="kout" class="hidden"></pre></div>`;
+}
+async function createKey(){
+  try{
+    const body={name:$("#kn").value.trim()||null,
+      permissions:{allowed_models:$("#km").value.split(",").map(s=>s.trim()).filter(Boolean),
+                   maintenance:$("#kmain").checked}};
+    const k=await api("/admin/keys",{method:"POST",body:JSON.stringify(body)});
+    $("#kout").classList.remove("hidden");
+    $("#kout").textContent=k.key+"\n(copy now — shown once)";
+    refresh();
+  }catch(e){toast(e.message);}
+}
+async function delKey(hash){
+  try{await api("/admin/keys/"+hash,{method:"DELETE"});toast("Key revoked");refresh();}
+  catch(e){toast(e.message);}
+}
+
+async function renderOauth(){
+  try{
+    const st=await api("/auth/status/default");
+    $("#view").innerHTML='<div class="card"><h2>OAuth accounts (default user)</h2><pre>'+
+      esc(JSON.stringify(st,null,2))+"</pre></div>";
+  }catch(e){$("#view").innerHTML='<div class="card muted">'+esc(e.message)+"</div>";}
+}
+
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("nav button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  view=b.dataset.v;refresh();
+});
+
+if("serviceWorker" in navigator)navigator.serviceWorker.register("/admin/sw.js").catch(()=>{});
+if(token){$("#gate").classList.add("hidden");$("#app").classList.remove("hidden");refresh();}
+timer=setInterval(refresh,15000);
+</script>
+</body>
+</html>

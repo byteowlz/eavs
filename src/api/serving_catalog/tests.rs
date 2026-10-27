@@ -472,3 +472,98 @@ async fn external_writer_catalog_auth() -> Result<()> {
     assert_eq!(f.tripwire.0.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "Behavioral assertions in fallible offline fixture"
+)]
+async fn publishes_declared_and_learned_reasoning_efforts() -> Result<()> {
+    let mut fixture = fixture().await?;
+    let mut config = (*fixture.state.config).clone();
+    let alpha = config
+        .providers
+        .get_mut("alpha")
+        .ok_or_else(|| anyhow!("fixture provider"))?;
+    for model in &mut alpha.models {
+        if model.id == "allowed" {
+            model.reasoning_efforts = vec!["low".into(), "xhigh".into()];
+            // Same as the provider's API: not repeated per model.
+            model.api = Some("openai-completions".into());
+        }
+        if model.id == "field" {
+            model.api = Some("anthropic-messages".into());
+        }
+        if model.id == "blocked" {
+            model.api = Some("google-generative-ai".into());
+        }
+    }
+    let learned = fixture.state.learned_efforts.clone();
+    fixture.state = AppState::new_with_upstream(config, fixture.tripwire.clone());
+    fixture.state.learned_efforts = learned;
+    fixture
+        .state
+        .key_store
+        .set(Arc::new(
+            KeyStore::new(&fixture.dir.path().join("keys2.sqlite")).await?,
+        ))
+        .map_err(|_| anyhow!("store already set"))?;
+    fixture
+        .state
+        .learned_efforts
+        .learn("alpha", "field", vec!["medium".into()]);
+    fixture.state.learned_adaptive.learn("alpha", "field", true);
+    let token = key(&fixture.state, KeyPermissions::default()).await?;
+    let (status, _, value) = request(&fixture.state, Some(&token), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    let models: Vec<&Value> = value["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["models"].as_array().into_iter().flatten())
+        .collect();
+    let efforts = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| m.get("reasoning_efforts").cloned())
+    };
+    assert_eq!(
+        efforts("allowed"),
+        Some(Some(serde_json::json!(["low", "xhigh"])))
+    );
+    assert_eq!(efforts("field"), Some(Some(serde_json::json!(["medium"]))));
+    assert_eq!(efforts("blocked"), Some(None), "unknown values are omitted");
+    let adaptive = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .and_then(|m| m["compat"].get("forceAdaptiveThinking").cloned())
+    };
+    assert_eq!(adaptive("field"), Some(serde_json::json!(true)));
+    assert_eq!(adaptive("allowed"), None);
+    let route = |id: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| (m.get("api").cloned(), m.get("request_path").cloned()))
+    };
+    assert_eq!(
+        route("field"),
+        Some((
+            Some(serde_json::json!("anthropic-messages")),
+            Some(serde_json::json!("/alpha/v1/messages"))
+        ))
+    );
+    assert_eq!(route("allowed"), Some((None, None)));
+    assert_eq!(
+        route("blocked"),
+        Some((None, None)),
+        "unsupported APIs are ignored"
+    );
+    assert_eq!(
+        fixture.tripwire.0.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    Ok(())
+}
