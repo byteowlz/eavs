@@ -53,7 +53,13 @@ pub struct ProbeRequest {
     /// draft omits `api_key` (edit flow). New providers leave this unset.
     #[serde(default)]
     pub provider_name: Option<String>,
-    /// Unsaved provider configuration to exercise.
+    /// Probe the saved provider named by `provider_name` exactly as it is
+    /// configured (TOML or runtime store); `config` is ignored. Credentials
+    /// are resolved inside EAVS and never travel to the caller.
+    #[serde(default)]
+    pub saved: bool,
+    /// Unsaved provider configuration to exercise (ignored when `saved`).
+    #[serde(default)]
     pub config: ProviderConfig,
     /// Model id to send in the test request.
     pub model: String,
@@ -175,6 +181,7 @@ pub async fn run_probe(
 ) -> Result<ProbeResponse, ProbeRejection> {
     let ProbeRequest {
         provider_name: _,
+        saved: _,
         config,
         model,
         prompt,
@@ -762,6 +769,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("totally-not-a-provider", "http://up/v1"),
                 model: "some-model".to_string(),
                 prompt: None,
@@ -783,6 +791,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -816,6 +825,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -848,6 +858,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up:1/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -874,6 +885,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up/v1"),
                 model: "ghost".to_string(),
                 prompt: None,
@@ -902,6 +914,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai-compatible", "http://up:11434/v1"),
                 model: "llama3.1".to_string(),
                 prompt: None,
@@ -943,6 +956,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://127.0.0.1:8080/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -964,6 +978,7 @@ mod tests {
             &net(),
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://169.254.169.254/latest/meta-data"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -985,6 +1000,7 @@ mod tests {
                 &net(),
                 ProbeRequest {
                     provider_name: None,
+                    saved: false,
                     config: config("openai", &format!("http://{host}/v1")),
                     model: "gpt-4o-mini".to_string(),
                     prompt: None,
@@ -1008,6 +1024,7 @@ mod tests {
             &n,
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -1030,6 +1047,7 @@ mod tests {
             &n,
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://up/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -1054,6 +1072,7 @@ mod tests {
             &n,
             ProbeRequest {
                 provider_name: None,
+                saved: false,
                 config: config("openai", "http://127.0.0.1:8080/v1"),
                 model: "gpt-4o-mini".to_string(),
                 prompt: None,
@@ -1063,5 +1082,55 @@ mod tests {
         .unwrap();
         assert!(resp.ok);
         assert!(resp.capabilities.reachable);
+    }
+
+    /// The console tests a saved provider by name only: the handler resolves
+    /// the active config (base URL and credential) server-side, and the
+    /// credential never appears in the response.
+    #[tokio::test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test fixture assertions"
+    )]
+    async fn saved_probe_uses_the_active_provider_without_echoing_its_key() {
+        use axum::extract::State;
+        use axum::Json;
+
+        let scripted = ScriptedUpstream::new(vec![Ok((StatusCode::OK, ok_body()))]);
+        let mut config = crate::config::AppConfig::with_defaults();
+        config.keys.master_key = Some("mk-test".to_string());
+        config.network.block_private_ips = false;
+        config.providers.insert(
+            "rtx".to_string(),
+            ProviderConfig {
+                type_: "openai-compatible".to_string(),
+                base_url: "http://saved-host.invalid/v1".to_string(),
+                api_key: "sk-saved-secret-0123456789".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = crate::state::AppState::new_with_upstream(config, scripted.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer mk-test"),
+        );
+        let request: ProbeRequest = serde_json::from_value(serde_json::json!({
+            "provider_name": "rtx", "saved": true, "model": "qwen3.8"
+        }))
+        .unwrap();
+        let Ok(Json(response)) =
+            crate::api::probe_provider_handler(State(state), headers, Json(request)).await
+        else {
+            panic!("saved probe was rejected");
+        };
+        let sent = scripted.requests.lock().unwrap();
+        assert_eq!(sent[0].url, "http://saved-host.invalid/v1/chat/completions");
+        assert_eq!(
+            sent[0].headers.get(http::header::AUTHORIZATION).unwrap(),
+            "Bearer sk-saved-secret-0123456789"
+        );
+        let echoed = serde_json::to_string(&response).unwrap();
+        assert!(!echoed.contains("sk-saved-secret"), "key leaked: {echoed}");
     }
 }
