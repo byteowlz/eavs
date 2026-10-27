@@ -453,6 +453,54 @@ impl AppState {
             .unwrap_or_else(|| self.routing.snapshot().generation)
     }
 
+    /// Every active provider: config-file providers plus enabled providers
+    /// added at runtime (admin API / console). Runtime providers without a
+    /// shortlist in their config get the models stored for them. A file
+    /// provider shadows a runtime one of the same name.
+    pub async fn runtime_providers(&self) -> Vec<RuntimeProvider> {
+        let config = if self.file_routing_generation.is_some() {
+            self.config.clone()
+        } else {
+            self.routing.snapshot().config
+        };
+        let mut providers: Vec<RuntimeProvider> = config
+            .providers
+            .iter()
+            .map(|(name, config)| RuntimeProvider {
+                config: config.clone(),
+                resolved_name: name.clone(),
+            })
+            .collect();
+        let Some(store) = self.get_provider_store() else {
+            return providers;
+        };
+        for entry in store.list_providers() {
+            if !entry.enabled
+                || providers
+                    .iter()
+                    .any(|known| known.resolved_name.eq_ignore_ascii_case(&entry.name))
+            {
+                continue;
+            }
+            let Ok(mut runtime) =
+                serde_json::from_value::<crate::config::ProviderConfig>(entry.config)
+            else {
+                continue;
+            };
+            if crate::provider::ProviderType::try_from_str(&runtime.type_).is_none() {
+                continue;
+            }
+            if runtime.models.is_empty() {
+                runtime.models = store.get_models(&entry.name).await.unwrap_or_default();
+            }
+            providers.push(RuntimeProvider {
+                config: runtime,
+                resolved_name: entry.name,
+            });
+        }
+        providers
+    }
+
     pub fn resolve_provider(&self, name: &str) -> Option<RuntimeProvider> {
         let config = if self.file_routing_generation.is_some() {
             self.config.clone()
