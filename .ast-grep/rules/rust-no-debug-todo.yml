@@ -1,5 +1,8 @@
 id: rust-no-debug-todo
 language: Rust
+# The native console is a separate workspace with its own gate (ui/native).
+ignores:
+  - "ui/native/**"
 severity: warning
 message: "Remove debug/todo leftovers before merge."
 note: "Use structured tracing and complete implementations instead of dbg!/todo!/unimplemented!."

@@ -1,0 +1,17 @@
+theme = "Eavs Control Room"
+accent_font = "SystemUIFont"
+refresh_secs = 30
+# The gateway on this machine is found from ~/.config/eavs/config.toml.
+local_instance = true
+
+[window]
+width = 1200.0
+height = 800.0
+
+# Manage another gateway (e.g. the server). Credentials are references:
+# env:NAME or keychain:<account> (keychain service "eavs").
+# [[instances]]
+# name = "server"
+# url = "http://127.0.0.1:13044"   # ssh -L 13044:127.0.0.1:3044 server
+# token = "keychain:server-listener-token"
+# master_key = "keychain:server-master-key"

@@ -1,0 +1,56 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["byteowlz"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+config = { version = "0.14", default-features = false, features = ["toml"] }
+
+# gpui-kit is the ONE dependency for a GPUI desktop app. Do not list GPUI
+# crates directly; gpui-kit pulls the matching gpui-pre-* set and re-exports
+# it as `gpui_kit::*`. Keep the enabled tree-sitter features to the languages
+# your code/editor panes highlight; each adds ~a language parser.
+gpui-kit = { version = "0.6", features = [
+    "tree-sitter-rust",
+    "tree-sitter-markdown",
+    "tree-sitter-typescript",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# A focused Oqto-parity clippy set (style + correctness + a few pedantic picks).
+# unwrap/expect/panic are NOT linted here because tests exercise the same code
+# paths; in production code propagate with `?`/anyhow instead of unwrapping.
+# Optionally add ast-grep guardrails (.ast-grep/rules/) to flag them in
+# production scope only (see oqto-desktop for the pattern).
+[workspace.lints.clippy]
+collapsible_if = "warn"
+collapsible_else_if = "warn"
+needless_return = "warn"
+needless_borrow = "warn"
+clone_on_copy = "warn"
+single_char_add_str = "warn"
+manual_strip = "warn"
+manual_flatten = "warn"
+unnecessary_lazy_evaluations = "warn"
+unnecessary_map_or = "warn"
+io_other_error = "warn"
+single_match = "warn"
+cloned_instead_of_copied = "warn"
+inefficient_to_string = "warn"
+ptr_arg = "warn"
+derivable_impls = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"
+module_inception = "allow"

@@ -211,3 +211,12 @@ changelog version:
     cat CHANGELOG.md >> /tmp/changelog_new.md
     mv /tmp/changelog_new.md CHANGELOG.md
     echo "CHANGELOG.md updated for $VERSION"
+
+# Native GPUI console (separate workspace under ui/native, ADR-0022)
+console:
+    cd ui/native && just run
+
+# Native console gate: fmt, clippy, drift check, tests
+console-check:
+    cd ui/native && just check-all
+

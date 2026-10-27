@@ -1,0 +1,19 @@
+# Text files always end with a newline (POSIX).
+* text=auto eol=lf
+
+# Line endings for Windows batch scripts.
+*.bat text eol=crlf
+
+# Binary and asset files must not be diffed as text.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.icns binary
+
+# Go and Python generated trees.
+/.venv -diff
+/target -diff
+.trx/issues.jsonl text eol=lf merge=union
+.trx/events.jsonl text eol=lf merge=union
+.trx/verifications.jsonl text eol=lf merge=union

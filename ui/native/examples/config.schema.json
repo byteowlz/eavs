@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://byteowlz.dev/eavs-console/config.schema.json",
+  "title": "eavs-console Config",
+  "description": "Configuration for the eavs-console GPUI desktop app.",
+  "type": "object",
+  "properties": {
+    "theme": {
+      "type": "string",
+      "default": "Eavs Control Room",
+      "description": "Design-system scheme name."
+    },
+    "accent_font": {
+      "type": "string",
+      "description": "Display face used for accents (section headings, status bar). Use an installed family.",
+      "default": "SystemUIFont"
+    },
+    "window": {
+      "type": "object",
+      "description": "Initial window geometry.",
+      "properties": {
+        "width": {
+          "type": "number",
+          "minimum": 200,
+          "default": 1200
+        },
+        "height": {
+          "type": "number",
+          "minimum": 200,
+          "default": 800
+        }
+      }
+    },
+    "refresh_secs": {
+      "type": "integer",
+      "minimum": 5,
+      "default": 30,
+      "description": "Seconds between background refreshes of the selected gateway."
+    },
+    "local_instance": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show the gateway on this machine (found from ~/.config/eavs/config.toml)."
+    },
+    "instances": {
+      "type": "array",
+      "description": "Other gateways to manage.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "Operator listener: https://, or http:// to loopback (SSH tunnel)."
+          },
+          "token": {
+            "type": "string",
+            "pattern": "^(env|keychain):.+",
+            "description": "Listener token reference."
+          },
+          "master_key": {
+            "type": "string",
+            "pattern": "^(env|keychain):.+",
+            "description": "Master key reference."
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "theme",
+    "accent_font",
+    "window"
+  ]
+}

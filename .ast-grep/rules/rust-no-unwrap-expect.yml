@@ -1,5 +1,8 @@
 id: rust-no-unwrap-expect
 language: Rust
+# The native console is a separate workspace with its own gate (ui/native).
+ignores:
+  - "ui/native/**"
 severity: warning
 message: "Avoid unwrap/expect in production Rust code; propagate errors with context or explicit handling."
 note: |

@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manage their models and keys; providers added at runtime appear in the
   availability view and are probed when they opt in.
 - ADR-0022: native GPUI console over the per-instance operator API.
+- Native console (`ui/native`, `just console`): manage the gateway on this
+  machine and remote gateways (e.g. the server over an SSH tunnel or the
+  tailnet) from one window. Overview with what runs out first, providers with
+  presets ("pick it, paste a key"), model availability switches, and
+  subscription/credit usage meters with reset countdowns. Credentials are
+  `env:`/`keychain:` references; the local gateway is found from eavs' config.
 
 ### Changed
 - A provider's model shortlist is its probe universe: configured models the

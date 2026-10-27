@@ -1,5 +1,8 @@
 id: rust-no-clippy-allow
 language: Rust
+# The native console is a separate workspace with its own gate (ui/native).
+ignores:
+  - "ui/native/**"
 severity: warning
 message: "Avoid adding #[allow(clippy::...)] or #[expect(clippy::...)] without explicit review."
 note: "Fix root causes when possible. If suppression is required, document why in code review."

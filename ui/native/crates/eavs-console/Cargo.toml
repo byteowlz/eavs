@@ -1,0 +1,33 @@
+[package]
+name = "eavs-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native gpui desktop app built on the byteowlz design system"
+
+[dependencies]
+eavs-console-design = { path = "../eavs-console-design" }
+eavs-console-core = { path = "../eavs-console-core" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+gpui-kit.workspace = true
+config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+# Optional UI integration tests: add `gpui-kit = { workspace = true,
+# features = ["test-support"] }` under [dev-dependencies] and use
+# `#[gpui_kit::test]` with `TestAppContext`/`TestWindowExt` (see gpui-kit
+# TESTING.md). It recompiles gpui-kit, so it is opt-in for a fast `cargo test`.
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[[test]]
+name = "render_console"
+harness = false
+
+[lints]
+workspace = true

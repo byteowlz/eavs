@@ -1,0 +1,15 @@
+# Build artifacts
+/target
+**/target
+
+# Local config (written on first run; user-specific)
+*.local.toml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Rust
+**/*.rs.bk

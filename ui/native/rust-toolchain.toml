@@ -1,0 +1,7 @@
+# Pin the toolchain for reproducible builds. GPUI uses edition 2024, so use a
+# recent stable. `rustup` honours this file; you can omit it to use your
+# default toolchain.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

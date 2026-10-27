@@ -1,0 +1,15 @@
+[package]
+name = "eavs-console-design"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "byteowlz design-system mechanism for gpui: base24 scheme -> closed role layer -> gpui theme set (candidate design-system/impls/gpui-rs)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

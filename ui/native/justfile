@@ -1,0 +1,98 @@
+# eavs console justfile (rust-gpui, ADR-0022). Run from ui/native.
+
+set shell := ["bash", "-uc"]
+
+# Default recipe - show help
+default:
+    @just --list
+
+# === Development ===
+
+# Run the native app
+run:
+    cargo run -p eavs-console
+
+# Debug build
+build:
+    cargo build -p eavs-console
+
+# Release build
+build-release:
+    cargo build -p eavs-console --release
+
+# Fast compile check (whole workspace)
+check:
+    cargo check --workspace
+
+# Install the binary
+install:
+    cargo install --path crates/eavs-console
+
+# Clean build artifacts
+clean:
+    cargo clean
+
+# === Testing ===
+
+# Run all tests (design-system mechanism + app unit tests)
+test:
+    cargo test --workspace
+
+# Headless renders with synthetic fixtures (no window, no network)
+render DIR="/tmp/eavs-console-render":
+    EAVS_CONSOLE_RENDER="{{DIR}}" cargo test -p eavs-console --test render_console
+
+# Read-only check of the local gateway through the console client
+inspect:
+    cargo run -q -p eavs-console-core --example inspect
+
+# Run one test by name
+test-one TEST:
+    cargo test --workspace {{TEST}}
+
+# === Code Quality ===
+
+# Format all code
+fmt:
+    cargo fmt --all
+
+# Check formatting
+fmt-check:
+    cargo fmt --all -- --check
+
+# Run clippy (warnings here are denied, matching check-all)
+clippy:
+    cargo clippy --workspace -- -D warnings
+
+# Verify documented commands/claims against real manifests
+drift-check:
+    ./scripts/drift-check.sh
+
+# The gate a PR must pass
+check-all: fmt-check clippy drift-check test
+
+# === Project icon ===
+
+# Render icon/icon_on_{dark,light}.png (256x256) from the SVG sources
+icon:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for variant in on_dark on_light; do
+        svg="icon/icon_${variant}.svg"
+        png="icon/icon_${variant}.png"
+        if [ ! -f "$svg" ]; then
+            echo "skip: $svg not found"
+            continue
+        fi
+        if command -v rsvg-convert >/dev/null; then
+            rsvg-convert -w 256 -h 256 -a "$svg" -o "$png"
+        else
+            magick -background none -density 384 "$svg" -resize 256x256 -gravity center -extent 256x256 "$png"
+        fi
+        echo "rendered $png"
+    done
+
+# Enable the vendored git hooks
+setup-hooks:
+    git config core.hooksPath .githooks
+    @echo "git hooks wired: core.hooksPath=.githooks"

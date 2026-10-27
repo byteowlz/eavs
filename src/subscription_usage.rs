@@ -1167,8 +1167,10 @@ mod tests {
                 .get(http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
-            self.seen.lock().unwrap().push((request.url, auth));
-            let body = Bytes::from(serde_json::to_vec(&self.body).unwrap());
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push((request.url, auth));
+            }
+            let body = Bytes::from(serde_json::to_vec(&self.body).unwrap_or_default());
             Box::pin(async move {
                 Ok(crate::upstream::UpstreamResponse {
                     status: StatusCode::OK,
@@ -1207,7 +1209,11 @@ mod tests {
         );
         let state = crate::state::AppState::new_with_upstream(config, upstream.clone());
         refresh(&state).await;
-        let seen = upstream.seen.lock().unwrap().clone();
+        let seen = upstream
+            .seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default();
         assert_eq!(
             seen,
             vec![(
@@ -1226,6 +1232,13 @@ mod tests {
             .contains("sk-go-synthetic"));
         // A second refresh inside the minimum spacing does not ask again.
         refresh(&state).await;
-        assert_eq!(upstream.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            upstream
+                .seen
+                .lock()
+                .map(|seen| seen.len())
+                .unwrap_or_default(),
+            1
+        );
     }
 }

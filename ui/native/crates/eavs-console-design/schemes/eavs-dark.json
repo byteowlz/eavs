@@ -1,0 +1,32 @@
+{
+	"id": "eavs-control-room",
+	"name": "Eavs Control Room",
+	"mode": "dark",
+	"system": "base24",
+	"slots": {
+		"base00": "#11151a",
+		"base01": "#202831",
+		"base02": "#2a3530",
+		"base03": "#52646b",
+		"base04": "#a3b0b6",
+		"base05": "#ecf0ec",
+		"base06": "#f5f7ef",
+		"base07": "#ffffff",
+		"base08": "#ef887c",
+		"base09": "#d1a06e",
+		"base0A": "#e4c575",
+		"base0B": "#d4f477",
+		"base0C": "#76c9bb",
+		"base0D": "#86bbdf",
+		"base0E": "#b1a3c7",
+		"base0F": "#c99f8c",
+		"base10": "#0b1015",
+		"base11": "#14191f",
+		"base12": "#ffada2",
+		"base13": "#f2d68f",
+		"base14": "#e0ff91",
+		"base15": "#95e1d3",
+		"base16": "#acd8f5",
+		"base17": "#c9bce0"
+	}
+}
