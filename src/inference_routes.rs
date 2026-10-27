@@ -34,6 +34,8 @@ async fn inference_path_only(
                 | "/v1/completions"
                 | "/v1/messages"
                 | "/v1/v1/messages"
+                | "/v1/messages/count_tokens"
+                | "/v1/v1/messages/count_tokens"
                 | "/v1/complete"
                 | "/v1/responses"
                 | "/v1/pi/messages"

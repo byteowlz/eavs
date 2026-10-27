@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `env:`/`keychain:` references; the local gateway is found from eavs' config.
 
 ### Changed
+- Claude subscriptions (ADR-0023): an Anthropic provider holding a subscription
+  token (`sk-ant-oat…`, e.g. from `claude setup-token`) or a key bound to an
+  Anthropic OAuth login now serves only the genuine Claude Code client, passed
+  through byte for byte with only the credential swapped. Point Claude Code at
+  it with `ANTHROPIC_BASE_URL=https://<gateway>/<provider>`,
+  `CLAUDE_CODE_OAUTH_TOKEN=<eavs key>` and
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (without it Claude Code sends the
+  token straight to Anthropic for telemetry and bootstrap). Other clients get
+  `403 subscription_requires_claude_code`. **Breaking:** the previous
+  identity-injection path for non-Claude-Code clients is removed.
+- `/v1/messages/count_tokens` is routed for native Anthropic clients.
+- OAuth token prefixes are no longer logged.
 - A provider's model shortlist is its probe universe: configured models the
   runtime does not list are marked unavailable.
 

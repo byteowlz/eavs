@@ -1018,6 +1018,7 @@ pub async fn proxy_handler_pinned(
 
     let mut is_anthropic_oauth = false;
     let mut is_openai_codex_oauth = false;
+    let mut claude_code_passthrough = false;
     if let Some(ref validated) = validated_key {
         if let Some(oauth_user) = validated.oauth_user.as_deref() {
             tracing::info!("OAuth user: {}, provider: {}", oauth_user, provider_name);
@@ -1030,17 +1031,10 @@ pub async fn proxy_handler_pinned(
             .await
             {
                 Ok(token) => {
-                    tracing::info!(
-                        "Got OAuth token starting with: {}...",
-                        &token[..20.min(token.len())]
-                    );
                     // Check if this is an Anthropic OAuth token
                     if provider_type == ProviderType::Anthropic && is_anthropic_oauth_token(&token)
                     {
                         is_anthropic_oauth = true;
-                        tracing::info!(
-                            "Detected Anthropic OAuth token, will inject Claude Code identity"
-                        );
                     }
                     // Check if this is an OpenAI Codex OAuth token
                     if is_openai_codex_oauth_token(&token) {
@@ -1131,7 +1125,24 @@ pub async fn proxy_handler_pinned(
     // and vendor SDKs append their own path, so Anthropic Messages arrives as
     // /v1/v1/messages and Google as /v1/models/{model}:streamGenerateContent.
     let is_anthropic_native_request = provider_type == ProviderType::Anthropic
-        && matches!(api_path, "/messages" | "/v1/messages" | "/v1/v1/messages");
+        && matches!(
+            api_path,
+            "/messages"
+                | "/v1/messages"
+                | "/v1/v1/messages"
+                | "/v1/messages/count_tokens"
+                | "/v1/v1/messages/count_tokens"
+        );
+    // A Claude subscription credential (Claude Code OAuth, from a login or
+    // `claude setup-token`) serves only the genuine Claude Code client, passed
+    // through verbatim (ADR-0023). Anthropic rejects other request shapes for
+    // this credential, and its terms reserve it for Claude Code.
+    let anthropic_subscription = (provider_type == ProviderType::Anthropic
+        && is_anthropic_oauth_token(&api_key))
+        || is_anthropic_oauth;
+    if anthropic_subscription && !is_anthropic_native_request {
+        return Err(subscription_requires_claude_code(&provider_name));
+    }
     let is_google_native_request =
         matches!(
             provider_type,
@@ -1210,12 +1221,6 @@ pub async fn proxy_handler_pinned(
         let requested_stream = context.stream;
         request_stream = requested_stream;
 
-        // For Anthropic OAuth tokens, inject Claude Code identity into system prompt
-        // This is required because OAuth tokens are scoped to Claude Code
-        if is_anthropic_oauth {
-            inject_claude_code_identity_into_context(&mut context);
-        }
-
         // Fake streaming for providers without native streaming support.
         if provider_type == ProviderType::Bedrock && requested_stream {
             fake_streaming = true;
@@ -1282,11 +1287,6 @@ pub async fn proxy_handler_pinned(
                     .into_response()
             })?;
         }
-        if is_anthropic_oauth {
-            prefix_anthropic_oauth_tools(&mut transformed);
-            apply_anthropic_oauth_body_transforms(&mut transformed);
-        }
-
         beta_scan_body = Some(transformed.clone());
 
         let body = serde_json::to_vec(&transformed).map_err(|e| {
@@ -1336,12 +1336,11 @@ pub async fn proxy_handler_pinned(
                 })?;
         }
 
-        // Native Anthropic Messages requests with OAuth tokens need the same
-        // Claude Code identity/tool adjustments the transform path applies.
-        if is_anthropic_native_request && is_anthropic_oauth {
-            inject_claude_code_identity_into_anthropic_body(&mut json_body);
-            prefix_anthropic_oauth_tools(&mut json_body);
-            apply_anthropic_oauth_body_transforms(&mut json_body);
+        if is_anthropic_native_request && anthropic_subscription {
+            if !is_claude_code_request(&parts.headers, &json_body, api_path) {
+                return Err(subscription_requires_claude_code(&provider_name));
+            }
+            claude_code_passthrough = true;
         }
 
         // Native Google requests carry the model in the URL, not the body.
@@ -1484,7 +1483,11 @@ pub async fn proxy_handler_pinned(
         // Canonicalize native-format paths: drop the /v1 routing artifact that
         // comes from advertising {eavs}/{provider}/v1 as the client base URL.
         let request_path = if is_anthropic_native_request {
-            "/v1/messages"
+            if api_path.ends_with("/count_tokens") {
+                "/v1/messages/count_tokens"
+            } else {
+                "/v1/messages"
+            }
         } else if is_google_native_request {
             request_path.strip_prefix("/v1").unwrap_or(request_path)
         } else if request_path == "/v1/eavs/rerank" {
@@ -1562,7 +1565,8 @@ pub async fn proxy_handler_pinned(
 
     // Adjust for upstream behavior already known for this model (accepted
     // reasoning efforts, adaptive thinking), declared or learned from a 400.
-    let effort_capable = !is_native_inference && provider_type != ProviderType::Bedrock;
+    let effort_capable =
+        !is_native_inference && provider_type != ProviderType::Bedrock && !claude_code_passthrough;
     let (request_body, adjustments) = if effort_capable {
         apply_known_adjustments(
             &state,
@@ -1736,6 +1740,10 @@ pub async fn proxy_handler_pinned(
             Json(ProxyError::new(reason, "network_policy").with_code("network_blocked")),
         )
             .into_response());
+    }
+
+    if claude_code_passthrough {
+        forward_claude_code_headers(&mut upstream_headers, &parts.headers);
     }
 
     let upstream_req = UpstreamRequest {
@@ -2042,7 +2050,7 @@ pub async fn proxy_handler_pinned(
                 model: model_name,
                 kind: provider_type,
                 pricing,
-                oauth_tools: is_anthropic_oauth,
+                oauth_tools: false,
             },
             stream,
             &headers,
@@ -4306,41 +4314,6 @@ fn upstream_error_body_timeout() -> std::time::Duration {
         )
 }
 
-const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
-fn inject_claude_code_identity_into_context(context: &mut crate::types::Context) {
-    // Prepend Claude Code identity to the system prompt
-    let new_system = match &context.system_prompt {
-        Some(existing) => format!("{CLAUDE_CODE_IDENTITY}\n\n{existing}"),
-        None => CLAUDE_CODE_IDENTITY.to_string(),
-    };
-    context.system_prompt = Some(new_system);
-}
-
-/// Inject the Claude Code identity into a native Anthropic Messages body.
-/// The `system` field may be a plain string or an array of content blocks.
-fn inject_claude_code_identity_into_anthropic_body(body: &mut Value) {
-    match body.get_mut("system") {
-        Some(Value::String(existing)) => {
-            *existing = format!("{CLAUDE_CODE_IDENTITY}\n\n{existing}");
-        }
-        Some(Value::Array(blocks)) => {
-            blocks.insert(
-                0,
-                serde_json::json!({"type": "text", "text": CLAUDE_CODE_IDENTITY}),
-            );
-        }
-        _ => {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert(
-                    "system".to_string(),
-                    Value::String(CLAUDE_CODE_IDENTITY.to_string()),
-                );
-            }
-        }
-    }
-}
-
 /// Extract the model id from a native Google generateContent path,
 /// e.g. `/v1/models/gemini-2.5-pro:streamGenerateContent`.
 pub(crate) fn google_model_from_path(api_path: &str) -> Option<String> {
@@ -4353,109 +4326,90 @@ pub(crate) fn google_model_from_path(api_path: &str) -> Option<String> {
     }
 }
 
-fn prefix_anthropic_oauth_tools(body: &mut Value) {
-    const TOOL_PREFIX: &str = "mcp_";
+/// Headers of a Claude Code request that are part of what Anthropic checks
+/// for a subscription credential; they are forwarded exactly as sent.
+const CLAUDE_CODE_FORWARDED_HEADERS: &[&str] = &[
+    "anthropic-beta",
+    "anthropic-version",
+    "anthropic-dangerous-direct-browser-access",
+    "user-agent",
+    "x-app",
+    "x-claude-code-session-id",
+    "x-client-request-id",
+    "x-stainless-arch",
+    "x-stainless-async",
+    "x-stainless-helper-method",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout",
+];
 
-    // Prefix tool names in tools[] definitions
-    if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-        for tool in tools {
-            if let Some(name) = tool.get_mut("name").and_then(|v| v.as_str()) {
-                if !name.starts_with(TOOL_PREFIX) {
-                    *tool.get_mut("name").unwrap() = Value::String(format!("{TOOL_PREFIX}{name}"));
-                }
-            }
-        }
+/// Whether a native Anthropic request comes from the genuine Claude Code
+/// client: its app marker, user agent and beta, and (for messages) the
+/// billing block Claude Code puts first in the system prompt.
+fn is_claude_code_request(headers: &http::HeaderMap, body: &Value, api_path: &str) -> bool {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    };
+    let markers = header("x-app") == "cli"
+        && header("user-agent").starts_with("claude-cli/")
+        && header("anthropic-beta")
+            .split(',')
+            .any(|beta| beta.trim() == "claude-code-20250219");
+    if !markers {
+        return false;
     }
-
-    // Prefix tool names in messages[].content[].tool_use blocks
-    if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
-        for message in messages {
-            if let Some(content) = message.get_mut("content").and_then(|v| v.as_array_mut()) {
-                for block in content {
-                    let is_tool_use = block
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(|t| t == "tool_use");
-                    if is_tool_use {
-                        if let Some(name) = block.get_mut("name").and_then(|v| v.as_str()) {
-                            if !name.starts_with(TOOL_PREFIX) {
-                                *block.get_mut("name").unwrap() =
-                                    Value::String(format!("{TOOL_PREFIX}{name}"));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if api_path.ends_with("/count_tokens") {
+        return true;
     }
+    body.get("system")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with("x-anthropic-billing-header:"))
+            })
+        })
+}
 
-    // Prefix tool names in tool_choice
-    if let Some(choice) = body.get_mut("tool_choice") {
-        if let Some(obj) = choice.as_object_mut() {
-            if let Some(name_value) = obj.get_mut("name") {
-                if let Some(name) = name_value.as_str() {
-                    if !name.starts_with(TOOL_PREFIX) {
-                        *name_value = Value::String(format!("{TOOL_PREFIX}{name}"));
-                    }
-                }
+/// Replace eavs' own Anthropic/identity headers with the client's.
+fn forward_claude_code_headers(upstream: &mut http::HeaderMap, client: &http::HeaderMap) {
+    for name in CLAUDE_CODE_FORWARDED_HEADERS {
+        upstream.remove(*name);
+        for value in client.get_all(*name) {
+            if let Ok(header) = http::HeaderName::from_bytes(name.as_bytes()) {
+                upstream.append(header, value.clone());
             }
         }
     }
 }
 
-/// Apply Anthropic OAuth-specific body transformations.
-///
-/// Sanitizes system prompt text to replace "`OpenCode`" with "Claude Code" and
-/// "opencode" (case-insensitive) with "Claude", matching the opencode-anthropic-auth
-/// plugin behavior. The Anthropic server blocks requests containing "`OpenCode`" in
-/// system prompts when using OAuth tokens.
-fn apply_anthropic_oauth_body_transforms(body: &mut Value) {
-    // Sanitize system prompt - server blocks 'OpenCode' string
-    if let Some(system) = body.get_mut("system") {
-        if let Some(arr) = system.as_array_mut() {
-            for item in arr {
-                if item
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| t == "text")
-                {
-                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                        let sanitized = sanitize_system_prompt(text);
-                        if sanitized != text {
-                            *item.get_mut("text").unwrap() = Value::String(sanitized);
-                        }
-                    }
-                }
-            }
-        } else if let Some(text) = system.as_str() {
-            let sanitized = sanitize_system_prompt(text);
-            if sanitized != text {
-                *system = Value::String(sanitized);
-            }
-        }
-    }
-}
-
-/// Sanitize system prompt for Anthropic OAuth: replace "`OpenCode`" -> "Claude Code"
-/// and "opencode" (case-insensitive) -> "Claude".
-fn sanitize_system_prompt(text: &str) -> String {
-    // First replace case-sensitive "OpenCode" with "Claude Code"
-    let result = text.replace("OpenCode", "Claude Code");
-    // Then replace remaining case-insensitive "opencode" with "Claude"
-    // Use a simple approach: find and replace case-insensitively
-    let mut output = String::with_capacity(result.len());
-    let lower = result.to_lowercase();
-    let mut i = 0;
-    while i < result.len() {
-        if i + 8 <= lower.len() && &lower[i..i + 8] == "opencode" {
-            output.push_str("Claude");
-            i += 8;
-        } else {
-            output.push(result.as_bytes()[i] as char);
-            i += 1;
-        }
-    }
-    output
+/// A subscription credential was asked to serve something other than Claude Code.
+fn subscription_requires_claude_code(provider: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(
+            ProxyError::new(
+                format!(
+                    "Provider '{provider}' uses a Claude subscription, which serves only the Claude Code client \
+                     (set ANTHROPIC_BASE_URL to this provider and CLAUDE_CODE_OAUTH_TOKEN to your eavs key). \
+                     Use an Anthropic API key provider for other clients."
+                ),
+                "permission_error",
+            )
+            .with_code("subscription_requires_claude_code"),
+        ),
+    )
+        .into_response()
 }
 
 /// Apply authentication headers to any header container.
@@ -8641,57 +8595,6 @@ mod tests {
         assert_eq!(google_model_from_path("/v1/chat/completions"), None);
     }
 
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertions are intentional in tests"
-    )]
-    #[test]
-    fn test_inject_claude_code_identity_into_anthropic_body() -> Result<(), anyhow::Error> {
-        // String system prompt gets prefixed
-        let mut body = json!({"system": "You are helpful.", "messages": []});
-        inject_claude_code_identity_into_anthropic_body(&mut body);
-        let system = body["system"]
-            .as_str()
-            .context("as_str(...) returned None or Err")?;
-        assert!(system.starts_with(CLAUDE_CODE_IDENTITY));
-        assert!(system.contains("You are helpful."));
-
-        // Block-array system gets a new leading text block
-        let mut body = json!({
-            "system": [{"type": "text", "text": "existing", "cache_control": {"type": "ephemeral"}}],
-            "messages": []
-        });
-        inject_claude_code_identity_into_anthropic_body(&mut body);
-        let blocks = body["system"]
-            .as_array()
-            .context("as_array(...) returned None or Err")?;
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(
-            blocks[0]["text"]
-                .as_str()
-                .context("as_str(...) returned None or Err")?,
-            CLAUDE_CODE_IDENTITY
-        );
-        assert_eq!(
-            blocks[1]["text"]
-                .as_str()
-                .context("as_str(...) returned None or Err")?,
-            "existing"
-        );
-
-        // Missing system gets created
-        let mut body = json!({"messages": []});
-        inject_claude_code_identity_into_anthropic_body(&mut body);
-        assert_eq!(
-            body["system"]
-                .as_str()
-                .context("as_str(...) returned None or Err")?,
-            CLAUDE_CODE_IDENTITY
-        );
-
-        Ok(())
-    }
-
     fn make_tracker() -> UsageTracker {
         UsageTracker {
             key_hash: "h".to_string(),
@@ -10751,6 +10654,171 @@ mod tests {
             StatusCode::OK,
             "body: {}",
             String::from_utf8_lossy(&body)
+        );
+        Ok(())
+    }
+
+    /// A gateway whose Anthropic provider holds a Claude subscription token.
+    fn claude_subscription_app(mock: &MockUpstream) -> Router {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                type_: "anthropic".to_string(),
+                base_url: "https://anthropic.example".to_string(),
+                api_key: "sk-ant-oat01-synthetic-subscription-token".to_string(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new_with_upstream(make_config(providers), Arc::new(mock.clone()));
+        Router::new()
+            .route("/:provider/v1/*path", any(provider_proxy_handler))
+            .with_state(state)
+    }
+
+    /// The shape Claude Code 2.1.296 sends with `ANTHROPIC_BASE_URL` and
+    /// `CLAUDE_CODE_OAUTH_TOKEN` (captured locally against a recorder).
+    fn claude_code_request(path: &str, body: &Value) -> Result<http::Request<Body>, anyhow::Error> {
+        Ok(http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::AUTHORIZATION, "Bearer eavs-virtual-key")
+            .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,effort-2025-11-24")
+            .header("anthropic-version", "2023-06-01")
+            .header(http::header::USER_AGENT, "claude-cli/2.1.296 (external, sdk-cli)")
+            .header("x-app", "cli")
+            .header("x-claude-code-session-id", "d335ff55-a7a4-4154-8493-0a22dcdfaca5")
+            .header("x-stainless-package-version", "0.128.0")
+            .body(Body::from(serde_json::to_vec(body)?))?)
+    }
+
+    fn claude_code_body() -> Value {
+        json!({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 32000,
+            "stream": true,
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.296.cf4; cc_entrypoint=sdk-cli;"},
+                {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."}
+            ],
+            "metadata": {"user_id": "{\"device_id\":\"d4c0\",\"account_uuid\":\"\",\"session_id\":\"93af\"}"},
+            "thinking": {"type": "adaptive"},
+            "tools": [{"name": "Bash", "description": "run", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "say hi"}]
+        })
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn claude_code_passes_through_a_subscription_verbatim() -> Result<(), anyhow::Error> {
+        let mock = MockUpstream::new(vec![ok_spec(), ok_spec()]);
+        let app = claude_subscription_app(&mock);
+        let body = claude_code_body();
+        let bytes = serde_json::to_vec(&body)?;
+        let _ = app
+            .clone()
+            .oneshot(claude_code_request("/claude/v1/messages?beta=true", &body)?)
+            .await?;
+        let count =
+            json!({"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "hi"}]});
+        let _ = app
+            .oneshot(claude_code_request(
+                "/claude/v1/messages/count_tokens?beta=true",
+                &count,
+            )?)
+            .await?;
+
+        let requests = mock.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        let sent = &requests[0];
+        assert_eq!(sent.url, "https://anthropic.example/v1/messages?beta=true");
+        assert_eq!(
+            sent.body.as_ref(),
+            bytes.as_slice(),
+            "body is forwarded byte for byte"
+        );
+        let header = |name: &str| {
+            sent.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        // Only the credential is swapped.
+        assert_eq!(
+            header("authorization"),
+            "Bearer sk-ant-oat01-synthetic-subscription-token"
+        );
+        assert_eq!(
+            header("user-agent"),
+            "claude-cli/2.1.296 (external, sdk-cli)"
+        );
+        assert_eq!(header("x-app"), "cli");
+        assert_eq!(
+            header("anthropic-beta"),
+            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,effort-2025-11-24"
+        );
+        assert_eq!(
+            header("x-claude-code-session-id"),
+            "d335ff55-a7a4-4154-8493-0a22dcdfaca5"
+        );
+        assert_eq!(header("x-stainless-package-version"), "0.128.0");
+        assert!(sent.headers.get("x-api-key").is_none());
+        assert_eq!(
+            requests[1].url,
+            "https://anthropic.example/v1/messages/count_tokens?beta=true"
+        );
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn a_subscription_refuses_clients_that_are_not_claude_code() -> Result<(), anyhow::Error>
+    {
+        let mock = MockUpstream::new(vec![]);
+        let app = claude_subscription_app(&mock);
+
+        // A native Messages client without Claude Code's markers (e.g. pi).
+        let plain = http::Request::builder()
+            .method("POST")
+            .uri("/claude/v1/messages")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(Body::from(
+                json!({"model": "claude-sonnet-5-5", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]})
+                    .to_string(),
+            ))?;
+        // Claude Code headers but no billing block: a disguised client.
+        let mut disguised_body = claude_code_body();
+        disguised_body["system"] =
+            json!("You are Claude Code, Anthropic's official CLI for Claude.");
+        let disguised = claude_code_request("/claude/v1/messages", &disguised_body)?;
+        // OpenAI-format clients cannot use it either.
+        let chat = http::Request::builder()
+            .method("POST")
+            .uri("/claude/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "hi"}]})
+                    .to_string(),
+            ))?;
+        for request in [plain, disguised, chat] {
+            let response = app.clone().oneshot(request).await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 << 10).await?;
+            let error: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(error["error"]["code"], "subscription_requires_claude_code");
+        }
+        assert!(
+            mock.take_requests().await.is_empty(),
+            "the subscription token was never used"
         );
         Ok(())
     }
