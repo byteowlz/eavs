@@ -1800,6 +1800,32 @@ pub async fn probe_provider_handler(
     check_master_key_provider(&headers, &state)?;
     let state = state.pin_routes();
 
+    // Saved-provider probes test the active configuration as-is (file or
+    // runtime store), so a console can test a provider without ever holding
+    // its credential.
+    if payload.saved {
+        let Some(name) = payload.provider_name.as_deref() else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProviderApiError::new(
+                    "saved probes need provider_name",
+                    "missing_provider_name",
+                )),
+            ));
+        };
+        let Some(runtime) = state.resolve_provider(name) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ProviderApiError::new(
+                    format!("Provider '{name}' is not configured"),
+                    "unknown_provider",
+                )),
+            ));
+        };
+        payload.config = runtime.config;
+        payload.config.api_key = payload.config.resolved_api_key();
+    }
+
     // Edit probes may intentionally omit the secret. Resolve it inside EAVS
     // from the already-active provider so credentials never need to travel
     // back through Oqto or be read from deployment-specific env files.

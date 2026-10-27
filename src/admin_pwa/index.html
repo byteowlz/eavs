@@ -53,6 +53,16 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 #gate{max-width:380px;margin:12vh auto;text-align:center}
 #gate input{margin:14px 0}
 .hidden{display:none!important}
+select{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:8px;
+       font-size:14px;width:100%}
+.badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim);
+       text-transform:none;letter-spacing:0;font-weight:500}
+.badge.toml{border-color:color-mix(in srgb,var(--warn) 50%,transparent);color:var(--warn)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+.stage{font-size:12.5px;padding:3px 0;border-bottom:1px solid var(--line)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);
        border:1px solid var(--line);padding:10px 18px;border-radius:10px;font-size:13.5px;opacity:0;
        transition:opacity .2s;pointer-events:none;max-width:90vw}
@@ -76,6 +86,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
   <div id="app" class="hidden">
     <nav>
       <button data-v="availability" aria-selected=true>Availability</button>
+      <button data-v="providers">Providers</button>
       <button data-v="keys">Keys</button>
       <button data-v="oauth">Accounts</button>
     </nav>
@@ -112,6 +123,7 @@ async function refresh(){
   try{
     $("#status").textContent="synced "+new Date().toLocaleTimeString();
     if(view==="availability")await renderAvailability();
+    if(view==="providers")await renderProviders();
     if(view==="keys")await renderKeys();
     if(view==="oauth")await renderOauth();
   }catch(e){if(e.message!=="unauthorized")toast(e.message);}
@@ -150,6 +162,134 @@ async function toggle(provider,model,deactivated){
     toast(deactivated?`Enabled ${model}`:`Disabled ${model}`);
     refresh();
   }catch(e){toast(e.message);}
+}
+
+
+const PROVIDER_TYPES=[
+ ["openai-compatible","OpenAI-compatible (llama.cpp, vLLM, ollama, LM Studio…)","http://127.0.0.1:8080/v1"],
+ ["openai","OpenAI","https://api.openai.com/v1"],
+ ["anthropic","Anthropic","https://api.anthropic.com"],
+ ["google","Google Gemini","https://generativelanguage.googleapis.com"],
+ ["openrouter","OpenRouter","https://openrouter.ai/api/v1"],
+ ["opencode-go","OpenCode Go","https://opencode.ai/zen/go/v1"],
+ ["opencode","OpenCode Zen","https://opencode.ai/zen/v1"],
+ ["xai","xAI (Grok)","https://api.x.ai/v1"],
+ ["mistral","Mistral","https://api.mistral.ai/v1"],
+ ["groq","Groq","https://api.groq.com/openai/v1"],
+ ["cerebras","Cerebras","https://api.cerebras.ai/v1"],
+ ["azure","Azure OpenAI",""],
+ ["bedrock","AWS Bedrock",""],
+ ["voyage","Voyage (embeddings/rerank)","https://api.voyageai.com/v1"],
+];
+let openProvider=null;
+
+async function renderProviders(){
+  const [sources,snap]=await Promise.all([api("/admin/providers/sources"),
+    api("/eavs/maintenance/availability").catch(()=>({providers:[]}))]);
+  const models={};(snap.providers||[]).forEach(p=>models[p.provider]=p.models||[]);
+  const list=(sources||[]).sort((a,b)=>a.name.localeCompare(b.name)).map(p=>{
+    const managed=p.source!=="toml";
+    const ms=models[p.name]||[];
+    const open=openProvider===p.name;
+    return `<div class="card"><h2>${esc(p.name)}
+      <span class="badge">${esc(p.provider_type||"?")}</span>
+      <span class="badge ${managed?"":"toml"}">${managed?"managed here":"config file (read-only)"}</span>
+      ${p.enabled?"":'<span class="badge">disabled</span>'}
+      <span style="margin-left:auto"><button class="act" onclick="toggleProvider('${esc(p.name)}')">${open?"close":"manage"}</button></span></h2>
+      <div class="muted">${ms.length?ms.length+" model(s): "+ms.slice(0,6).map(m=>esc(m.id)).join(", ")+(ms.length>6?"…":""):"no shortlist (serves the full catalog)"}</div>
+      ${open?providerDetail(p,ms,managed):""}</div>`;
+  }).join("");
+  $("#view").innerHTML=list+addProviderForm();
+  syncTypeDefaults();
+}
+
+function providerDetail(p,ms,managed){
+  const n=esc(p.name);
+  const modelRows=ms.map(m=>`<tr><td>${esc(m.id)}</td><td class="muted">${esc(m.name||"")}</td>
+    <td>${managed?`<button class="act" onclick="removeModel('${n}','${esc(m.id)}')">remove</button>`:""}</td></tr>`).join("");
+  return `<div style="margin-top:12px">
+    ${managed?"":'<p class="muted">Defined in config.toml. Edit the file (or migrate it) to change it here; availability toggles still work.</p>'}
+    <table><tr><th>Model</th><th>Name</th><th></th></tr>${modelRows||'<tr><td class="muted" colspan=3>none</td></tr>'}</table>
+    ${managed?`<div class="row"><input id="nm-${n}" placeholder="model id, e.g. qwen3.8" style="flex:1">
+      <input id="nn-${n}" placeholder="display name (optional)" style="flex:1">
+      <button class="act" onclick="addModel('${n}')">add model</button></div>
+    <div class="row"><input id="rk-${n}" type="password" placeholder="new API key" style="flex:1">
+      <button class="act" onclick="rotateKey('${n}','${esc(p.revision||"")}')">rotate key</button></div>`:""}
+    <div class="row">
+      <input id="tm-${n}" placeholder="model to test" value="${esc(ms[0]?.id||"")}" style="flex:1">
+      <button class="act" onclick="testProvider('${n}')">test (sends one small request)</button>
+      ${managed?`<button class="act" onclick="deleteProvider('${n}')" style="border-color:var(--bad)">delete provider</button>`:""}
+    </div>
+    <div id="tr-${n}"></div></div>`;
+}
+
+function addProviderForm(){
+  return `<div class="card"><h2>Add provider</h2>
+    <div class="grid2">
+      <div><label>Type</label><select id="pt" onchange="syncTypeDefaults()">
+        ${PROVIDER_TYPES.map(([v,l])=>`<option value="${v}">${esc(l)}</option>`).join("")}</select></div>
+      <div><label>Name (lowercase, a-z 0-9 - _)</label><input id="pn" placeholder="my-local-rtx"></div>
+      <div><label>Base URL</label><input id="pu"></div>
+      <div><label>API key (blank for local runtimes)</label><input id="pk" type="password" placeholder="sk-… or env:VAR / keychain:account"></div>
+    </div>
+    <label>Models (one per line; empty = full catalog)</label>
+    <textarea id="pm" rows="3" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px;font-size:14px" placeholder="qwen3.8&#10;kimi-k3"></textarea>
+    <label><input type="checkbox" id="pp" style="width:auto"> watch availability (probe GET /models every minute — no generation)</label>
+    <div class="row"><button class="act" onclick="createProvider()">Add provider</button>
+      <span class="muted">Credentials are stored server-side and never shown again.</span></div></div>`;
+}
+
+function syncTypeDefaults(){
+  const t=$("#pt");if(!t)return;
+  const def=PROVIDER_TYPES.find(x=>x[0]===t.value);
+  const u=$("#pu");if(u&&(!u.value||u.dataset.auto==="1")){u.value=def?.[2]||"";u.dataset.auto="1";}
+  const pp=$("#pp");if(pp)pp.checked=t.value==="openai-compatible";
+}
+function toggleProvider(name){openProvider=openProvider===name?null:name;refresh();}
+
+async function createProvider(){
+  const name=$("#pn").value.trim(), type=$("#pt").value;
+  if(!/^[a-z0-9_-]+$/.test(name)){toast("Name: lowercase letters, digits, - or _");return;}
+  const config={type,base_url:$("#pu").value.trim(),api_key:$("#pk").value.trim()||"none"};
+  const ids=$("#pm").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if(ids.length)config.models=ids.map(id=>({id,name:id}));
+  if($("#pp").checked)config.probe={enabled:true};
+  try{await api("/admin/providers/create",{method:"POST",body:JSON.stringify({name,config,enabled:true})});
+    toast(`Added ${name}`);openProvider=name;refresh();}catch(e){toast(e.message);}
+}
+async function deleteProvider(name){
+  if(!confirm(`Delete provider ${name}? Keys scoped to it stop working.`))return;
+  try{await api("/admin/providers/"+encodeURIComponent(name),{method:"DELETE"});toast(`Deleted ${name}`);
+    openProvider=null;refresh();}catch(e){toast(e.message);}
+}
+async function addModel(name){
+  const id=$("#nm-"+name).value.trim();if(!id)return;
+  const display=$("#nn-"+name).value.trim()||id;
+  try{await api(`/admin/providers/${encodeURIComponent(name)}/models`,{method:"POST",
+    body:JSON.stringify({id,name:display})});toast(`Added ${id}`);refresh();}catch(e){toast(e.message);}
+}
+async function removeModel(name,id){
+  try{await api(`/admin/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(id)}`,{method:"DELETE"});
+    toast(`Removed ${id}`);refresh();}catch(e){toast(e.message);}
+}
+async function rotateKey(name,revision){
+  const key=$("#rk-"+name).value.trim();if(!key)return;
+  try{await api(`/admin/providers/${encodeURIComponent(name)}/credentials`,{method:"POST",
+    body:JSON.stringify({expected_revision:revision,api_key:key})});toast("Key rotated");refresh();}
+  catch(e){toast(e.message);}
+}
+async function testProvider(name){
+  const model=$("#tm-"+name).value.trim();
+  if(!model){toast("Enter a model to test");return;}
+  const out=$("#tr-"+name);out.innerHTML='<p class="muted">Testing…</p>';
+  try{
+    const r=await api("/admin/providers/probe",{method:"POST",body:JSON.stringify(
+      {provider_name:name,saved:true,model})});
+    out.innerHTML=`<p class="${r.ok?"ok":"bad"}">${r.ok?"Answered":"Failed"} — ${esc(r.base_url)}</p>`+
+      (r.stages||[]).map(s=>`<div class="stage">${esc(s.name)}: <span class="${s.status==="ok"?"ok":s.status==="failed"?"bad":"muted"}">${esc(s.status)}</span>
+        ${s.latency_ms!=null?`<span class="muted">${s.latency_ms} ms</span>`:""} <span class="muted">${esc(s.detail)}</span></div>`).join("")+
+      (r.recommendations||[]).map(x=>`<p class="muted">→ set <code>${esc(x.field)}</code> = ${esc(JSON.stringify(x.value))}: ${esc(x.reason)}</p>`).join("");
+  }catch(e){out.innerHTML=`<p class="bad">${esc(e.message)}</p>`;}
 }
 
 async function renderKeys(){
