@@ -60,6 +60,8 @@ pub struct AppState {
     pub learned_adaptive: Arc<crate::reasoning_effort::LearnedAdaptive>,
     /// Operator/fleet maintenance deactivations applied on top of config.
     pub availability: Arc<crate::availability::Availability>,
+    /// Cached subscription/credit usage per upstream account.
+    pub subscription_usage: Arc<crate::subscription_usage::SubscriptionUsage>,
 }
 
 /// A conversation entry with metadata for TTL tracking.
@@ -566,6 +568,7 @@ impl AppState {
             availability: Arc::new(crate::availability::Availability::load(
                 crate::availability::Availability::state_file(),
             )),
+            subscription_usage: Arc::default(),
         }
     }
 

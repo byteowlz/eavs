@@ -48,6 +48,7 @@ mod routing;
 mod runtime_state;
 mod setup;
 mod state;
+mod subscription_usage;
 mod transform;
 mod transform_plugins;
 mod tui;
@@ -1002,6 +1003,10 @@ async fn run_server(
         )
         .route("/admin/sw.js", get(api::console_sw_handler))
         .route("/admin/icon.svg", get(api::console_icon_handler))
+        .route(
+            "/admin/usage/subscriptions",
+            get(api::subscription_usage_handler),
+        )
         // Maintenance API (operator token or maintenance-only virtual key)
         .route(
             "/eavs/maintenance/availability",
@@ -1044,6 +1049,9 @@ async fn run_server(
     } else {
         None
     };
+
+    // Subscription/credit usage of upstream accounts (reads only, no inference)
+    subscription_usage::spawn(std::sync::Arc::new(state.clone()));
 
     // Local-runtime availability prober (providers with [providers.*.probe])
     prober::spawn(std::sync::Arc::new(state.clone()));

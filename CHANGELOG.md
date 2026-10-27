@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Subscription and credit monitoring: eavs reads each upstream account's own
+  usage endpoint every 5 minutes (no inference) and serves the cached result at
+  `GET /admin/usage/subscriptions` (`?refresh=true` reads due accounts now).
+  Covers Claude subscription logins (session/weekly/model windows, extra usage
+  against the monthly cap), Codex/ChatGPT logins (windows, credits), OpenCode Go
+  (session/weekly/monthly), OpenRouter (credit balance, key cap) and Z.ai GLM
+  Coding Plan (windows, web search). Unknown windows are absent, never zero;
+  rate limits keep the last good values and honour `retry-after`. New Usage view
+  in the web console.
+- Web console Providers view: add, inspect, test, delete runtime providers and
+  manage their models and keys; providers added at runtime appear in the
+  availability view and are probed when they opt in.
+- ADR-0022: native GPUI console over the per-instance operator API.
+
+### Changed
+- A provider's model shortlist is its probe universe: configured models the
+  runtime does not list are marked unavailable.
+
 ## [0.9.2] - 2026-10-25
 
 ### Fixed

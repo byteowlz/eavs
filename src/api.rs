@@ -1598,6 +1598,30 @@ async fn configured_model_universe(state: &AppState) -> Vec<serde_json::Value> {
     providers
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SubscriptionUsageQuery {
+    /// Read due accounts now instead of waiting for the next poll. Per-account
+    /// spacing and vendor `retry-after` still apply.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// Subscription and credit usage of upstream accounts (cached reads).
+///
+/// GET /admin/usage/subscriptions[?refresh=true]
+pub async fn subscription_usage_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SubscriptionUsageQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<KeyApiError>)> {
+    check_master_key(&headers, &state)?;
+    if query.refresh {
+        crate::subscription_usage::refresh(&state).await;
+    }
+    let accounts = state.subscription_usage.snapshot().await;
+    Ok(Json(serde_json::json!({ "accounts": accounts })))
+}
+
 pub async fn upstream_quotas_handler(
     State(state): State<AppState>,
     headers: HeaderMap,

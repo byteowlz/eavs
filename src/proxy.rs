@@ -4238,7 +4238,7 @@ fn is_openai_codex_oauth_token(api_key: &str) -> bool {
 
 /// Extract account ID from `OpenAI` OAuth JWT token.
 /// The account ID is stored in the JWT claims under `https://api.openai.com/auth`
-fn extract_openai_account_id(token: &str) -> Option<String> {
+pub fn extract_openai_account_id(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
