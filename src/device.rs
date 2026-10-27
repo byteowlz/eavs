@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+mod claude_code;
 #[cfg(test)]
 mod e2e_tests;
 mod invitation;
@@ -81,6 +82,37 @@ pub enum DeviceCommand {
         /// Explicit target; no implicit global/workspace configuration edit.
         #[arg(long)]
         output: PathBuf,
+        #[arg(long)]
+        expected_revision: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Point Claude Code on this machine at the gateway's Claude subscription
+    /// provider (preview, then apply with the printed revisions).
+    ///
+    /// Writes `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN` (the connection's
+    /// key; omit with --no-store-key) and
+    /// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` into the `env` block of
+    /// Claude Code's settings.json, preserving everything else.
+    ///
+    /// Example: eavs device claude-code --name studio --provider claude
+    #[command(name = "claude-code")]
+    ClaudeCode {
+        /// Connection name (see `eavs device connect`).
+        #[arg(long)]
+        name: String,
+        /// Gateway provider holding the Claude subscription.
+        #[arg(long, default_value = "claude")]
+        provider: String,
+        /// Settings file (default: `$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Do not write the key; export `CLAUDE_CODE_OAUTH_TOKEN` from the shell instead.
+        #[arg(long)]
+        no_store_key: bool,
+        /// Remove this connection's Claude Code settings.
+        #[arg(long)]
+        remove: bool,
         #[arg(long)]
         expected_revision: Option<String>,
         #[arg(long)]
@@ -465,6 +497,46 @@ async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
                     output: &output,
                     registry_before: &before,
                     registry_path: &path,
+                    expected: expected_revision.as_deref(),
+                    candidate: args.candidate_revision.as_deref(),
+                    apply: yes,
+                },
+            )
+        }
+        DeviceCommand::ClaudeCode {
+            name,
+            provider,
+            output,
+            no_store_key,
+            remove,
+            expected_revision,
+            yes,
+        } => {
+            let c = registry
+                .connections
+                .iter()
+                .find(|c| c.name == name)
+                .context("unknown connection")?;
+            let target = match output {
+                Some(path) => path,
+                None => claude_code::default_target()?,
+            };
+            // Removal needs no live catalog; configuring checks the provider.
+            let live = if remove {
+                serde_json::json!({"providers": []})
+            } else {
+                catalog(c).await?
+            };
+            claude_code::configure(
+                c,
+                &live,
+                &claude_code::Request {
+                    provider: &provider,
+                    target: &target,
+                    store_key: !no_store_key,
+                    remove,
+                    registry_path: &path,
+                    registry_before: &before,
                     expected: expected_revision.as_deref(),
                     candidate: args.candidate_revision.as_deref(),
                     apply: yes,

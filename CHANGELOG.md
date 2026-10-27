@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web console Providers view: add, inspect, test, delete runtime providers and
   manage their models and keys; providers added at runtime appear in the
   availability view and are probed when they opt in.
+- `eavs device claude-code --name <connection> [--provider claude]`: point
+  Claude Code on this machine at the gateway's Claude subscription. Previews,
+  then applies with the printed revisions; merges `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_OAUTH_TOKEN` (the connection's scoped key; `--no-store-key` to
+  export it from the shell instead) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
+  into `~/.claude/settings.json`, removes `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
+  there, keeps everything else and makes the file owner-only. `--remove` undoes it.
 - ADR-0022: native GPUI console over the per-instance operator API.
 - Native console (`ui/native`, `just console`): manage the gateway on this
   machine and remote gateways (e.g. the server over an SSH tunnel or the
