@@ -25,7 +25,7 @@ log_info() { echo -e "[INFO] $1"; }
 check_eavs() {
     if ! curl -s "$EAVS_URL/health" > /dev/null 2>&1; then
         echo "Error: EAVS is not running at $EAVS_URL"
-        echo "Start it with: cd /home/user/Code/eavs && cargo run"
+        echo "Start it with: cargo run (from the eavs checkout)"
         exit 1
     fi
 }

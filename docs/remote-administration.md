@@ -53,4 +53,4 @@ credential replication or authorization to deploy to an instance.
 Verification uses synthetic keys, isolated SQLite stores and mock upstreams:
 authentication, invalid/stale updates, live key changes, redacted output,
 concurrent compare-and-swap, restart persistence and rollback. No paid probe or
-real remote instance was used. See [ADR-0006](adr/0006-per-instance-provider-administration.md).
+real remote instance was used.

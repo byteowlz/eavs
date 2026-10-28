@@ -65,5 +65,3 @@ Older discovery endpoints retain listener-wide behavior. Using this endpoint doe
 ## Verification
 
 `just test-serving-catalog` runs offline fixtures with temporary SQLite stores and an upstream tripwire. Coverage includes listener/key separation, master-key rejection, expiry/future activation/revocation, allow/block scopes, policy deny/rewrite/set-field, live DB updates/file ownership, file reload, redaction, compatibility allowlisting, limits and zero inference quota/usage.
-
-Decision: [ADR0010](adr/0010-scoped-serving-catalog.md). Tracker: `eavs-peg6`.

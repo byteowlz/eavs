@@ -6,7 +6,7 @@
 //! tokens or spends quota. Clients (web console, GPUI app, CLI) only read the
 //! cached model.
 //!
-//! Rules (after `another tool`'s documented behaviour, re-implemented here):
+//! Rules:
 //! - Unknown is unknown: a window the vendor did not report is absent, never 0.
 //! - A real measured zero (e.g. an exhausted credit balance) is reported as 0.
 //! - On 429 the last good meters are kept and marked stale; the vendor's

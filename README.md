@@ -56,7 +56,7 @@ to eavs; it is separate from the upstream API key. See the
 
 Configuration can also live at `~/.config/eavs/config.toml` (or under
 `XDG_CONFIG_HOME`). See the [example configuration](config/config.example.toml)
-for options. The schema is manually maintained and [checked against fixtures](docs/repository-quality.md).
+for options. The schema is manually maintained and checked against fixtures.
 
 Provider-store changes resolve live. The current source also supports explicit
 [provider hot reload](docs/provider-reload.md) for TOML declarations via an
@@ -89,11 +89,9 @@ need an authorized upgrade before using it.
 - [Explicit device connections](docs/device-connections.md) — scoped metadata observation and preview/CAS inventory sync, not automatic routing or credential replication
 - [One-time enrollment API](src/enrollment/README.md) — root-approved invitations and atomic independent scoped-key issuance
 - [Portable device declarations](docs/portable-device-declarations.md) — local binding and connectivity plans, not automatic serving-route installation
-- [Device/desktop rollout and remaining milestones](docs/device-rollout.md) — distinguishes inventory sync from declaration distribution and automatic inference routing
 - [Fleet CLI and TUI: setup, previews and keyboard controls](docs/fleet-tui.md)
-- [Domain glossary](CONTEXT.md) and [architecture decisions](docs/adr/README.md)
-- [Provisioning plan](docs/scoped-provisioning.md)
 - [Release process](docs/RELEASE.md)
+- [Supported coding agents](docs/harnesses.md)
 
 For command syntax, use `eavs --help` or a subcommand's `--help`.
 
@@ -105,9 +103,7 @@ just test        # Offline Rust tests
 just check-all   # Formatting, compilation, linting, docs and tests
 ```
 
-Strict quality gates currently report existing lint debt; see
-[repository quality status](docs/repository-quality.md). Work is tracked in
-`trx`. Read [AGENTS.md](AGENTS.md) before contributing.
+Strict quality gates currently report existing lint debt.
 
 ## Credits and license
 

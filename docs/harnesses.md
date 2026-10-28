@@ -1,9 +1,8 @@
 # Harnesses
 
 Which coding agents eavs connects, and how. Config facts below come from each
-harness' documentation and another gateway's published notes, and need confirming by a
-conformance run. Selection criteria and the plugin
-mechanism: [ADR-0024](adr/0024-harness-connections-as-machine-applied-desired-state.md).
+harness' documentation and need confirming by a conformance run. Major
+harnesses are built in; any other harness can be added as a plugin.
 A harness counts as supported only with a recorded conformance run (tested
 version and date); everything else is untested. Nothing below is implemented
 yet except where an `eavs device` command is named.

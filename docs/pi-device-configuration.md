@@ -93,5 +93,5 @@ synthetic values** for generated environment references; no unrelated commands o
 credentials are evaluated. Rust/Go integration uses private temporary files and a
 loopback fixture server, not real inference or global Pi configuration.
 
-See [ADR0015](adr/0015-scoped-pi-device-configuration.md). Discovery/configuration
+Discovery/configuration
 is never authorization: physical gateway admission remains authoritative.

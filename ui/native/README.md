@@ -1,6 +1,6 @@
 # eavs console (native)
 
-Native GPUI console for eavs gateways ([ADR-0022](../../docs/adr/0022-native-gpui-console.md)).
+Native GPUI console for eavs gateways.
 Manage the gateway on this machine and any remote gateway (e.g. the server
 that holds all connections) from one window: providers, models and their
 availability, and subscription/credit usage.

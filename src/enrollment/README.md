@@ -1,8 +1,6 @@
 # Bounded device enrollment
 
 Implemented as KeyStore-owned transactions in `src/keys/store/enrollment.rs`.
-See [ADR0017](../../docs/adr/0017-atomic-template-device-enrollment.md) for schema,
-authority semantics, security limits and verification.
 
 All routes are POST, have 2048-byte body limits and retain existing listener
 authentication (`X-Eavs-Token`). Administration additionally needs
