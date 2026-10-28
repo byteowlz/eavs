@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
 ### Added
 - Subscription and credit monitoring: eavs reads each upstream account's own
   usage endpoint every 5 minutes (no inference) and serves the cached result at
@@ -246,6 +248,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider detail endpoint now exposes headers, api_version, and compat settings
 
 ## [Unreleased]
+
+## [0.10.0] - 2026-10-28
 
 ## [0.6.1] - 2026-04-09
 
