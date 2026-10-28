@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- The MyGo desktop client (`ui/desktop`), its `just` recipes and the X11
+  window test, superseded by the GPUI console (ADR-0022). Device status,
+  connection and Pi/Claude Code configuration remain available in the CLI
+  until the console covers them.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added

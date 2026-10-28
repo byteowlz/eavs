@@ -72,10 +72,11 @@ eavs; Pi may execute them later according to its own trusted configuration.
 
 ## Native desktop equivalent
 
-`ui/desktop` has **Connect device** and **Connect Pi** forms over these exact Rust
-operations. Trust and absolute target are explicit; preview is separate from
-confirmation; changing inputs invalidates approval. The native GUI never receives
-upstream credentials or writes an independent configuration implementation.
+The former MyGo desktop (`ui/desktop`, removed 2026-10-28) offered Connect device
+and Connect Pi forms over these operations. The GPUI console (ADR-0022) will take
+them over with the same rules: explicit trust and absolute target, preview separate
+from confirmation, changed inputs invalidate approval, and no upstream credentials
+or independent configuration writer in the GUI. Until then they are CLI-only.
 
 ## Proof
 

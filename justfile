@@ -108,26 +108,6 @@ check-pi-extension-types compiler pi_package:
 test-pi-device-sdk pi_source fixture:
     bun scripts/test_pi_config_sdk.ts {{quote(pi_source)}} {{quote(fixture)}}
 
-# Actual source Rust CLI + Go workflow bridge; synthetic loopback only, no inference.
-test-desktop-device:
-    cargo build --locked
-    cd ui/desktop/control && EAVS_DESKTOP_EAVS_BINARY={{quote(justfile_directory() + "/target/debug/eavs")}} GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -count=1 -race -run TestRealRustDeviceEnrollmentAndPiPublication ./...
-
-# Standard-library native-desktop control adapter; no downloads or gateway calls.
-test-desktop-control:
-    cd ui/desktop/control && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -race ./...
-    cd ui/desktop/control && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go vet ./...
-
-# Native MyGo tests/build: requires provisioned Go 1.27.1 and cached modules.
-check-desktop-native:
-    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test -race ./...
-    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go vet ./...
-    cd ui/desktop && GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go build -o build/eavs-desktop .
-
-# Actual isolated Linux native window/keyboard capture; no service or inference.
-test-desktop-window output:
-    python3 scripts/test_desktop_native_window.py --binary ui/desktop/build/eavs-desktop --output {{quote(output)}}
-
 # Explicit integration-feature compile gate (no live provider needed)
 check-all-features:
     cargo check --locked --all-targets --all-features

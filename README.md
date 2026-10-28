@@ -87,7 +87,6 @@ need an authorized upgrade before using it.
 - [Additional Pi messages interface](docs/pi-messages.md) — experimental native streaming with bounded thinking/signature/cache translation; native APIs unchanged
 - [Oqto Pi-streaming invitation / QR](docs/device-invitations.md) — explicit operator issuance, private files and typed protocol selection; no pairing-time inference
 - [Explicit device connections](docs/device-connections.md) — scoped metadata observation and preview/CAS inventory sync, not automatic routing or credential replication
-- [Native MyGo Connection Desk](ui/desktop/README.md) — Connect device/Connect Pi preview forms; native build and software-rendered X11 proof
 - [One-time enrollment API](src/enrollment/README.md) — root-approved invitations and atomic independent scoped-key issuance
 - [Portable device declarations](docs/portable-device-declarations.md) — local binding and connectivity plans, not automatic serving-route installation
 - [Device/desktop rollout and remaining milestones](docs/device-rollout.md) — distinguishes inventory sync from declaration distribution and automatic inference routing
