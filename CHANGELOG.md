@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web console Providers view: add, inspect, test, delete runtime providers and
   manage their models and keys; providers added at runtime appear in the
   availability view and are probed when they opt in.
+- Storage follows XDG. The key store, providers database and SQLite login
+  store default to `$XDG_DATA_HOME/eavs/` (`~/.local/share/eavs/`) instead of
+  `~/.eavs/`; on start the server moves an existing `~/.eavs` store there once
+  (never overwriting) and makes it owner-only (files 0600, directory 0700;
+  they hold provider credentials). An explicit `keys.database_path` is left
+  alone; the old default value counts as the default. The machine-bound device
+  registry moves from `$XDG_CONFIG_HOME/eavs/device.json` to
+  `$XDG_STATE_HOME/eavs/device.json`, out of the synced config directory.
 - `eavs device claude-code --name <connection> [--provider claude]`: point
   Claude Code on this machine at the gateway's Claude subscription. Previews,
   then applies with the printed revisions; merges `ANTHROPIC_BASE_URL`,

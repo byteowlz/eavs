@@ -425,10 +425,103 @@ async fn execute(args: DeviceArgs) -> Result<serde_json::Value> {
     }
     execute_connections(args).await
 }
+/// The registry is machine-bound (connections, loopback exceptions, revision
+/// pins), so it lives in `$XDG_STATE_HOME/eavs/device.json`, not in the
+/// config directory, which is commonly synced between machines. A registry
+/// from the pre-state location is moved once; if that fails it is used in place.
+fn default_registry_path() -> Result<PathBuf> {
+    let state = crate::paths::state_dir()?.join("eavs/device.json");
+    let legacy = crate::paths::config_dir()?.join("eavs/device.json");
+    if state.exists() || !legacy.is_file() {
+        return Ok(state);
+    }
+    let moved = state
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(&legacy, &state));
+    match moved {
+        Ok(()) => {
+            let backup = legacy.with_extension("json.last-good");
+            if backup.is_file() {
+                // Best effort: the backup is a convenience copy.
+                let _ = std::fs::rename(&backup, state.with_extension("json.last-good"));
+            }
+            eprintln!(
+                "eavs: moved the device registry to {} (machine-bound state)",
+                state.display()
+            );
+            Ok(state)
+        }
+        Err(error) => {
+            eprintln!(
+                "eavs: could not move {} to {} ({error}); using it in place",
+                legacy.display(),
+                state.display()
+            );
+            Ok(legacy)
+        }
+    }
+}
+
+fn named<'a>(registry: &'a Registry, name: &str) -> Result<&'a Connection> {
+    registry
+        .connections
+        .iter()
+        .find(|c| c.name == name)
+        .context("unknown connection")
+}
+
+async fn claude_code_config(
+    registry: &Registry,
+    command: DeviceCommand,
+    candidate: Option<String>,
+    registry_path: &Path,
+    registry_before: &[u8],
+) -> Result<serde_json::Value> {
+    let DeviceCommand::ClaudeCode {
+        name,
+        provider,
+        output,
+        no_store_key,
+        remove,
+        expected_revision,
+        yes,
+    } = command
+    else {
+        bail!("not a claude-code command");
+    };
+    let connection = named(registry, &name)?;
+    let target = match output {
+        Some(path) => path,
+        None => claude_code::default_target()?,
+    };
+    // Removal needs no live catalog; configuring checks the provider.
+    let live = if remove {
+        serde_json::json!({"providers": []})
+    } else {
+        catalog(connection).await?
+    };
+    claude_code::configure(
+        connection,
+        &live,
+        &claude_code::Request {
+            provider: &provider,
+            target: &target,
+            store_key: !no_store_key,
+            remove,
+            registry_path,
+            registry_before,
+            expected: expected_revision.as_deref(),
+            candidate: candidate.as_deref(),
+            apply: yes,
+        },
+    )
+}
+
 async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
     let path = match args.config {
         Some(p) => p,
-        None => crate::paths::config_dir()?.join("eavs/device.json"),
+        None => default_registry_path()?,
     };
     let (mut registry, before) = load(&path)?;
     match args.command {
@@ -471,11 +564,7 @@ async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
             )
         }
         DeviceCommand::PiModels { name } => {
-            let c = registry
-                .connections
-                .iter()
-                .find(|c| c.name == name)
-                .context("unknown connection")?;
+            let c = named(&registry, &name)?;
             pi_config::export(c, &catalog(c).await?)
         }
         DeviceCommand::Pi {
@@ -484,11 +573,7 @@ async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
             expected_revision,
             yes,
         } => {
-            let c = registry
-                .connections
-                .iter()
-                .find(|c| c.name == name)
-                .context("unknown connection")?;
+            let c = named(&registry, &name)?;
             let live = catalog(c).await?;
             pi_config::configure(
                 c,
@@ -503,56 +588,15 @@ async fn execute_connections(args: DeviceArgs) -> Result<serde_json::Value> {
                 },
             )
         }
-        DeviceCommand::ClaudeCode {
-            name,
-            provider,
-            output,
-            no_store_key,
-            remove,
-            expected_revision,
-            yes,
-        } => {
-            let c = registry
-                .connections
-                .iter()
-                .find(|c| c.name == name)
-                .context("unknown connection")?;
-            let target = match output {
-                Some(path) => path,
-                None => claude_code::default_target()?,
-            };
-            // Removal needs no live catalog; configuring checks the provider.
-            let live = if remove {
-                serde_json::json!({"providers": []})
-            } else {
-                catalog(c).await?
-            };
-            claude_code::configure(
-                c,
-                &live,
-                &claude_code::Request {
-                    provider: &provider,
-                    target: &target,
-                    store_key: !no_store_key,
-                    remove,
-                    registry_path: &path,
-                    registry_before: &before,
-                    expected: expected_revision.as_deref(),
-                    candidate: args.candidate_revision.as_deref(),
-                    apply: yes,
-                },
-            )
+        command @ DeviceCommand::ClaudeCode { .. } => {
+            claude_code_config(&registry, command, args.candidate_revision, &path, &before).await
         }
         DeviceCommand::Sync {
             name,
             expected_revision,
             yes,
         } => {
-            let c = registry
-                .connections
-                .iter()
-                .find(|c| c.name == name)
-                .context("unknown connection")?;
+            let c = named(&registry, &name)?;
             sync_inventory(
                 c,
                 &path,

@@ -30,7 +30,9 @@ from that preview. `enroll` is an alias for `connect`. Reusing a name explicitly
 replaces that connection; there is no implicit discovery, key replication or routing.
 Neither preview nor failure modifies the registry.
 
-Default registry: `$XDG_CONFIG_HOME/eavs/device.json` (platform config-dir fallback).
+Default registry: `$XDG_STATE_HOME/eavs/device.json` (platform state-dir fallback). It
+is machine-bound, so it stays out of the commonly synced config directory; a registry
+at the former `$XDG_CONFIG_HOME/eavs/device.json` is moved there on first use.
 Override with `eavs device --config /absolute/path/device.json ...`. It is a strict
 JSON object with `connections`, each containing `name`, `url`, `key_env`, and
 `allow_loopback_http`, plus optional `listener_key_env`. Missing registry means no connections; malformed, empty,

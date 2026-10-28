@@ -234,10 +234,10 @@
         },
         "database_path": {
           "type": "string",
-          "description": "Path to the SQLite database file. Supports ~ expansion.",
-          "default": "~/.eavs/keys.db",
+          "description": "Path to the key store (SQLite); the providers database and the SQLite login store live beside it. Empty means $XDG_DATA_HOME/eavs/keys.db (~/.local/share/eavs/keys.db). The pre-XDG value ~/.eavs/keys.db is treated as the default, and the server moves an existing ~/.eavs store there once. Supports ~ expansion.",
+          "default": "",
           "examples": [
-            "~/.eavs/keys.db",
+            "",
             "/var/lib/eavs/keys.db"
           ]
         },

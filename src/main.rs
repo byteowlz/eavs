@@ -839,6 +839,20 @@ async fn run_server(
 
     // Initialize key store if enabled
     if keys_enabled {
+        match state.config.keys.migrate_legacy_store() {
+            Ok(moved) if !moved.is_empty() => {
+                let to = moved[0].parent().map(|p| p.display().to_string());
+                tracing::warn!(
+                    files = moved.len(),
+                    to = to.unwrap_or_default(),
+                    "Moved the key and provider stores from ~/.eavs to the XDG data directory"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "Could not move the stores out of ~/.eavs; using them in place");
+            }
+        }
         if let Err(e) = state.init_key_store().await {
             tracing::error!("Failed to initialize key store: {}", e);
             // Continue without keys - they're optional

@@ -1021,7 +1021,7 @@ impl Default for KeysConfig {
         Self {
             enabled: false,
             require_key: false,
-            database_path: "~/.eavs/keys.db".to_string(),
+            database_path: String::new(),
             master_key: None,
             allow_self_provisioning: false,
             default_rpm_limit: None,
@@ -1201,9 +1201,23 @@ impl CaptureConfig {
 }
 
 impl KeysConfig {
-    /// Get the resolved database path (expanding ~).
+    /// The key store path. Empty (the default) means
+    /// `$XDG_DATA_HOME/eavs/keys.db`; the providers database and the `SQLite`
+    /// login store live beside it. Until the server has moved a pre-XDG store
+    /// (`~/.eavs/`), an existing legacy store is used rather than a new empty
+    /// one.
     pub fn resolved_database_path(&self) -> PathBuf {
-        let path = &self.database_path;
+        let path = self.database_path.trim();
+        if path.is_empty() || path == LEGACY_DATABASE_PATH {
+            let xdg = xdg_database_path();
+            let legacy = legacy_database_path();
+            return match (xdg, legacy) {
+                (Some(xdg), Some(legacy)) if !xdg.exists() && legacy.exists() => legacy,
+                (Some(xdg), _) => xdg,
+                (None, Some(legacy)) => legacy,
+                (None, None) => PathBuf::from("keys.db"),
+            };
+        }
         if let Some(stripped) = path.strip_prefix("~/") {
             if let Ok(home) = std::env::var("HOME") {
                 return PathBuf::from(home).join(stripped);
@@ -1212,6 +1226,90 @@ impl KeysConfig {
         PathBuf::from(path)
     }
 
+    /// Move a pre-XDG store (`~/.eavs/keys.db`, `providers.db` and their
+    /// `SQLite` journals) to `$XDG_DATA_HOME/eavs/` and make it owner-only.
+    /// Run by the server before it opens the stores, when it is their only
+    /// user; CLI commands never move files. Returns what moved.
+    pub fn migrate_legacy_store(&self) -> std::io::Result<Vec<PathBuf>> {
+        let configured = self.database_path.trim();
+        if !(configured.is_empty() || configured == LEGACY_DATABASE_PATH) {
+            return Ok(Vec::new());
+        }
+        let (Some(xdg), Some(legacy)) = (xdg_database_path(), legacy_database_path()) else {
+            return Ok(Vec::new());
+        };
+        let (Some(to), Some(from)) = (xdg.parent(), legacy.parent()) else {
+            return Ok(Vec::new());
+        };
+        let moved = migrate_store_files(from, to)?;
+        // Fresh stores are created with the umask; an owner-only directory
+        // keeps them private either way.
+        std::fs::create_dir_all(to)?;
+        restrict(to, 0o700)?;
+        Ok(moved)
+    }
+}
+
+/// The pre-XDG default, still accepted in configs written by older setups.
+const LEGACY_DATABASE_PATH: &str = "~/.eavs/keys.db";
+
+fn xdg_database_path() -> Option<PathBuf> {
+    crate::paths::data_dir()
+        .ok()
+        .map(|dir| dir.join("eavs").join("keys.db"))
+}
+
+fn legacy_database_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".eavs").join("keys.db"))
+}
+
+/// Move the store files from `from` to `to` (never overwriting), restrict
+/// permissions, and remove `from` when it is left empty.
+fn migrate_store_files(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<Vec<PathBuf>> {
+    const FILES: [&str; 6] = [
+        "keys.db",
+        "keys.db-wal",
+        "keys.db-shm",
+        "providers.db",
+        "providers.db-wal",
+        "providers.db-shm",
+    ];
+    if !from.join("keys.db").exists() || to.join("keys.db").exists() {
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(to)?;
+    restrict(to, 0o700)?;
+    let mut moved = Vec::new();
+    for name in FILES {
+        let source = from.join(name);
+        let target = to.join(name);
+        if source.exists() && !target.exists() {
+            std::fs::rename(&source, &target)?;
+            restrict(&target, 0o600)?;
+            moved.push(target);
+        }
+    }
+    if std::fs::read_dir(from)?.next().is_none() {
+        std::fs::remove_dir(from)?;
+    }
+    Ok(moved)
+}
+
+/// Owner-only permissions: the stores hold credentials.
+fn restrict(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    let _ = (path, mode);
+    Ok(())
+}
+
+impl KeysConfig {
     /// Get the master key (from env if specified).
     pub fn resolved_master_key(&self) -> Option<String> {
         self.master_key
@@ -2119,5 +2217,67 @@ mod tests {
 
         // Unknown should return None
         assert!(config.get_provider("unknown").is_none());
+    }
+}
+
+#[cfg(test)]
+mod store_location_tests {
+    use super::*;
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    fn legacy_store_moves_once_and_becomes_owner_only() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let legacy = root.path().join(".eavs");
+        let xdg = root.path().join("share/eavs");
+        std::fs::create_dir_all(&legacy)?;
+        for name in ["keys.db", "keys.db-wal", "providers.db"] {
+            std::fs::write(legacy.join(name), name)?;
+        }
+        let moved = migrate_store_files(&legacy, &xdg)?;
+        assert_eq!(moved.len(), 3);
+        assert_eq!(
+            std::fs::read_to_string(xdg.join("providers.db"))?,
+            "providers.db"
+        );
+        assert!(!legacy.exists(), "emptied legacy directory is removed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let file = std::fs::metadata(xdg.join("keys.db"))?.permissions().mode() & 0o777;
+            let dir = std::fs::metadata(&xdg)?.permissions().mode() & 0o777;
+            assert_eq!((file, dir), (0o600, 0o700));
+        }
+
+        // An existing XDG store is never overwritten.
+        std::fs::create_dir_all(&legacy)?;
+        std::fs::write(legacy.join("keys.db"), "stale")?;
+        assert!(migrate_store_files(&legacy, &xdg)?.is_empty());
+        assert_eq!(std::fs::read_to_string(xdg.join("keys.db"))?, "keys.db");
+        assert!(
+            legacy.join("keys.db").exists(),
+            "left for the operator to inspect"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    fn explicit_database_path_is_never_rewritten() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let explicit = root.path().join("custom.db");
+        let keys = KeysConfig {
+            database_path: explicit.display().to_string(),
+            ..KeysConfig::default()
+        };
+        assert_eq!(keys.resolved_database_path(), explicit);
+        assert!(keys.migrate_legacy_store()?.is_empty());
+        Ok(())
     }
 }

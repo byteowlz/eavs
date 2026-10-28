@@ -237,7 +237,7 @@ Issue API keys with rate limits, budgets, and model restrictions:
 ```toml
 [keys]
 enabled = true
-database_path = "~/.eavs/keys.db"
+# database_path defaults to $XDG_DATA_HOME/eavs/keys.db (~/.local/share/eavs/)
 master_key = "env:EAVS_MASTER_KEY"  # Required for admin operations
 default_rpm_limit = 60              # Requests per minute
 default_budget_usd = 10.0           # Budget in USD
