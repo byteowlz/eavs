@@ -55,6 +55,7 @@ async fn inference_path_only(
 pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/v1/eavs/catalog", get(api::serving_catalog::handler))
+        .route("/v1/eavs/pools", get(crate::pools::status_handler))
         .route("/v1/realtime", get(proxy::ws_proxy_handler))
         .route(
             "/:provider/v1/realtime",

@@ -81,6 +81,20 @@ multipart boundary and bytes, and binary downloads stream unchanged.
 | --- | --- |
 | `openai`, `openai-responses`, `openai-compatible` | `POST /v1/embeddings`, `POST /v1/images/{generations,edits,variations}`, `POST /v1/videos`, `GET /v1/videos/{id}` and `GET /v1/videos/{id}/content` |
 | `typesafe` | `POST /typesafe/v1/systemone` (typed `state` + `questions`) |
+
+Some native APIs gate features behind experimental client headers. Eavs rebuilds the
+upstream request from its own header set, so such a header is dropped unless the provider
+allowlists it:
+
+```toml
+[providers.typesafe]
+type = "typesafe"
+pass_through_headers = ["TypeSafe-Danger-Zone-Images"]
+```
+
+The list is exact and per provider: only the named headers are copied, only when the client
+sent them. Credentials, cookies, framing headers and anything `x-eavs-*` are refused even if
+listed.
 | `elevenlabs` | `POST /elevenlabs/v1/text-to-speech/{voice_id}...`, `POST /elevenlabs/v1/speech-to-text...` |
 | `cohere` | `POST /cohere/v2/rerank`, `POST /cohere/v2/embed` (also `/v1/embed`) |
 | `voyage` | `POST /voyage/v1/rerank`, `POST /voyage/v1/embeddings` |
@@ -555,6 +569,87 @@ mitmproxy --mode local:ChatGPT -s scripts/eavs_capture.py
 2. The `eavs_capture.py` addon detects LLM-related domains and redirects them to Eaves
 3. Eaves auto-detects the provider from the original host and proxies the request
 4. Supported redirected requests pass through the proxy; logging and policy behavior depend on configuration and request shape.
+
+## Provider headers
+
+eavs builds every upstream request itself, so a provider that needs a header
+(experimental flags, organisation ids, routing hints) gets it from the
+provider's own configuration, not from the client:
+
+```toml
+[providers.jev.headers]
+TypeSafe-Danger-Zone-Images = "true"
+
+[providers.example.headers]
+X-Organisation = "env:EAVS_EXAMPLE_ORG"
+```
+
+- Values are literal or `env:VAR`. A reference to an unset variable stops
+  startup with an error naming the provider, header and variable; at runtime a
+  variable that disappears since then drops the header with a logged warning.
+  eavs never sends a header with an empty value.
+- Client headers are not forwarded (a few allowlisted ones excepted), so this
+  is also the answer for "my client sends header X and the upstream never sees
+  it".
+- TypeSafe's image input (`assets`, `box` questions) needs
+  `TypeSafe-Danger-Zone-Images: true`; declare it once per provider.
+
+## Reasoning effort levels
+
+Upstreams accept different `reasoning_effort` values (DeepSeek V4 on vLLM:
+`low`, `high`, `xhigh`, `max`; others add `medium` or `none`). eavs rewrites a
+requested level to the next accepted one (`medium` -> `high`) when it knows the
+model's set, and publishes the set in the catalog so clients offer only valid
+levels. The set comes from configuration or from a measurement, never from
+parsing error messages:
+
+```toml
+[[providers.fhgenie.models]]
+id = "deepseek-ai/DeepSeek-V4.1-Flash"
+reasoning = true
+reasoning_efforts = ["low", "high", "xhigh", "max"]
+```
+
+```bash
+eavs models efforts fhgenie deepseek-ai/DeepSeek-V4.1-Flash   # master key; sends 9 short requests
+```
+
+The measurement sends one short request without an effort (it must succeed)
+and one per level, and reads only the HTTP status: 2xx accepted, 400/422
+rejected, anything else aborts without saving. Without a known set, an
+upstream 400 passes through unchanged with an `x-eavs-hint` header.
+
+## Pools: always reach an available model
+
+Local runtimes switch models; a request naming a concrete model fails when it
+is unloaded. A pool is a virtual model that eavs resolves to whichever member is
+available right now (ADR-0026):
+
+```toml
+[pools.auto]
+members = ["rtx6000/*", "qwen38-rtx/*", "fhgenie/deepseek-ai/DeepSeek-V4.1-Flash"]
+
+[providers.rtx6000.probe]
+enabled = true
+interval = "15s"
+```
+
+- Request it with `"model": "auto"`, `"model": "auto/<pool>"`, or the pinned
+  route `POST /auto/v1/chat/completions` with the pool name as model.
+- `provider/*` is whatever the runtime's `GET /models` listed at the last
+  probe (or its configured models when it is not probed). A failed or stale
+  probe empties the wildcard.
+- The first available member wins. Members outside the caller's key scope, in
+  cooldown, or deactivated are skipped.
+- A member answering 404, 408, 429 or 5xx before the first byte is skipped for
+  30 seconds and the next member gets the same request. Once a response has
+  started, there is no retry.
+- With a session header (`x-session-affinity`, `x-session-id`, ...) a
+  conversation stays on its member while that member is available.
+- Every pool response carries `x-eavs-pool` and `x-eavs-route: provider/model`.
+  `GET /v1/eavs/pools` (virtual key required) lists each pool's members, the
+  candidates usable by that key right now, and the current pick.
+- Concrete model names never fall back to a pool member.
 
 ## CLI Reference
 

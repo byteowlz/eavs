@@ -1637,6 +1637,7 @@ impl SetupProviderConfig {
             gcp_location: self.gcp_location.clone().unwrap_or_default(),
             compat: crate::provider::CompatSettings::default(),
             headers: HashMap::new(),
+            pass_through_headers: Vec::new(),
             probe: None,
             session_header: None,
             user_agent: None,

@@ -394,6 +394,7 @@ pub fn validate_input(input: &serde_json::Value) -> Result<(), Failure> {
         "auth_token",
         "fleet",
         "program_status",
+        "pools",
     ];
     if root.keys().any(|key| {
         !allowed.contains(&key.as_str())

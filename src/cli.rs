@@ -5429,7 +5429,7 @@ mod tests {
         assert_eq!(parse_duration_string("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(
             parse_duration_string("1h30m"),
-            Some(Duration::from_mins(90))
+            Some(Duration::from_secs(90 * 60))
         );
         assert_eq!(parse_duration_string("invalid"), None);
         assert_eq!(parse_duration_string(""), None);

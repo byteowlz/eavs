@@ -127,6 +127,28 @@ pub struct AppConfig {
     /// Native jobs with capped keys remain disabled (fail-closed).
     #[serde(default)]
     pub native_pricing: NativePricingConfig,
+    /// Pools: named virtual models routed to whichever member is available
+    /// (ADR-0026).
+    #[serde(default)]
+    pub pools: HashMap<String, crate::pools::PoolConfig>,
+}
+
+/// Every provider header's `env:` reference must resolve; an empty value
+/// would silently disable whatever the header switches on.
+fn validate_header_references(config: &AppConfig) -> Result<(), ConfigError> {
+    for (name, provider) in &config.providers {
+        for (header, value) in &provider.headers {
+            let Some(variable) = value.strip_prefix("env:") else {
+                continue;
+            };
+            if std::env::var(variable).is_err() {
+                return Err(ConfigError::Message(format!(
+                    "providers.{name}.headers.{header} references env:{variable}, which is not set; set it or remove the header"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl AppConfig {
@@ -150,6 +172,7 @@ impl AppConfig {
             egress: EgressConfig::default(),
             mock_responses: MockResponsesConfig::default(),
             native_pricing: NativePricingConfig::default(),
+            pools: HashMap::new(),
         }
     }
 }
@@ -461,6 +484,14 @@ pub struct ProviderConfig {
     /// Custom headers to add to requests
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Client header names forwarded verbatim to this provider, case-insensitive.
+    ///
+    /// Empty by default: eavs rebuilds the upstream request from its own header set, so an
+    /// experimental client header (for example `TypeSafe-Danger-Zone-Images`) would otherwise
+    /// be dropped. This is an explicit allowlist, never a wildcard: credentials, cookies,
+    /// hop-by-hop headers and anything `x-eavs-*` are refused even when listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_through_headers: Vec<String>,
 
     /// Local-runtime availability probe: periodically asks the runtime for its
     /// served model list (a plain `GET /models`, never a generation) and
@@ -605,6 +636,7 @@ impl Default for ProviderConfig {
             api_version: None,
             compat: CompatSettings::default(),
             headers: HashMap::new(),
+            pass_through_headers: Vec::new(),
             probe: None,
             session_header: None,
             user_agent: None,
@@ -1466,6 +1498,10 @@ impl AppConfig {
             config.providers = config.upstream.clone();
         }
 
+        // A provider header whose `env:` variable is unset would be sent empty,
+        // which silently turns a flag off instead of failing. Refuse to start.
+        validate_header_references(&config)?;
+
         // Warn about unrecognized provider types instead of silently treating
         // them as OpenAI (which mis-advertises the API, e.g. to pi via pi_api).
         for (name, provider) in &config.providers {
@@ -2278,6 +2314,50 @@ mod store_location_tests {
         };
         assert_eq!(keys.resolved_database_path(), explicit);
         assert!(keys.migrate_legacy_store()?.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod header_reference_tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_header_must_not_reference_an_unset_variable() {
+        let mut config = AppConfig::with_defaults();
+        let mut provider = ProviderConfig::default();
+        provider.headers.insert(
+            "TypeSafe-Danger-Zone-Images".into(),
+            "env:EAVS_TEST_UNSET_HEADER".into(),
+        );
+        config.providers.insert("jev".into(), provider);
+        let error = validate_header_references(&config)
+            .err()
+            .map(|e| e.to_string());
+        let message = error.unwrap_or_default();
+        assert!(
+            message.contains("providers.jev.headers.TypeSafe-Danger-Zone-Images")
+                && message.contains("env:EAVS_TEST_UNSET_HEADER")
+                && message.contains("not set"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn literal_and_resolvable_headers_pass() -> Result<(), ConfigError> {
+        // SAFETY: this test owns the variable name.
+        #[expect(unsafe_code, reason = "test-only environment fixture")]
+        unsafe {
+            std::env::set_var("EAVS_TEST_SET_HEADER", "true");
+        }
+        let mut config = AppConfig::with_defaults();
+        let mut provider = ProviderConfig::default();
+        provider.headers.insert("Flag".into(), "true".into());
+        provider
+            .headers
+            .insert("Other".into(), "env:EAVS_TEST_SET_HEADER".into());
+        config.providers.insert("d3".into(), provider);
+        validate_header_references(&config)?;
         Ok(())
     }
 }

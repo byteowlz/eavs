@@ -14,7 +14,7 @@ use crate::config::ModelShortlistEntry;
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 /// Re-fetch if cache is older than this
-const CACHE_MAX_AGE: Duration = Duration::from_hours(24); // 24h
+const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60); // 24h
 
 /// A provider entry from models.dev
 #[derive(Debug, Clone, Deserialize, Serialize)]

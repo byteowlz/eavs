@@ -349,7 +349,7 @@ mod tests {
         );
         assert_eq!(
             parse_openai_duration("1h30m0s"),
-            Some(Duration::from_mins(90))
+            Some(Duration::from_secs(90 * 60))
         );
         assert_eq!(
             parse_openai_duration("500ms"),

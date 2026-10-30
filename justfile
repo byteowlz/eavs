@@ -162,10 +162,12 @@ release version:
     cargo set-version "$VERSION"
     git add Cargo.toml
     git commit -m "chore: bump version to $VERSION"
-    git tag "v$VERSION"
-    git push origin main
-    git push origin "v$VERSION"
-    echo "Release v$VERSION pushed! Workflow will start automatically."
+    git tag -a "v$VERSION" -m "Release v$VERSION"
+    git push origin main "v$VERSION"
+    # The public repository receives the snapshot and the tag; the tag push
+    # starts the release workflow there.
+    byt publish export --tag "v$VERSION" --push
+    echo "Release v$VERSION published; the release workflow starts on the tag."
 
 # Check release readiness
 release-check:

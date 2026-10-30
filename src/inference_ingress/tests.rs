@@ -5,6 +5,8 @@ mod admission_tests;
 mod extra_tests;
 #[path = "order_tests.rs"]
 mod order_tests;
+#[path = "pool_tests.rs"]
+mod pool_tests;
 #[path = "protocol_shape_tests.rs"]
 mod protocol_shape_tests;
 #[path = "restoration_more_tests.rs"]

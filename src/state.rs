@@ -60,6 +60,8 @@ pub struct AppState {
     pub learned_adaptive: Arc<crate::reasoning_effort::LearnedAdaptive>,
     /// Operator/fleet maintenance deactivations applied on top of config.
     pub availability: Arc<crate::availability::Availability>,
+    /// Pool cooldowns and conversation stickiness (ADR-0026).
+    pub pools: Arc<crate::pools::PoolRuntime>,
     /// Cached subscription/credit usage per upstream account.
     pub subscription_usage: Arc<crate::subscription_usage::SubscriptionUsage>,
 }
@@ -565,6 +567,7 @@ impl AppState {
             learned_adaptive: Arc::new(crate::reasoning_effort::LearnedAdaptive::load(
                 crate::reasoning_effort::LearnedAdaptive::state_file("adaptive-thinking.json"),
             )),
+            pools: Arc::new(crate::pools::PoolRuntime::default()),
             availability: Arc::new(crate::availability::Availability::load(
                 crate::availability::Availability::state_file(),
             )),
@@ -838,6 +841,7 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
             native_pricing: Default::default(),
+            pools: std::collections::HashMap::default(),
         }
     }
 

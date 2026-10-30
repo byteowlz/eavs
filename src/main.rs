@@ -36,6 +36,7 @@ mod paths;
 mod pi_messages;
 mod plugins;
 mod policy;
+mod pools;
 mod prober;
 mod program_status;
 mod provider;
@@ -987,6 +988,10 @@ async fn run_server(
             post(api::provider_from_template_handler),
         )
         .route("/admin/providers/probe", post(api::probe_provider_handler))
+        .route(
+            "/admin/models/efforts/detect",
+            post(api::detect_efforts_handler),
+        )
         .route("/admin/providers/:name", get(api::get_provider_handler))
         .route(
             "/admin/providers/:name",

@@ -250,6 +250,172 @@ pub async fn run_probe(
     Ok(response)
 }
 
+/// Reasoning-effort values a model accepts, measured by outcome.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EffortDetection {
+    pub model: String,
+    /// Levels the upstream answered with 2xx.
+    pub accepted: Vec<String>,
+    /// Levels the upstream rejected with 400/422.
+    pub rejected: Vec<String>,
+}
+
+/// Levels tried by [`detect_efforts`], lowest to highest (`off` is tried
+/// separately from `none` because runtimes accept one or the other).
+const EFFORT_CANDIDATES: &[&str] = &[
+    "none", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+/// Find the reasoning-effort levels `model` accepts by sending one short
+/// request per level and reading only the HTTP status: 2xx accepted, 400/422
+/// rejected. A request without an effort must succeed first, and any other
+/// outcome aborts, so an outage or auth problem is never mistaken for "level
+/// not supported". Error texts are never interpreted. Operator-triggered only:
+/// it sends `1 + EFFORT_CANDIDATES.len()` short generations.
+pub async fn detect_efforts(
+    upstream: &Arc<dyn Upstream>,
+    network: &NetworkConfig,
+    config: &ProviderConfig,
+    model: &str,
+) -> Result<EffortDetection, ProbeRejection> {
+    let (base, body, api_key) = effort_probe_base(network, config, model)?;
+    let with_effort = |effort: Option<&str>| effort_request(&base, &body, effort);
+
+    match send_bounded(upstream, with_effort(None)?, &api_key).await {
+        Attempt::Responded { status, .. } if status.is_success() => {}
+        attempt => {
+            return Err(ProbeRejection::new(
+                format!(
+                    "A request without reasoning effort did not succeed ({}); fix that first",
+                    describe(&attempt)
+                ),
+                "baseline_failed",
+            ))
+        }
+    }
+
+    let mut detection = EffortDetection {
+        model: model.to_owned(),
+        accepted: Vec::new(),
+        rejected: Vec::new(),
+    };
+    for effort in EFFORT_CANDIDATES {
+        match send_bounded(upstream, with_effort(Some(effort))?, &api_key).await {
+            Attempt::Responded { status, .. } if status.is_success() => {
+                detection.accepted.push((*effort).to_owned());
+            }
+            Attempt::Responded { status, .. }
+                if status == StatusCode::BAD_REQUEST
+                    || status == StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                detection.rejected.push((*effort).to_owned());
+            }
+            attempt => {
+                return Err(ProbeRejection::new(
+                    format!(
+                        "Inconclusive at effort '{effort}' ({}); nothing was saved",
+                        describe(&attempt)
+                    ),
+                    "inconclusive",
+                ))
+            }
+        }
+    }
+    if !detection
+        .accepted
+        .iter()
+        .any(|level| level != "none" && level != "off")
+    {
+        return Err(ProbeRejection::new(
+            "The model accepted no reasoning effort level; it may not take reasoning_effort",
+            "no_effort_levels",
+        ));
+    }
+    Ok(detection)
+}
+
+/// Validate the provider and build the effort-less request detection varies.
+fn effort_probe_base(
+    network: &NetworkConfig,
+    config: &ProviderConfig,
+    model: &str,
+) -> Result<(UpstreamRequest, serde_json::Value, String), ProbeRejection> {
+    if model.trim().is_empty() {
+        return Err(ProbeRejection::new("Model is required", "missing_model"));
+    }
+    let provider_type = ProviderType::try_from_str(&config.type_).ok_or_else(|| {
+        ProbeRejection::new(
+            format!("Unknown provider type '{}'", config.type_),
+            "unknown_provider_type",
+        )
+    })?;
+    if !provider_type.is_openai_compatible() {
+        return Err(ProbeRejection::new(
+            "Effort detection supports OpenAI-compatible providers (reasoning_effort); declare reasoning_efforts for others",
+            "unsupported_provider_type",
+        ));
+    }
+    let base_url = config.resolved_base_url();
+    if let Err(reason) = crate::network_acl::check_url_allowed(network, &base_url) {
+        return Err(ProbeRejection::new(reason, "network_blocked"));
+    }
+    let api_key = config.resolved_api_key();
+    let role = if config.resolved_compat().supports_developer_role == Some(false) {
+        WireRole::System
+    } else {
+        WireRole::Developer
+    };
+    let base = build_probe_request(
+        config,
+        provider_type,
+        &base_url,
+        &api_key,
+        model,
+        PROBE_DEFAULT_PROMPT,
+        role,
+    )?;
+    let body: serde_json::Value = serde_json::from_slice(&base.body)
+        .map_err(|_| ProbeRejection::new("Probe body is not JSON", "serialize_failed"))?;
+    Ok((base, body, api_key))
+}
+
+/// `base` with `effort` in the slot the request shape uses (Responses API
+/// `reasoning.effort`, Chat Completions `reasoning_effort`), or none.
+fn effort_request(
+    base: &UpstreamRequest,
+    body: &serde_json::Value,
+    effort: Option<&str>,
+) -> Result<UpstreamRequest, ProbeRejection> {
+    let mut body = body.clone();
+    if let Some(effort) = effort {
+        if body.get("input").is_some() {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
+        } else {
+            body["reasoning_effort"] = serde_json::Value::String(effort.to_owned());
+        }
+    }
+    let bytes = serde_json::to_vec(&body).map_err(|_| {
+        ProbeRejection::new("Failed to serialize probe request", "serialize_failed")
+    })?;
+    Ok(UpstreamRequest {
+        method: base.method.clone(),
+        url: base.url.clone(),
+        headers: base.headers.clone(),
+        body: Bytes::from(bytes),
+    })
+}
+
+fn describe(attempt: &Attempt) -> String {
+    match attempt {
+        Attempt::Responded {
+            status,
+            body_excerpt,
+            ..
+        } => format!("HTTP {}: {body_excerpt}", status.as_u16()),
+        Attempt::Unreachable { error, .. } => format!("unreachable: {error}"),
+    }
+}
+
 /// Two-phase probe for OpenAI-compatible endpoints: try `developer` role, and
 /// on a role rejection retry with `system`, recommending
 /// `supports_developer_role = false` when the fallback succeeds.
@@ -758,6 +924,76 @@ mod tests {
             trusted_private_endpoints: vec![],
             block_private_ips: true,
         }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    async fn detect_efforts_reads_only_status_codes() -> Result<(), ProbeRejection> {
+        // Baseline ok, then: none 400, off 400, minimal 400, low ok,
+        // medium 400, high ok, xhigh ok, max ok.
+        let ok = || Ok((StatusCode::OK, ok_body()));
+        let rejected = || Ok((StatusCode::BAD_REQUEST, b"{}".to_vec()));
+        let scripted = ScriptedUpstream::new(vec![
+            ok(),
+            rejected(),
+            rejected(),
+            rejected(),
+            ok(),
+            rejected(),
+            ok(),
+            ok(),
+            ok(),
+        ]);
+        let detection = detect_efforts(
+            &upstream(scripted.clone()),
+            &net(),
+            &config("openai-compatible", "https://api.example.com/v1"),
+            "deepseek",
+        )
+        .await?;
+        assert_eq!(detection.accepted, ["low", "high", "xhigh", "max"]);
+        assert_eq!(detection.rejected, ["none", "off", "minimal", "medium"]);
+        let bodies = scripted.bodies();
+        assert!(
+            bodies[0].get("reasoning_effort").is_none(),
+            "baseline has no effort"
+        );
+        assert_eq!(bodies[5]["reasoning_effort"], "medium");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn detect_efforts_aborts_on_anything_but_accept_or_reject() {
+        // A 503 halfway is an outage, not "level unsupported": nothing saved.
+        let scripted = ScriptedUpstream::new(vec![
+            Ok((StatusCode::OK, ok_body())),
+            Ok((StatusCode::OK, ok_body())),
+            Ok((StatusCode::SERVICE_UNAVAILABLE, b"busy".to_vec())),
+        ]);
+        let error = detect_efforts(
+            &upstream(scripted),
+            &net(),
+            &config("openai-compatible", "https://api.example.com/v1"),
+            "m",
+        )
+        .await
+        .err();
+        assert_eq!(error.map(|e| e.code).as_deref(), Some("inconclusive"));
+
+        let failing_baseline =
+            ScriptedUpstream::new(vec![Ok((StatusCode::UNAUTHORIZED, b"no".to_vec()))]);
+        let error = detect_efforts(
+            &upstream(failing_baseline),
+            &net(),
+            &config("openai-compatible", "https://api.example.com/v1"),
+            "m",
+        )
+        .await
+        .err();
+        assert_eq!(error.map(|e| e.code).as_deref(), Some("baseline_failed"));
     }
 
     #[tokio::test]

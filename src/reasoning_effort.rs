@@ -56,51 +56,6 @@ pub fn choose(requested: &str, supported: &[String]) -> Option<String> {
         .map(|(_, value)| (*value).clone())
 }
 
-/// Phrases that introduce the accepted set in upstream error messages, e.g.
-/// vLLM "Supported types are xhigh (default), medium, and low." or
-/// "use one of: off, low, medium, xhigh".
-const LIST_MARKERS: &[&str] = &[
-    "supported types are",
-    "supported values are",
-    "supported values:",
-    "supported:",
-    "must be one of",
-    "expected one of",
-    "use one of",
-    "one of:",
-];
-
-/// Parse the accepted reasoning-effort values from an upstream error body.
-/// Only messages that mention reasoning effort and name an accepted set are
-/// used; anything else returns `None` and the original error passes through.
-pub fn parse_supported(error_body: &str) -> Option<Vec<String>> {
-    let message = serde_json::from_str::<Value>(error_body)
-        .ok()
-        .and_then(|json| {
-            json.pointer("/error/message")
-                .or_else(|| json.get("message"))
-                .or_else(|| json.get("detail"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| error_body.to_owned());
-    let lower = message.to_ascii_lowercase();
-    if !(lower.contains("reasoning effort") || lower.contains("reasoning_effort")) {
-        return None;
-    }
-    let start = LIST_MARKERS
-        .iter()
-        .filter_map(|marker| lower.rfind(marker).map(|at| at + marker.len()))
-        .max()?;
-    let mut values: Vec<String> = Vec::new();
-    for word in lower[start..].split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
-        if rank(word).is_some() && !values.iter().any(|v| v == word) {
-            values.push(word.to_owned());
-        }
-    }
-    (!values.is_empty()).then_some(values)
-}
-
 /// Where a request carries its reasoning effort.
 fn effort_slot(body: &mut Value) -> Option<&mut Value> {
     if body.get("reasoning_effort").is_some() {
@@ -300,30 +255,6 @@ mod tests {
         assert_eq!(choose("Low", &sushi), None);
         assert_eq!(choose("turbo", &sushi), None, "unknown levels pass through");
         assert_eq!(choose("high", &[]), None);
-    }
-
-    #[test]
-    fn parses_vllm_and_sushi_errors() {
-        let vllm = json!({"error": {"code": "BadRequestError", "message": "Unexpected reasoning effort minimal. Supported types are xhigh (default), medium, and low.", "type": "invalid_request_error"}}).to_string();
-        assert_eq!(
-            parse_supported(&vllm),
-            Some(list(&["xhigh", "medium", "low"]))
-        );
-        let sushi = json!({"error": {"message": "reasoning effort 'high' is not supported by beamster/Qwen3.8-Flash-Next-Sushi-4bpw; use one of: off, low, medium, xhigh", "type": "invalid_request_error"}}).to_string();
-        assert_eq!(
-            parse_supported(&sushi),
-            Some(list(&["off", "low", "medium", "xhigh"]))
-        );
-    }
-
-    #[test]
-    fn ignores_unrelated_or_listless_errors() {
-        let other =
-            json!({"error": {"message": "max_tokens must be one of: low, high"}}).to_string();
-        assert_eq!(parse_supported(&other), None, "not about reasoning effort");
-        let no_list = json!({"error": {"message": "invalid reasoning effort"}}).to_string();
-        assert_eq!(parse_supported(&no_list), None);
-        assert_eq!(parse_supported("not json, nothing here"), None);
     }
 
     #[test]

@@ -203,6 +203,7 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
             native_pricing: Default::default(),
+            pools: std::collections::HashMap::default(),
         }
     }
 

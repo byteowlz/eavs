@@ -500,6 +500,33 @@
           }
         }
       }
+    },
+    "pools": {
+      "type": "object",
+      "description": "Pools: virtual models routed to whichever member is available (ADR-0026). Requested as model \"auto\", \"auto/<pool>\" or via /auto/v1/... .",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^/]+/.+$"
+            },
+            "description": "Ordered provider/model routes; provider/* follows what the runtime serves.",
+            "examples": [
+              [
+                "rtx6000/*",
+                "fhgenie/deepseek-ai/DeepSeek-V4.1-Flash"
+              ]
+            ]
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -749,6 +776,18 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "pass_through_headers": {
+          "type": "array",
+          "description": "Client request headers forwarded to this provider by name (an explicit allowlist, never a wildcard). Credentials, cookies, hop-by-hop headers and x-eavs-* are refused even when listed.",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            [
+              "TypeSafe-Danger-Zone-Images"
+            ]
+          ]
         },
         "session_header": {
           "type": "string",

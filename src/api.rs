@@ -1809,6 +1809,74 @@ async fn save_provider(
     Ok(Json(entry))
 }
 
+/// Request body for `POST /admin/models/efforts/detect`.
+#[derive(Debug, Deserialize)]
+pub struct EffortDetectRequest {
+    pub provider: String,
+    pub model: String,
+    /// Store the result for routing and the catalog (default true).
+    #[serde(default = "default_true")]
+    pub save: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// POST /admin/models/efforts/detect
+///
+/// Measure which reasoning-effort levels a configured model accepts (one short
+/// request per level, judged by HTTP status only) and store the set so eavs
+/// rewrites unsupported levels before forwarding and the catalog advertises it.
+/// Requires the master key; sends real (short) generations.
+pub async fn detect_efforts_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<EffortDetectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ProviderApiError>)> {
+    check_master_key_provider(&headers, &state)?;
+    let state = state.pin_routes();
+    let Some(runtime) = state
+        .resolve_provider(&payload.provider)
+        .filter(|p| p.resolved_name.eq_ignore_ascii_case(&payload.provider))
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ProviderApiError::new(
+                format!("Provider '{}' is not configured", payload.provider),
+                "unknown_provider",
+            )),
+        ));
+    };
+    let detection = crate::provider_probe::detect_efforts(
+        &state.upstream,
+        &state.config.network,
+        &runtime.config,
+        &payload.model,
+    )
+    .await
+    .map_err(|rejection| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ProviderApiError::new(rejection.error, rejection.code)),
+        )
+    })?;
+    if payload.save {
+        state.learned_efforts.learn(
+            &runtime.resolved_name,
+            &payload.model,
+            detection.accepted.clone(),
+        );
+    }
+    Ok(Json(serde_json::json!({
+        "provider": runtime.resolved_name,
+        "model": detection.model,
+        "accepted": detection.accepted,
+        "rejected": detection.rejected,
+        "saved": payload.save,
+    })))
+}
+
 /// Probe an unsaved provider config with a bounded, side-effect-free request.
 ///
 /// POST /admin/providers/probe
@@ -2738,6 +2806,7 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
             native_pricing: Default::default(),
+            pools: std::collections::HashMap::default(),
         };
         config.keys.enabled = true;
         let state = AppState::new(config);
@@ -2782,6 +2851,7 @@ mod tests {
             egress: crate::config::EgressConfig::default(),
             mock_responses: crate::config::MockResponsesConfig::default(),
             native_pricing: crate::config::NativePricingConfig::default(),
+            pools: std::collections::HashMap::default(),
         };
         config.providers.insert(
             "rtx".to_string(),
@@ -3123,6 +3193,7 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
             native_pricing: Default::default(),
+            pools: std::collections::HashMap::default(),
         };
         AppState::new(config)
     }
@@ -3166,6 +3237,7 @@ mod tests {
             egress: Default::default(),
             mock_responses: Default::default(),
             native_pricing: Default::default(),
+            pools: std::collections::HashMap::default(),
         };
         AppState::new(config)
     }

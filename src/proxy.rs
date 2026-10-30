@@ -355,8 +355,16 @@ async fn proxy_handler_inner(
 ) -> Result<Response, Response> {
     let state = state.pin_routes();
     let generation = state.file_routing_generation();
+    let pinned = path_provider.clone().or_else(|| {
+        req.headers()
+            .get("x-provider")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    });
     let mut result = if crate::pi_messages::matches(req.uri().path(), path_provider.as_deref()) {
         Ok(crate::pi_messages::handle(state, req, path_provider).await)
+    } else if crate::pools::may_apply(&state, pinned.as_deref()) {
+        crate::pools::serve(state, req, path_provider).await
     } else {
         proxy_handler_pinned(state, req, path_provider).await
     };
@@ -1597,6 +1605,7 @@ pub async fn proxy_handler_pinned(
 
     apply_http_auth_headers(&mut upstream_headers, provider_type, &api_key);
     apply_http_extra_headers(&mut upstream_headers, provider_type);
+    apply_pass_through_headers(&mut upstream_headers, &parts.headers, provider_config);
     apply_client_identity(
         &mut upstream_headers,
         &parts.headers,
@@ -1616,7 +1625,15 @@ pub async fn proxy_handler_pinned(
         }
 
         let resolved_value = if let Some(var_name) = value.strip_prefix("env:") {
-            std::env::var(var_name).unwrap_or_default()
+            // Startup refuses an unset reference (see `finalize_config`); this
+            // covers a variable that disappeared since, and never sends the
+            // header empty.
+            let Ok(value) = std::env::var(var_name) else {
+                tracing::warn!(provider = %provider_name, header = %key, variable = %var_name,
+                    "Configured header skipped: its env variable is unset");
+                continue;
+            };
+            value
         } else {
             value.clone()
         };
@@ -1952,6 +1969,10 @@ pub async fn proxy_handler_pinned(
         );
         if let Some(v) = headers.get(http::header::RETRY_AFTER).cloned() {
             response.headers_mut().insert(http::header::RETRY_AFTER, v);
+        }
+        // Set by the gateway on this response (see `learn_from_upstream_error`).
+        if let Some(v) = headers.get("x-eavs-hint").cloned() {
+            response.headers_mut().insert("x-eavs-hint", v);
         }
         response
             .headers_mut()
@@ -2922,18 +2943,43 @@ async fn learn_from_upstream_error(
         crate::reasoning_effort::to_adaptive_bytes(body)
             .map(|(rewritten, from, to)| (rewritten, ("x-eavs-thinking", from, to)))
     } else {
-        crate::reasoning_effort::parse_supported(&text).and_then(|supported| {
-            state
-                .learned_efforts
-                .learn(provider_name, model_name, supported.clone());
-            crate::reasoning_effort::rewrite_bytes(body, &supported)
-                .map(|(rewritten, from, to)| (rewritten, ("x-eavs-reasoning-effort", from, to)))
-        })
+        // Accepted effort levels are declared or measured
+        // (`eavs models efforts`), never guessed from error texts. For a
+        // model with no known set, point the operator at the measurement.
+        if effort_levels_unknown(state, provider_name, model_name, body) {
+            let hint = format!(
+                "reasoning effort levels for this model are unknown; if the effort was rejected, run: eavs models efforts {provider_name} {model_name}"
+            );
+            if let Ok(value) = http::HeaderValue::from_str(&hint) {
+                response.headers.insert("x-eavs-hint", value);
+            }
+        }
+        None
     };
     if retry.is_none() {
         response.body = futures::stream::once(async move { Ok(error_bytes) }).boxed();
     }
     retry
+}
+
+/// The request carried a reasoning effort and no accepted set is declared,
+/// measured or published for the model.
+fn effort_levels_unknown(
+    state: &AppState,
+    provider_name: &str,
+    model_name: &str,
+    body: &[u8],
+) -> bool {
+    let has_effort = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| crate::reasoning_effort::requested(&body))
+        .is_some();
+    has_effort
+        && state
+            .resolve_provider(provider_name)
+            .is_some_and(|provider| {
+                reasoning_efforts_for(state, &provider.config, provider_name, model_name).is_none()
+            })
 }
 
 /// Reasoning-effort values the upstream accepts for `model`: declared in
@@ -4574,6 +4620,55 @@ pub fn apply_http_extra_headers(headers: &mut HeaderMap, provider_type: Provider
     apply_extra_headers(headers, provider_type);
 }
 
+/// Never forwardable, whatever the provider lists: credentials, cookies, framing and
+/// eavs's own control headers. A pass-through allowlist must not become a way to leak
+/// the virtual key upstream or to smuggle gateway state.
+const PASS_THROUGH_REFUSED: [&str; 14] = [
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-authorization",
+    "proxy-connection",
+    "www-authenticate",
+    "expect",
+];
+
+fn pass_through_refused(name: &str) -> bool {
+    PASS_THROUGH_REFUSED.contains(&name) || name.starts_with("x-eavs")
+}
+
+/// Forward client headers the provider explicitly allowlists (`pass_through_headers`).
+///
+/// The upstream request is otherwise rebuilt from eavs's own header set, which silently drops
+/// experimental client headers. Only names listed for this provider are copied, only when the
+/// client actually sent them, and never when refused by [`pass_through_refused`].
+fn apply_pass_through_headers<H: HeadersExt>(
+    headers: &mut H,
+    client_headers: &HeaderMap,
+    provider_config: &crate::config::ProviderConfig,
+) {
+    for name in &provider_config.pass_through_headers {
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() || pass_through_refused(&name) {
+            continue;
+        }
+        let (Ok(header_name), Some(value)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            client_headers.get(name.as_str()),
+        ) else {
+            continue;
+        };
+        headers.insert_header(header_name, value.clone());
+    }
+}
+
 /// Session affinity and User-Agent for the upstream request (see
 /// `client_identity`). Provider `headers` applied afterwards still override.
 fn apply_client_identity<H: HeadersExt>(
@@ -5213,6 +5308,90 @@ fn guess_mime_from_url(url: &str) -> Option<String> {
         Some("image/gif".to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod pass_through_tests {
+    use super::*;
+
+    fn provider(listed: &[&str]) -> crate::config::ProviderConfig {
+        crate::config::ProviderConfig {
+            type_: "typesafe".to_string(),
+            pass_through_headers: listed.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn client(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn allowlisted_client_header_is_forwarded() {
+        let mut upstream = HeaderMap::new();
+        let client = client(&[("typesafe-danger-zone-images", "true")]);
+        apply_pass_through_headers(
+            &mut upstream,
+            &client,
+            &provider(&["TypeSafe-Danger-Zone-Images"]),
+        );
+        assert_eq!(
+            upstream
+                .get("typesafe-danger-zone-images")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "an allowlisted experimental header must reach the upstream"
+        );
+    }
+
+    #[test]
+    fn unlisted_client_headers_are_not_forwarded() {
+        let mut upstream = HeaderMap::new();
+        let client = client(&[
+            ("typesafe-danger-zone-images", "true"),
+            ("x-custom-experiment", "1"),
+        ]);
+        apply_pass_through_headers(&mut upstream, &client, &provider(&[]));
+        assert!(
+            upstream.is_empty(),
+            "nothing may pass without an allowlist entry"
+        );
+    }
+
+    #[test]
+    fn refused_names_never_pass_even_when_listed() {
+        for name in ["authorization", "cookie", "host", "x-eavs-token"] {
+            let mut upstream = HeaderMap::new();
+            let client = client(&[(name, "secret")]);
+            apply_pass_through_headers(&mut upstream, &client, &provider(&[name]));
+            assert!(
+                upstream.is_empty(),
+                "{name} must never be forwarded, whatever the provider lists"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_client_header_adds_nothing() {
+        let mut upstream = HeaderMap::new();
+        let client = client(&[("other", "1")]);
+        apply_pass_through_headers(
+            &mut upstream,
+            &client,
+            &provider(&["typesafe-danger-zone-images"]),
+        );
+        assert!(
+            upstream.is_empty(),
+            "an allowlist entry is not a default value"
+        );
     }
 }
 
@@ -6098,6 +6277,7 @@ mod tests {
             egress: crate::config::EgressConfig::default(),
             mock_responses: crate::config::MockResponsesConfig::default(),
             native_pricing: crate::config::NativePricingConfig::default(),
+            pools: std::collections::HashMap::default(),
         }
     }
 
@@ -10203,20 +10383,29 @@ mod tests {
         reason = "assertions are intentional in tests"
     )]
     #[tokio::test]
-    async fn rejected_reasoning_effort_is_learned_and_retried_once() -> Result<(), anyhow::Error> {
-        let mock = MockUpstream::new(vec![vllm_effort_400(), ok_spec(), ok_spec()]);
+    async fn rejected_effort_passes_through_with_a_detect_hint() -> Result<(), anyhow::Error> {
+        // No accepted set is declared or measured: the upstream's 400 reaches
+        // the client unchanged, with a hint; nothing is guessed from its text.
+        let mock = MockUpstream::new(vec![vllm_effort_400(), vllm_effort_400()]);
         let app = effort_app(&mock, &[]);
-        let (status, headers, _) = effort_request(&app, "high").await?;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(headers["x-eavs-reasoning-effort"], "high->xhigh");
-        // Learned: the next request is rewritten up front, without a 400.
+        let (status, headers, body) = effort_request(&app, "minimal").await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(headers.get("x-eavs-reasoning-effort").is_none());
+        let hint = headers
+            .get("x-eavs-hint")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(hint.contains("eavs models efforts rtx qwen"), "{headers:?}");
+        assert!(String::from_utf8_lossy(&body).contains("Supported types are"));
         let (status, _, _) = effort_request(&app, "minimal").await?;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "nothing was learned from the text"
+        );
         let requests = mock.take_requests().await;
-        assert_eq!(requests.len(), 3);
-        assert_eq!(sent_effort(&requests[0])?, "high");
-        assert_eq!(sent_effort(&requests[1])?, "xhigh");
-        assert_eq!(sent_effort(&requests[2])?, "low");
+        assert_eq!(requests.len(), 2, "no retries");
+        assert_eq!(sent_effort(&requests[0])?, "minimal");
         Ok(())
     }
 
@@ -10326,6 +10515,255 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         ))
+    }
+
+    /// Pool app: providers `a` and `b` (model `m` each) and `[pools.auto]`
+    /// = a/*, b/*; the key may use `allowed` providers.
+    async fn pool_app(
+        responses: Vec<ResponseSpec>,
+        allowed: &[&str],
+    ) -> Result<(Router, String, MockUpstream), anyhow::Error> {
+        let mock = MockUpstream::new(responses);
+        let mut providers = HashMap::new();
+        providers.insert("a".to_string(), chat_provider("http://a/v1"));
+        providers.insert("b".to_string(), chat_provider("http://b/v1"));
+        let mut config = make_config(providers);
+        config.keys.enabled = true;
+        config.pools.insert(
+            "auto".to_string(),
+            crate::pools::PoolConfig {
+                members: vec!["a/*".to_string(), "b/*".to_string()],
+            },
+        );
+        let state = AppState::new_with_upstream(config, Arc::new(mock.clone()));
+        let store = Arc::new(KeyStore::in_memory().await?);
+        state
+            .key_validator
+            .set(Arc::new(KeyValidator::new(
+                store.clone(),
+                Arc::new(RateLimiter::new()),
+            )))
+            .ok()
+            .context("validator already set")?;
+        state
+            .key_store
+            .set(store.clone())
+            .ok()
+            .context("store already set")?;
+        let key = store
+            .create_key(CreateKeyRequest {
+                permissions: KeyPermissions {
+                    allowed_providers: Some(allowed.iter().map(|p| (*p).to_string()).collect()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await?
+            .key;
+        let app = crate::inference_routes::router(&state).with_state(state);
+        Ok((app, key, mock))
+    }
+
+    async fn pool_request(
+        app: &Router,
+        uri: &str,
+        key: &str,
+        model: &str,
+        session: Option<&str>,
+    ) -> Result<(StatusCode, HeaderMap, Value), anyhow::Error> {
+        let mut req = http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("authorization", format!("Bearer {key}"));
+        if let Some(session) = session {
+            req = req.header("x-session-affinity", session);
+        }
+        let response = app
+            .clone()
+            .oneshot(req.body(Body::from(serde_json::to_vec(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))?))?)
+            .await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((
+            status,
+            headers,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
+    }
+
+    fn status_spec(status: StatusCode) -> ResponseSpec {
+        ResponseSpec {
+            status,
+            headers: HeaderMap::new(),
+            chunks: vec![Bytes::from_static(
+                b"{\"error\":{\"message\":\"model not loaded\"}}",
+            )],
+        }
+    }
+
+    fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn pool_fails_over_before_the_first_byte_and_cools_the_member(
+    ) -> Result<(), anyhow::Error> {
+        let (app, key, mock) = pool_app(
+            vec![
+                status_spec(StatusCode::SERVICE_UNAVAILABLE),
+                ok_spec(),
+                ok_spec(),
+            ],
+            &["a", "b"],
+        )
+        .await?;
+        let (status, headers, body) =
+            pool_request(&app, "/v1/chat/completions", &key, "auto", None).await?;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(header(&headers, "x-eavs-pool"), "auto");
+        assert_eq!(header(&headers, "x-eavs-route"), "b/m");
+        let sent = mock.take_requests().await;
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent[0].url.starts_with("http://a/v1/chat/completions"),
+            "{}",
+            sent[0].url
+        );
+        assert!(
+            sent[1].url.starts_with("http://b/v1/chat/completions"),
+            "{}",
+            sent[1].url
+        );
+        let forwarded: Value = serde_json::from_slice(&sent[1].body)?;
+        assert_eq!(
+            forwarded["model"], "m",
+            "the member's real model id is sent"
+        );
+
+        // `a` is cooling down: the next request goes straight to `b`.
+        let (status, headers, _) =
+            pool_request(&app, "/auto/v1/chat/completions", &key, "auto", None).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "x-eavs-route"), "b/m");
+        let sent = mock.take_requests().await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].url.starts_with("http://b/v1/"), "{}", sent[0].url);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn pool_respects_key_scope_and_explains_failures() -> Result<(), anyhow::Error> {
+        let (app, key, mock) = pool_app(vec![ok_spec()], &["b"]).await?;
+        let (status, headers, _) =
+            pool_request(&app, "/v1/chat/completions", &key, "auto", None).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header(&headers, "x-eavs-route"),
+            "b/m",
+            "a is outside the key's scope"
+        );
+        assert_eq!(mock.take_requests().await.len(), 1);
+
+        let (status, _, body) =
+            pool_request(&app, "/v1/chat/completions", &key, "auto/nope", None).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+        assert_eq!(body["error"]["code"], "unknown_pool");
+
+        let response = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/eavs/pools")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(listed["pools"][0]["name"], "auto");
+        assert_eq!(
+            listed["pools"][0]["candidates"],
+            json!(["b/m"]),
+            "filtered by key scope"
+        );
+        assert_eq!(listed["pools"][0]["pick"], "b/m");
+        let anonymous = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/eavs/pools")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let (none, nobody, _) = pool_app(vec![], &["elsewhere"]).await?;
+        let (status, _, body) =
+            pool_request(&none, "/v1/chat/completions", &nobody, "auto", None).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+        assert_eq!(body["error"]["code"], "no_available_model");
+        Ok(())
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions are intentional in tests"
+    )]
+    #[tokio::test]
+    async fn pool_conversations_stick_and_concrete_models_never_fall_back(
+    ) -> Result<(), anyhow::Error> {
+        // The conversation lands on `b` after `a` fails and is remembered
+        // there. (`a` is also cooling down here, so this checks the request
+        // path; `pools::tests` covers the choice between two live members.)
+        let (app, key, mock) = pool_app(
+            vec![
+                status_spec(StatusCode::NOT_FOUND),
+                ok_spec(),
+                ok_spec(),
+                status_spec(StatusCode::SERVICE_UNAVAILABLE),
+            ],
+            &["a", "b"],
+        )
+        .await?;
+        let (_, headers, _) =
+            pool_request(&app, "/v1/chat/completions", &key, "auto", Some("conv-1")).await?;
+        assert_eq!(header(&headers, "x-eavs-route"), "b/m");
+        mock.take_requests().await;
+        let (_, headers, _) =
+            pool_request(&app, "/v1/chat/completions", &key, "auto", Some("conv-1")).await?;
+        assert_eq!(
+            header(&headers, "x-eavs-route"),
+            "b/m",
+            "the conversation stays on b"
+        );
+        mock.take_requests().await;
+
+        // A concrete model is not a pool: its failure is returned as is.
+        let (status, headers, _) =
+            pool_request(&app, "/a/v1/chat/completions", &key, "m", None).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(headers.get("x-eavs-pool").is_none());
+        let sent = mock.take_requests().await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].url.starts_with("http://a/v1/"), "{}", sent[0].url);
+        Ok(())
     }
 
     fn three_providers() -> HashMap<String, ProviderConfig> {

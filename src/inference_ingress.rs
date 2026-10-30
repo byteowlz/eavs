@@ -116,7 +116,7 @@ async fn auth(State(ingress): State<Ingress>, mut request: Request, next: Next) 
     let metadata = matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
-    ) && (matches!(path, "/v1/models" | "/v1/eavs/catalog")
+    ) && (matches!(path, "/v1/models" | "/v1/eavs/catalog" | "/v1/eavs/pools")
         || path.starts_with("/v1/models/"));
     // Lifecycle handlers still verify MAC-authenticated owner/model bindings.
     // They must remain reachable for already-created jobs after a cap changes.
@@ -201,6 +201,51 @@ fn supports(provider: &serving_catalog::ServingProvider, path: &str) -> bool {
         _ => false,
     }
 }
+/// Admission shared by catalog and pool requests (`Some` is the rejection):
+/// budgeted keys need durable
+/// accounting, caller-controlled routing and credential headers are dropped,
+/// and the request carries only the caller's own key (plus the pinned
+/// provider for catalog requests).
+fn prepare_forward(
+    parts: &mut axum::http::request::Parts,
+    token: &str,
+    key: &crate::keys::VirtualKey,
+    provider: Option<&str>,
+) -> Option<Response> {
+    if key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some() {
+        return Some(error(StatusCode::FORBIDDEN, "durable_accounting_required"));
+    }
+    for name in [
+        "x-provider",
+        "x-original-host",
+        "x-api-key",
+        "x-eavs-token",
+        "content-length",
+        "content-encoding",
+    ] {
+        parts.headers.remove(name);
+    }
+    let Ok(auth) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return Some(error(StatusCode::UNAUTHORIZED, "invalid_api_key"));
+    };
+    parts.headers.insert(header::AUTHORIZATION, auth);
+    if let Some(provider) = provider {
+        let Ok(provider_header) = HeaderValue::from_str(provider) else {
+            return Some(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "catalog_unavailable",
+            ));
+        };
+        parts.headers.insert("x-provider", provider_header);
+    }
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let semantic = semantic_headers(&key.key_hash, &parts.headers);
+    parts.extensions.insert(NativeHeaders(semantic));
+    None
+}
 async fn inference(State(ingress): State<Ingress>, request: Request) -> Response {
     let state = ingress.state.pin_routes();
     let (mut parts, body) = request.into_parts();
@@ -219,6 +264,20 @@ async fn inference(State(ingress): State<Ingress>, request: Request) -> Response
     let Some(model_id) = value.get("model").and_then(Value::as_str) else {
         return error(StatusCode::BAD_REQUEST, "model_required");
     };
+    if crate::pools::requested(None, model_id).is_some() && !state.config.pools.is_empty() {
+        // A pool is not a catalog model: pool resolution picks a member the
+        // key may use, and native admission rechecks that member.
+        let Some(key) = authenticate(&ingress, &parts.headers).await else {
+            return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
+        };
+        if let Some(rejection) = prepare_forward(&mut parts, &token, &key, None) {
+            return rejection;
+        }
+        let request = Request::from_parts(parts, Body::from(bytes));
+        return match crate::pools::serve(state, request, None).await {
+            Ok(response) | Err(response) => response,
+        };
+    }
     let catalog = match serving_catalog::build(&state, &token).await {
         Ok(catalog) => catalog,
         Err(failure) => return catalog_error(failure),
@@ -240,37 +299,13 @@ async fn inference(State(ingress): State<Ingress>, request: Request) -> Response
     let Some(key) = authenticate(&ingress, &parts.headers).await else {
         return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
     };
-    if key.permissions.max_budget_usd.is_some() || key.permissions.tpm_limit.is_some() {
-        return error(StatusCode::FORBIDDEN, "durable_accounting_required");
-    }
     value["model"] = Value::String(model.clone());
-    for name in [
-        "x-provider",
-        "x-original-host",
-        "x-api-key",
-        "x-eavs-token",
-        "content-length",
-        "content-encoding",
-    ] {
-        parts.headers.remove(name);
+    if let Some(rejection) = prepare_forward(&mut parts, &token, &key, Some(provider)) {
+        return rejection;
     }
-    let Ok(auth) = HeaderValue::from_str(&format!("Bearer {token}")) else {
-        return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
-    };
-    let Ok(provider_header) = HeaderValue::from_str(provider) else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "catalog_unavailable");
-    };
-    parts.headers.insert(header::AUTHORIZATION, auth);
-    parts.headers.insert("x-provider", provider_header);
-    parts.headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
     let Ok(body) = serde_json::to_vec(&value) else {
         return error(StatusCode::BAD_REQUEST, "invalid_json");
     };
-    let semantic = semantic_headers(&key.key_hash, &parts.headers);
-    parts.extensions.insert(NativeHeaders(semantic));
     let request = Request::from_parts(parts, Body::from(body));
     match crate::proxy::proxy_handler_pinned(state, request, None).await {
         Ok(response) | Err(response) => response,

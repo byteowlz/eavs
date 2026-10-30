@@ -384,6 +384,43 @@ broadcast_channel_size = 1024
 # env = { MY_API_KEY = "env:MY_API_KEY" }
 
 # =============================================================================
+# Provider headers (provider-specific flags and headers)
+# =============================================================================
+# eavs builds the upstream request itself, so a header a provider needs (an
+# experimental flag, an organisation id, a routing hint) must be declared here.
+# Values resolve `env:VAR` references; a reference to an unset variable refuses
+# startup instead of sending the header empty. Example: TypeSafe's image
+# support is off unless the request carries its opt-in header.
+#
+# [providers.jev.headers]
+# TypeSafe-Danger-Zone-Images = "true"
+#
+# [providers.example.headers]
+# X-Organisation = "env:EAVS_EXAMPLE_ORG"
+
+# A client header the upstream needs beside declared ones can be let through by
+# name (an explicit allowlist; credentials, cookies, hop-by-hop and x-eavs-*
+# headers are refused even when listed).
+#
+# [providers.example.pass_through_headers]
+# 
+# =============================================================================
+# Pools (ADR-0026)
+# =============================================================================
+# A pool is a virtual model that routes to whichever member is available.
+# Ask for it explicitly: model "auto" (the pool named auto), "auto/<pool>", or
+# the pinned route /auto/v1/... with the pool name as model. Members are tried
+# in order; "provider/*" follows what a probed runtime serves right now, so a
+# loadout switch needs no change here. A member that fails before the first
+# byte (404, 408, 429, 5xx) is skipped for 30 s and the next one gets the
+# request. Responses name the member in x-eavs-route; GET /v1/eavs/pools shows
+# the current pick. Concrete model names never fall back. Enable
+# [providers.<name>.probe] on local runtimes so wildcards follow them.
+#
+# [pools.auto]
+# members = ["rtx6000/*", "qwen38-rtx/*", "fhgenie/deepseek-ai/DeepSeek-V4.1-Flash"]
+
+# =============================================================================
 # Policy Engine
 # =============================================================================
 # Apply deny/rewrite/filter rules to requests before proxying upstream.

@@ -112,11 +112,16 @@ Note: You'll need an AUR account to do this.
    git commit -m "chore: bump version to 0.5.3"
    ```
 
-3. Tag the release:
+3. Tag the release and publish it:
    ```bash
-   git tag v0.5.3
-   git push origin v0.5.3
+   git tag -a v0.5.3 -m "Release v0.5.3"
+   git push origin main v0.5.3
+   byt publish export --tag v0.5.3 --push
    ```
+   Releases are cut in the maintainers' working repository. `byt publish`
+   writes the public snapshot of the tagged commit, puts the same tag on it and
+   pushes both; the tag push starts the release workflow. `just release X.Y.Z`
+   does all of this.
 
 4. The GitHub Actions workflow will automatically:
    - Build binaries for all platforms

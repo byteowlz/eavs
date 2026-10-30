@@ -1,7 +1,8 @@
 [package]
 name = "eavs"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
+rust-version = "1.90"
 license = "MIT"
 
 [dependencies]

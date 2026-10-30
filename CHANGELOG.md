@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-30
+
+### Added
+- Pools (ADR-0026): virtual models that route to whichever member is available.
+  Request `model: "auto"`, `"auto/<pool>"` or `/auto/v1/...`; members are tried
+  in order, `provider/*` follows what a probed runtime serves, failures before
+  the first byte move the request to the next member (30 s cooldown),
+  conversations with a session header stay on their member, and responses name
+  the member in `x-eavs-route`. `GET /v1/eavs/pools` shows the current pick.
+  Works without dpty, from probes and request outcomes alone.
+- `POST /admin/models/efforts/detect` (CLI: `eavs models efforts <provider>
+  <model>`): measure which reasoning-effort levels a model accepts by sending
+  one short request per level and reading only the HTTP status (2xx accepted,
+  400/422 rejected, anything else aborts without saving). The stored set is
+  used to rewrite unsupported levels before forwarding and is published in the
+  catalog.
+
+### Changed
+- Accepted reasoning-effort levels are declared (`reasoning_efforts`) or
+  measured, never guessed from upstream error texts: the message parser that
+  learned sets from 400 bodies is gone (it missed wordings such as LiteLLM's
+  DeepSeek V4 error, so `medium` was rejected instead of rewritten). For a
+  model with no known set, an upstream 400 passes through unchanged with an
+  `x-eavs-hint` header naming the measurement command. Sets learned earlier
+  stay in effect.
+
+## [0.10.1] - 2026-10-29
+
+### Fixed
+- Build with the toolchain the release builder actually pins. `Duration::from_mins`
+  and `Duration::from_hours` are still unstable in const position on rustc 1.90,
+  which `ghcr.io/byteowlz/byt` fixes for the Linux release job, so
+  `build-linux` failed in `subscription_usage.rs` and `model_catalog.rs` before
+  it could even reach the link step. The same durations are now written with
+  `Duration::from_secs`, which is identical at every call site.
+
 ### Removed
 - The MyGo desktop client (`ui/desktop`), its `just` recipes and the X11
   window test, superseded by the GPUI console (ADR-0022). Device status,

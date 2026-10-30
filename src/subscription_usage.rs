@@ -30,11 +30,11 @@ use tracing::{debug, info};
 use crate::upstream::{Upstream, UpstreamRequest};
 
 /// How often the background loop revisits every account.
-const POLL_INTERVAL: Duration = Duration::from_mins(5);
+const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Minimum spacing between two reads of one account (manual refreshes too).
-const MIN_REFRESH: Duration = Duration::from_mins(1);
+const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// Default back-off after a 429 without `retry-after`.
-const RATE_LIMIT_BACKOFF: Duration = Duration::from_mins(15);
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Bound on a usage response body.
 const MAX_BODY: usize = 256 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1116,14 +1116,18 @@ mod tests {
         tracker
             .record(
                 &target,
-                Fetch::RateLimited(Some(Duration::from_mins(20))),
+                Fetch::RateLimited(Some(Duration::from_secs(20 * 60))),
                 later,
             )
             .await;
         let snapshot = tracker.snapshot().await;
         assert_eq!(snapshot[0].status, UsageStatus::Stale);
         assert_eq!(snapshot[0].meters[0].used, Some(40.0));
-        assert!(!tracker.due(&target, later + Duration::from_mins(10)).await);
+        assert!(
+            !tracker
+                .due(&target, later + Duration::from_secs(10 * 60))
+                .await
+        );
         assert!(
             tracker
                 .due(&target, later + Duration::from_secs(1201))
